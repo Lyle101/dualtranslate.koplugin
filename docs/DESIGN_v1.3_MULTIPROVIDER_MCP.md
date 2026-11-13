@@ -1651,6 +1651,7 @@ logger.dbg, logger.info, logger.warn, logger.err = to_stderr("DBG"), to_stderr("
 
 - `translate_overlay` 增加 `provider` 参数（P0 先加在参数末尾；P1 改 options 表）。
 - `save_checkpoint` 写入 `provider = provider`，并断言 `provider` 非空。
+- `save_checkpoint` 在 `#entries == 0` 时必须直接返回，不写文件：切换 provider 后如果新服务全部失败，空 checkpoint 会把旧服务已完成的 overlay 覆盖掉。
 - 加载 `previous` 时增加兼容判断：
 
 ```lua

@@ -385,8 +385,7 @@ function dualtranslate:confirmClearCache()
                             TranslationUI.showInfo("这本书正在翻译，请在任务结束后再清除。")
                             return
                         end
-                        local removed, cleared_path = self:removeTranslationFilesForBook(book_path)
-                        self.cache:clearForBook(cleared_path or book_path)
+                        local removed = self:clearBookTranslationData(book_path)
                         self:saveSetting("translation_visible", false)
                         -- Stop follow-mode after a clear: the page-turn
                         -- scheduler must not immediately re-translate the

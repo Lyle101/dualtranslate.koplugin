@@ -131,18 +131,20 @@ function Cache:open()
     return db
 end
 
-function Cache:lookupForBook(book_path, source_lang, target_lang, source_text)
-    if not book_path then return nil end
+function Cache:lookupForBook(book_path, source_lang, target_lang, source_text, provider)
+    if not book_path or not provider or provider == "" then return nil end
     local row = self:_query([[
         SELECT translated_text, provider FROM book_translations
         WHERE book_path = ? AND source_lang = ? AND target_lang = ? AND source_text = ?
+          AND provider = ?
         LIMIT 1
-    ]], book_path, source_lang, target_lang, source_text)
+    ]], book_path, source_lang, target_lang, source_text, provider)
     if not row then return nil end
     self:_execute([[
         UPDATE book_translations SET last_used_at = ?, use_count = use_count + 1
         WHERE book_path = ? AND source_lang = ? AND target_lang = ? AND source_text = ?
-    ]], os.time(), book_path, source_lang, target_lang, source_text)
+          AND provider = ?
+    ]], os.time(), book_path, source_lang, target_lang, source_text, provider)
     return { translated_text = row[1], provider = row[2], cached = true }
 end
 

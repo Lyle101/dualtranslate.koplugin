@@ -86,19 +86,19 @@ local stubs = {
     ["libs/libkoreader-lfs"] = {
         attributes = function(p, m)
             if m == "mode" then
-                local kind = io.popen('stat -c "%F" "' .. p .. '" 2>/dev/null'):read("*l")
-                if kind == "directory" then return "directory" end
-                if kind == "regular file" or kind == "regular empty file" then return "file" end
-                return nil
+                local f = io.popen('if [ -d "' .. p .. '" ]; then echo directory; '
+                    .. 'elif [ -f "' .. p .. '" ]; then echo file; fi')
+                local kind = f:read("*l")
+                f:close()
+                return kind
             end
             if m == "modification" then
-                local t = io.popen('stat -c "%Y" "' .. p .. '" 2>/dev/null'):read("*l")
-                return tonumber(t) or 0
+                return 0
             end
             return nil
         end,
-        mkdir = function(p) os.execute("mkdir -p " .. p) return true end,
-        rmdir = function(p) os.execute("rmdir " .. p) return true end,
+        mkdir = function(p) os.execute('mkdir -p "' .. p .. '"') return true end,
+        rmdir = function(p) os.execute('rmdir "' .. p .. '"') return true end,
         remove = function(p) os.remove(p) return true end,
         dir = function(p)
             local entries = {}
@@ -141,7 +141,8 @@ _G.G_reader_settings = {
     readSetting = function(self, key) return settings[key] end,
     saveSetting = function(self, key, value) settings[key] = value end,
 }
-package.path = "/home/user/Doubao/chats/38441681735635970/kotranslate_xplatform/?.lua;" .. package.path
+local script_dir = (arg and arg[0] or ""):match("^(.*)/") or "."
+package.path = script_dir .. "/../?.lua;" .. package.path
 
 local Overlay = require("dualtranslate_overlay")
 local Tools = require("dualtranslate_tools")
@@ -153,7 +154,12 @@ local Reader = require("dualtranslate_reader")
 local plugin = { getSetting = function(self, key, d) return settings[key] ~= nil and settings[key] or d end }
 Reader.attach(plugin)
 -- need cache etc.
-plugin.cache = { clearForBook = function() end, close = function() end, open = function() end }
+local cleared_books = {}
+plugin.cache = {
+    clearForBook = function(_, path) cleared_books[#cleared_books + 1] = path end,
+    close = function() end,
+    open = function() end,
+}
 plugin.getTargetLang = function(self) return settings["dualtranslate_target_lang"] or "zh-Hans" end
 plugin.getSourceLang = function(self) return settings["dualtranslate_source_lang"] or "auto" end
 plugin.getMode = function(self) return settings["dualtranslate_mode"] or "microsoft_free" end
@@ -193,9 +199,14 @@ assert(#notified == 0, "no false 'already translated' notification, got " .. tos
 print("  stale complete no longer blocks chapter mode")
 
 -- 4. 清除译文
-local removed, cleared_path = plugin:removeTranslationFilesForBook(book)
-print("  removed:", removed, "cleared_path:", cleared_path)
+local removed = plugin:removeTranslationFilesForBook(book)
+print("  removed:", removed)
 assert(removed == 1, "expected 1 overlay removed, got " .. tostring(removed))
+-- 统一入口必须把原书路径传给 Cache:clearForBook（B1 回归）
+local removed_again = plugin:clearBookTranslationData(book)
+assert(removed_again == 0, "second clear should remove no overlay")
+assert(cleared_books[#cleared_books] == book,
+    "clearForBook must receive the book path, got " .. tostring(cleared_books[#cleared_books]))
 -- 检查 overlay 是否真的删除
 local f = io.open(overlay_path, "rb")
 print("  overlay exists after clear:", f ~= nil)

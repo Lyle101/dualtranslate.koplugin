@@ -78,7 +78,7 @@ function dualtranslate:translateTextForEpub(text)
 
     if self:isCacheEnabled() then
         local cached = self.cache:lookupForBook(self._active_translation_book,
-            source_lang, target_lang, text)
+            source_lang, target_lang, text, mode)
         if cached and cached.translated_text then
             return cached.translated_text, nil
         end
@@ -115,7 +115,7 @@ function dualtranslate:translateTextForEpub(text)
     if result and result.translated_text and result.translated_text ~= "" then
         if self:isCacheEnabled() then
             self.cache:storeForBook(self._active_translation_book, source_lang,
-                target_lang, text, result.translated_text, result.provider or mode)
+                target_lang, text, result.translated_text, mode)
         end
         return result.translated_text, nil
     end
@@ -166,7 +166,6 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
     local data_dir = DataStorage:getDataDir()
     local books_root = data_dir .. "/cache/dualtranslate/books/"
     local removed = 0
-    local cleared_dir
     -- 1) Fast path: the directory for the *current* target language.  This
     -- also catches legacy overlays that carry no book metadata.
     local current_dir = self:getBookCacheDirectory(book_path)
@@ -176,7 +175,7 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
     end
     if current_dir:sub(1, #books_root) == books_root
         and #current_dir > #books_root then
-        if Tools.rmtree(current_dir) then cleared_dir = current_dir end
+        Tools.rmtree(current_dir)
     end
     -- 2) Sweep every other language directory whose overlay belongs to this
     -- same book (metadata written since v1.2.11).  Otherwise, if the target
@@ -198,7 +197,20 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
             end
         end
     end
-    return removed, cleared_dir or book_path
+    return removed
+end
+
+-- Single entry point for "clear this book": overlay files and the SQLite
+-- cache must use the same book_path.  Keeping the two calls together makes
+-- the argument contract explicit and testable (the old code accidentally
+-- passed the cache directory to Cache:clearForBook).
+function dualtranslate:clearBookTranslationData(book_path)
+    if not book_path then return 0 end
+    local removed = self:removeTranslationFilesForBook(book_path)
+    if self.cache and self.cache.clearForBook then
+        self.cache:clearForBook(book_path)
+    end
+    return removed
 end
 
 -- Best-effort detection of the current spine chapter index.  CREngine
@@ -485,7 +497,8 @@ function dualtranslate:_runTranslation(item)
                         end,
                         self:getBookCacheDirectory(book_path),
                         item.span,
-                        progress_path .. ".cancel"
+                        progress_path .. ".cancel",
+                        self:getMode()
                     )
                     if not run_ok then return nil, "翻译过程异常：" .. tostring(run_info) end
                     if not run_info then return nil, run_err end
@@ -863,7 +876,8 @@ end
 -- item. Batch short paragraphs to reduce network round trips while keeping
 -- the original paragraph boundaries for EPUB insertion.
 function dualtranslate:translateTextBatchForEpub(texts)
-    if self:getMode() ~= "microsoft_free" then
+    local mode = self:getMode()
+    if mode ~= "microsoft_free" then
         local results = {}
         local first_error
         for index, text in ipairs(texts) do
@@ -893,7 +907,7 @@ function dualtranslate:translateTextBatchForEpub(texts)
             end
         elseif self:isCacheEnabled() then
             local cached = self.cache:lookupForBook(self._active_translation_book,
-                self:getSourceLang(), self:getTargetLang(), text)
+                self:getSourceLang(), self:getTargetLang(), text, mode)
             if cached and cached.translated_text then
                 results[index] = cached.translated_text
             else
@@ -916,7 +930,6 @@ function dualtranslate:translateTextBatchForEpub(texts)
             total_bytes = total_bytes + #item.text
             batch_start = batch_start + 1
         end
-        local mode = self:getMode()
         local translated, err
         translated, err = Providers.translate_microsoft_free_batch(
             batch_texts, self:getSourceLang(), self:getTargetLang())

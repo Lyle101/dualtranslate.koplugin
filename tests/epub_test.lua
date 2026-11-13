@@ -229,7 +229,11 @@ do
     package.preload["dualtranslate_overlay"] = function()
         return {
             save = function(path, data)
-                local f = io.open(path, "w"); f:write("saved:" .. tostring(data.complete) .. ":" .. tostring(#data.entries) .. ":" .. tostring(data.chapters and #data.chapters or 0)); f:close()
+                local f = io.open(path, "w")
+                f:write("saved:" .. tostring(data.complete) .. ":" .. tostring(#data.entries)
+                    .. ":" .. tostring(data.chapters and #data.chapters or 0)
+                    .. ":" .. tostring(data.provider))
+                f:close()
                 return true
             end,
             load = function(path) return nil end,
@@ -269,7 +273,8 @@ do
         end,
         output_dir,
         nil, -- span
-        nil) -- cancel_path
+        nil, -- cancel_path
+        "microsoft_free")
     check("整书翻译成功", result ~= nil, tostring(err))
     check("整书翻译输出", result and result.overlay == true)
     check("整书翻译章节数", result and result.chapters == 2)
@@ -278,7 +283,7 @@ do
     local saved1 = io.open("/tmp/dualtranslate_out1/overlay.json", "r")
     local saved1_line = saved1 and saved1:read("*l")
     if saved1 then saved1:close() end
-    check("整书 chapters 覆盖标记", saved1_line and saved1_line:match(":2$") ~= nil, tostring(saved1_line))
+    check("整书 chapters 覆盖标记", saved1_line and saved1_line:match(":2:microsoft_free$") ~= nil, tostring(saved1_line))
     -- 进度文件存在且格式正确
     check("进度文件在过程中写入", progress_seen ~= nil, tostring(progress_seen))
     check("进度文件格式", progress_seen and progress_seen:match("^(%d+)|(%d+)|(%d+)|(%d+)|(%d+)|(%d+)$") ~= nil, tostring(progress_seen))
@@ -292,7 +297,7 @@ do
         false, -- 章节
         progress_path2,
         function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
-        output_dir2, 1, nil)
+        output_dir2, 1, nil, "microsoft_free")
     check("章节模式成功", result2 ~= nil, tostring(err2))
     check("章节模式只翻一章", result2 and result2.chapters == 1)
     check("章节模式段落数", result2 and result2.translated == 1)
@@ -300,7 +305,7 @@ do
     local saved2 = io.open("/tmp/dualtranslate_out2/overlay.json", "r")
     local saved2_line = saved2 and saved2:read("*l")
     if saved2 then saved2:close() end
-    check("章节模式 chapters 覆盖标记", saved2_line and saved2_line:match("^saved:false:%d+:1$") ~= nil, tostring(saved2_line))
+    check("章节模式 chapters 覆盖标记", saved2_line and saved2_line:match("^saved:false:%d+:1:microsoft_free$") ~= nil, tostring(saved2_line))
 
     -- 取消标志
     local output_dir3 = "/tmp/dualtranslate_out3"
@@ -310,14 +315,14 @@ do
     local result3 = Epub2:translate_overlay("/books/x.epub", "1", "zh-Hans", "auto",
         function(text) return "T:" .. text end, true, "/tmp/dualtranslate_prog3.txt",
         function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
-        output_dir3, nil, cancel_flag)
+        output_dir3, nil, cancel_flag, "microsoft_free")
     check("取消标志生效", result3 and result3.cancelled == true)
     os.remove(cancel_flag)
 
     -- 非 EPUB 报错
     local bad_res, bad_err = Epub2:translate_overlay("/books/x.txt", "1", "zh-Hans", "auto",
         function(text) return "T" end, true, "/tmp/p.txt",
-        function(texts) return {} end, "/tmp/out4", nil, nil)
+        function(texts) return {} end, "/tmp/out4", nil, nil, "system")
     check("非 EPUB 报错", bad_res == nil and bad_err and bad_err:find("EPUB") ~= nil)
 end
 

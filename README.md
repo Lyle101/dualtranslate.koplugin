@@ -61,6 +61,8 @@ KOReader 的插件目录是安装根目录下的 `plugins/` 文件夹，目录�
 
 - 升级只替换 `plugins/dualtranslate.koplugin/` 目录即可；译文、缓存、队列与设置保存在 KOReader 数据目录，**不会丢失**。
 - 若从旧版 KoTranslate 升级：旧配置 `dualtranslate_configuration.lua` 会自动迁移；旧译文数据不会被读取，需重新翻译（overlay 方案与旧版不兼容）。
+- 本版 P0 修复后，缓存查询与 overlay 续跑会记录 `provider`。升级前已存在的 overlay 没有 `provider` 字段，会按当前「翻译服务」认领一次；如果希望按新服务强制重译，请先执行「清除本书译文」。
+- 当前 overlay 仍是单文件：切换服务后，新服务只要成功写入 checkpoint，旧服务的 overlay 条目就会被替换；想保留旧服务译文，请先备份 `overlay.json` 或等后续按服务分文件的版本。新服务请求全部失败时不会写空 checkpoint 覆盖旧数据。
 
 ## 使用
 
@@ -92,6 +94,9 @@ lua tests/fulltest.lua
 lua tests/epub_test.lua
 lua tests/state2_test.lua
 lua tests/cache_test.lua
+lua tests/cache_provider_test.lua
+lua tests/clear_path_test.lua
+lua tests/overlay_provider_test.lua
 lua tests/langmenu_test.lua
 lua tests/callcheck.lua
 lua tests/queueui_test.lua

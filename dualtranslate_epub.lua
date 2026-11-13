@@ -249,9 +249,15 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
 end
 
 function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
-        translate, all_chapters, progress_path, translate_batch, output_dir, span, cancel_path)
+        translate, all_chapters, progress_path, translate_batch, output_dir, span,
+        cancel_path, provider)
     if not book_path:lower():match("%.epub$") then
         return nil, "整书翻译目前仅支持 EPUB"
+    end
+    -- P0: the provider is part of the overlay identity.  Without it a
+    -- provider switch can silently reuse the previous service's entries.
+    if not provider or provider == "" then
+        return nil, "缺少翻译服务标识"
     end
     local data_dir = DataStorage:getDataDir()
     local nonce = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
@@ -318,7 +324,11 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
     if previous
         and previous.book_path == book_path
         and previous.source_lang == source_lang
-        and previous.target_lang == target_lang then
+        and previous.target_lang == target_lang
+        -- v1.2.11 overlays have no provider field.  Accept them once as the
+        -- currently configured provider so an upgrade does not discard a
+        -- finished book; the next checkpoint stamps the actual provider.
+        and (previous.provider == provider or previous.provider == nil) then
         for _, entry in ipairs(previous.entries or {}) do
             if entry.selector and entry.translation then
                 entries[#entries + 1] = entry
@@ -332,8 +342,12 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
         end
     end
     local function save_checkpoint(complete)
+        -- Never replace an existing overlay with an empty one.  When the
+        -- provider changed and every request failed, writing an empty
+        -- checkpoint would erase the previous provider's finished entries.
+        if #entries == 0 then return true end
         return Overlay.save(output, {
-            version = 2, complete = complete == true,
+            version = 2, complete = complete == true, provider = provider,
             book_path = book_path, source_lang = source_lang,
             target_lang = target_lang, entries = entries,
             -- Spine indexes covered so far.  Chapter-mode runs never set

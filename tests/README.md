@@ -7,6 +7,9 @@
     lua tests/epub_test.lua     # EPUB resolve / 段落收集 / translate_overlay 完整流程
     lua tests/state2_test.lua   # loadConfig 迁移 / loadQueue 边界
     lua tests/cache_test.lua    # SQLite cache（mock）
+    lua tests/cache_provider_test.lua  # P0：缓存查询按 provider 隔离
+    lua tests/clear_path_test.lua      # P0：清除路径必须传书路径
+    lua tests/overlay_provider_test.lua # P0：overlay 续跑按 provider 隔离
     lua tests/langmenu_test.lua # 语言子菜单闭包
     lua tests/callcheck.lua     # 方法调用完整性
 
