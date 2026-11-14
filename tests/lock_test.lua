@@ -9,6 +9,27 @@ package.cpath = KO .. "/?.so;" .. KO .. "/?.dylib;" .. package.cpath
 local ok, lfs = pcall(require, "libs/libkoreader-lfs")
 if not ok then print("SKIP: libkoreader-lfs unavailable"); os.exit(0) end
 
+-- ffi/util stub（锁模块依赖 sleep/usleep/getTimestamp）：用 libc 提供
+-- 真实亚秒睡眠与墙钟，保持计时断言语义；不依赖 KOReader 的 Lua 树。
+local ffi = require("ffi")
+pcall(ffi.cdef, [[
+    int usleep(unsigned int usec);
+    typedef struct { long tv_sec; int tv_usec; } dt_timeval;
+    int gettimeofday(dt_timeval *tv, void *tz);
+]])
+local function wallclock()
+    local tv = ffi.new("dt_timeval")
+    ffi.C.gettimeofday(tv, nil)
+    return tonumber(tv.tv_sec) + tonumber(tv.tv_usec) / 1e6
+end
+package.preload["ffi/util"] = function()
+    return {
+        sleep = function(sec) ffi.C.usleep(math.floor(sec * 1e6)) end,
+        usleep = function(usec) ffi.C.usleep(math.floor(usec)) end,
+        getTimestamp = wallclock,
+    }
+end
+
 local passed, failed = 0, 0
 local function check(name, cond, detail)
     if cond then passed = passed + 1; print("  PASS:", name)
@@ -48,14 +69,15 @@ print("== 2. 互斥：锁被占用时等待并超时 ==")
 do
     local dir = ROOT .. "/busy"
     os.execute('mkdir -p "' .. dir .. '/.lock"')
-    local started = os.clock()
+    local started = wallclock()
     local result, err = Lock.withBookLock(dir, function()
         error("must not run")
     end, { timeout = 0.2, interval = 0.02 })
-    local elapsed = os.clock() - started
+    local elapsed = wallclock() - started
     check("占用时返回 nil + 错误", result == nil and type(err) == "string", tostring(err))
     check("错误信息含 timeout", err and err:find("timeout", 1, true) ~= nil, tostring(err))
     check("确实等待了（>=0.15s）", elapsed >= 0.15, string.format("%.3f", elapsed))
+    check("超时按墙钟累计（<1s，睡眠不拉长超时）", elapsed < 1.0, string.format("%.3f", elapsed))
     check("不偷锁：锁目录仍在", isdir(dir .. "/.lock"))
     lfs.rmdir(dir .. "/.lock")
     local ran = false
@@ -93,6 +115,69 @@ do
     local result3 = Lock.withBookLock(dir, function() ran3 = true return true end,
         { timeout = 1, interval = 0.05, stale_seconds = 1 })
     check("自定义 stale_seconds 生效", ran3 and result3 == true)
+end
+
+-- ============================================================
+print("== 3b. stale 回收 TOCTOU：rmdir 前/后复检 ==")
+do
+    -- 场景 A：竞争者在本进程判定 stale 之后、rmdir 之前刷新了锁。
+    -- 第二次 mtime 读取已看到新锁 → 绝不能 rmdir 抢占。
+    local dir = ROOT .. "/stale_race_a"
+    local lockdir = dir .. "/.lock"
+    os.execute('mkdir -p "' .. lockdir .. '"')
+    local old = os.time() - 301
+    lfs.touch(lockdir, old, old)
+    local real_attributes = lfs.attributes
+    local reads = 0
+    lfs.attributes = function(path, req)
+        if path == lockdir and req == "modification" then
+            reads = reads + 1
+            if reads == 2 then
+                local now = os.time()
+                lfs.touch(lockdir, now, now)
+                return now
+            end
+        end
+        return real_attributes(path, req)
+    end
+    local ran = false
+    local result, err = Lock.withBookLock(dir, function() ran = true end,
+        { timeout = 0.2, interval = 0.02 })
+    lfs.attributes = real_attributes
+    check("rmdir 前复检：不抢占刚刷新的锁", not ran and result == nil and err ~= nil, tostring(err))
+    check("竞争者的锁保留", isdir(lockdir))
+    local mtime = lfs.attributes(lockdir, "modification")
+    check("保留的是新锁（mtime 已刷新）", mtime and os.time() - mtime < 5, tostring(mtime))
+    lfs.rmdir(lockdir)
+
+    -- 场景 B：本进程 rmdir 成功后，竞争者立刻重建了新锁。
+    -- rmdir 后复检发现锁目录又存在 → 回到等待循环直至超时。
+    local dir_b = ROOT .. "/stale_race_b"
+    local lockdir_b = dir_b .. "/.lock"
+    os.execute('mkdir -p "' .. lockdir_b .. '"')
+    lfs.touch(lockdir_b, old, old)
+    local real_rmdir, real_mkdir = lfs.rmdir, lfs.mkdir
+    local raced = false
+    lfs.rmdir = function(path)
+        local ok = real_rmdir(path)
+        if ok and path == lockdir_b and not raced then
+            raced = true
+            real_mkdir(path)
+            local marker = io.open(path .. "/owner", "w")
+            marker:write("B")
+            marker:close()
+        end
+        return ok
+    end
+    local ran_b = false
+    local result_b, err_b = Lock.withBookLock(dir_b, function() ran_b = true end,
+        { timeout = 0.2, interval = 0.02 })
+    lfs.rmdir = real_rmdir
+    check("rmdir 后复检：不覆盖竞争者的新锁", not ran_b and result_b == nil and err_b ~= nil, tostring(err_b))
+    check("竞争者的新锁仍在（含标记）", isdir(lockdir_b)
+        and io.open(lockdir_b .. "/owner", "rb") ~= nil)
+    os.remove(lockdir_b .. "/owner")
+    lfs.rmdir(lockdir_b)
 end
 
 -- ============================================================

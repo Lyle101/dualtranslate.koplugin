@@ -76,6 +76,34 @@ function State.saveQueue(plugin)
     return true
 end
 
+-- 13.4: older persisted queue items may predate the current field set.
+-- Normalize the job shape (whole-book vs chapter span) from the legacy
+-- all_chapters/fragment fields; an item whose shape cannot be inferred is
+-- marked failed so the queue menu surfaces it instead of a worker crashing.
+-- provider is deliberately left nil here: a resumed job picks up its own
+-- provider at start time (Reader:_runTranslation), never the mode that
+-- happens to be selected when the queue loads.
+local function backfill_queue_item(item)
+    if item.provider == "" then item.provider = nil end
+    if item.all_chapters == nil then
+        if item.fragment ~= nil and item.fragment ~= "" then
+            item.all_chapters = false
+        else
+            item.status = "failed"
+            item.error = "旧队列任务无法推断翻译范围，请重新发起翻译"
+            logger.warn("dualtranslate: legacy queue item without inferable scope:",
+                tostring(item.book_path))
+            return
+        end
+    end
+    if item.all_chapters then
+        item.fragment = nil
+        item.span = nil
+    else
+        item.span = tonumber(item.span) or 1
+    end
+end
+
 function State.loadQueue()
     local ok, value = pcall(dofile, State.getQueuePath())
     local queue = ok and type(value) == "table" and value or {}
@@ -87,6 +115,7 @@ function State.loadQueue()
             logger.warn("dualtranslate: dropping malformed queue entry")
         else
             if item.status == "active" then item.status = "queued" end
+            backfill_queue_item(item)
             local key = tostring(item.book_path or "") .. "\0" .. tostring(item.all_chapters)
             local retryable = item.status == "failed" and item.all_chapters
                 and (tonumber(item.retry_count) or 0) < 2

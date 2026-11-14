@@ -524,6 +524,14 @@ function dualtranslate:_runTranslation(item)
                     if type(Epub) ~= "table" then
                         return nil, "DualTranslate 模块加载失败：dualtranslate_epub.lua 缺失或损坏，请删除旧插件目录后重新安装"
                     end
+                    -- 13.4: a resumed job keeps the engine it was enqueued
+                    -- with; only legacy items without a provider fall back
+                    -- to the currently selected mode (and say so).
+                    local provider = item.provider
+                    if not provider or provider == "" then
+                        provider = self:getMode()
+                        logger.warn("dualtranslate: queue item without provider, using current mode:", provider)
+                    end
                     local run_ok, run_info, run_err = pcall(Epub.translate_overlay, Epub,
                         book_path, fragment, self:getTargetLang(), self:getSourceLang(),
                         function(text, context)
@@ -537,7 +545,7 @@ function dualtranslate:_runTranslation(item)
                         self:getBookCacheDirectory(book_path),
                         item.span,
                         progress_path .. ".cancel",
-                        self:getMode()
+                        provider
                     )
                     if not run_ok then return nil, "翻译过程异常：" .. tostring(run_info) end
                     if not run_info then return nil, run_err end

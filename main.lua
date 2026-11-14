@@ -405,7 +405,10 @@ function dualtranslate:buildDisplayMenu()
         callback = function()
             if not path then return end
             local manifest = self:currentManifest()
-            local enabled = manifest and manifest.display_fallback ~= false or true
+            -- Same semantics as checked_func: no manifest means the default
+            -- (enabled).  Parenthesize the and/or so a stored false actually
+            -- reads as disabled and the toggle can turn it back on.
+            local enabled = not manifest or manifest.display_fallback ~= false
             local ok, result, err = pcall(Store.setDisplayFallback, path, target_lang, not enabled)
             if not ok or not result then
                 TranslationUI.showInfo(_("设置回退失败：") .. tostring(ok and err or result))
@@ -454,6 +457,15 @@ end
 function dualtranslate:confirmDeleteProvider(provider_id, display_name, count)
     local book_path = self:currentBookPath()
     if not book_path then return end
+    -- 6.2.1: DB rows are not segments.  Refresh the entries-based
+    -- translated_count so the confirmation dialog and the success notice
+    -- report the same figure the menu shows.
+    for _, item in ipairs(Store.listProviders(book_path, self:getTargetLang())) do
+        if item.id == provider_id then
+            count = item.count
+            break
+        end
+    end
     local ButtonDialog = require("ui/widget/buttondialog")
     local dialog
     dialog = ButtonDialog:new{
@@ -483,7 +495,7 @@ function dualtranslate:confirmDeleteProvider(provider_id, display_name, count)
                     self._page_translation_overlay_state = nil
                     self:refreshDocumentStyles()
                     TranslationUI.showInfo(string.format(_("已删除 %s 译文 %d 段"),
-                        display_name, result.deleted or 0))
+                        display_name, count or 0))
                 end,
             },
         }},
@@ -594,11 +606,16 @@ function dualtranslate:confirmClearCache()
                     text = _("Clear"),
                     callback = function()
                         local book_path = self.ui and self.ui.document and self.ui.document.file
-                        if not self:clearTranslationQueueForBook(book_path) then
+                        -- 9.3: any queued/active job of any provider for this
+                        -- book blocks the clear (same State.hasActiveJob guard
+                        -- as the per-provider delete), not just a worker that
+                        -- happens to be running right now.
+                        if self:hasActiveJob(book_path) then
                             UIManager:close(dialog)
                             TranslationUI.showInfo("这本书正在翻译，请在任务结束后再清除。")
                             return
                         end
+                        self:clearTranslationQueueForBook(book_path)
                         -- v3: the SQLite rows and per-provider entries must
                         -- go through the delete protocol before the book
                         -- directories are swept (9.1/9.2).

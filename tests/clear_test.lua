@@ -80,7 +80,8 @@ local stubs = {
     ["gettext"] = _,
     ["datastorage"] = { getDataDir = function() return REPRO end },
     ["util"] = { makePath = function(p) os.execute("mkdir -p " .. p) return true end, trim = function(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end },
-    ["ffi/util"] = { template = template },
+    ["ffi/util"] = { template = template, sleep = function() end, usleep = function() end,
+        getTimestamp = function() return os.time() end },
     ["ffi/archiver"] = {},
     ["device"] = { screen = { getWidth = function() return 600 end, getHeight = function() return 800 end } },
     ["libs/libkoreader-lfs"] = {

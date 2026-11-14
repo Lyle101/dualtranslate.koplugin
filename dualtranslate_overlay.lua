@@ -23,11 +23,22 @@ local function write_file(path, data)
     -- Atomic replacement: rename(2) overwrites the destination on POSIX, so
     -- there is no window where the old overlay is gone but the new one is
     -- not yet in place (a crash mid-checkpoint keeps the previous file).
+    -- Durability: a failed write/close (e.g. full disk) must never rename a
+    -- truncated tmp over the good file; drop the tmp and report failure.
     local temporary = path .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return false end
-    file:write(data)
-    file:close()
+    local written = file:write(data)
+    if not written then
+        file:close()
+        os.remove(temporary)
+        return false
+    end
+    local closed = file:close()
+    if not closed then
+        os.remove(temporary)
+        return false
+    end
     if not os.rename(temporary, path) then
         os.remove(temporary)
         return false

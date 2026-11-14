@@ -626,11 +626,46 @@ do
     handle:write("this is not a sqlite database at all")
     handle:close()
     local cache = Cache:new()
-    check("corrupt: open 降级为 nil", cache:open() == nil)
-    check("corrupt: 查询降级为 cache miss",
+    -- 9.3：ljsqlite3 对损坏头 open 不抛错，首次 prepare 才报
+    -- "file is not a database"；检测到损坏类错误必须删库重建。
+    local db = cache:open()
+    check("corrupt: open 删库重建", db ~= nil)
+    check("corrupt: 重建后 schema v3", db ~= nil and count(db, "PRAGMA user_version") == 3)
+    check("corrupt: 重建后内置 provider 已 seed",
+        db ~= nil and count(db, "SELECT COUNT(*) FROM providers") == 2)
+    check("corrupt: 旧数据不残留",
+        db ~= nil and count(db, "SELECT COUNT(*) FROM book_translations") == 0)
+    check("corrupt: 重建后可写可读",
+        cache:storeForBook("/b.epub", "auto", "zh-Hans", "Hello", "你好", "system") == true
+        and cache:lookupForBook("/b.epub", "auto", "zh-Hans", "Hello", "system")
+            .translated_text == "你好")
+    cache:close()
+    -- initSchema 独立入口（Store.migrateIfNeeded 口径）同样重建
+    local handle2 = assert(io.open(dbPath(dir), "wb"))
+    handle2:write("garbage header again")
+    handle2:close()
+    local cache2 = Cache:new()
+    check("corrupt: initSchema 直接入口也重建", cache2:initSchema() == true)
+    check("corrupt: initSchema 重建后可用",
+        count(cache2.db, "PRAGMA user_version") == 3)
+    cache2:close()
+end
+do
+    -- 非损坏类错误（路径被非空目录占据，cantopen）仍降级为 nil，
+    -- 且不得误删用户目录。
+    local dir = newDir("unopenable")
+    os.execute('mkdir -p "' .. dbPath(dir) .. '"')
+    local blocker = assert(io.open(dbPath(dir) .. "/blocker.txt", "w"))
+    blocker:write("keep me")
+    blocker:close()
+    local cache = Cache:new()
+    check("cantopen: open 降级为 nil", cache:open() == nil)
+    check("cantopen: 查询降级为 cache miss",
         cache:lookupForBook("/b.epub", "auto", "zh-Hans", "Hello", "system") == nil)
-    check("corrupt: 写入降级为 false",
+    check("cantopen: 写入降级为 false",
         cache:storeForBook("/b.epub", "auto", "zh-Hans", "Hello", "你好", "system") == false)
+    check("cantopen: 目录与用户文件未被误删",
+        fileExists(dbPath(dir) .. "/blocker.txt"))
 end
 
 -- ============================================================

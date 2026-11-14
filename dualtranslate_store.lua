@@ -275,12 +275,18 @@ function Store.deleteProvider(book_path, target_lang, provider_id)
     local dir = Store.bookDir(book_path, target_lang)
     local cache = default_cache()
     return Lock.withBookLock(dir, function()
-        Overlay.saveIntent(dir, {
+        -- 9.2/D11: the intent must be on disk before anything is deleted.
+        -- If it cannot be written (e.g. full disk), abort: deleting without
+        -- an intent would let reconcile treat the removed provider's rows
+        -- as orphans and patch them back after a crash.
+        if not Overlay.saveIntent(dir, {
             op = "delete_provider",
             provider = provider_id,
             target_lang = target_lang,
             started_at = os.time(),
-        })
+        }) then
+            return nil, "cannot write delete intent"
+        end
 
         local deleted, err = cache:deleteProviderForBook(book_path, target_lang, provider_id)
         if deleted == nil then

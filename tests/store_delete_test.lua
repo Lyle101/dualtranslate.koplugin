@@ -248,6 +248,30 @@ do
 end
 
 -- ============================================================
+print("== 4b. intent 写失败：中止删除，不动 DB/entries/manifest ==")
+do
+    newCase("intent_failure")
+    local dir = seedV3Book(BOOK, LANG, { { id = "system", count = 2, kind = "builtin" } })
+    local manifest_before = Overlay.loadManifest(dir)
+    -- Store 内部用的是 require 缓存的 Overlay 实例；模拟满盘写意图失败
+    local StoreOverlay = assert(package.loaded["dualtranslate_overlay"])
+    local real_saveIntent = StoreOverlay.saveIntent
+    StoreOverlay.saveIntent = function() return false end
+    local result, err = Store.deleteProvider(BOOK, LANG, "system")
+    StoreOverlay.saveIntent = real_saveIntent
+    check("返回 nil + 错误", result == nil and type(err) == "string", tostring(err))
+    check("DB 行未删（崩溃后不会被当孤儿补回）", dbCount(BOOK, LANG, "system") == 2)
+    check("entries 未动", fileExists(Overlay.entriesPath(dir, "system")))
+    local manifest = Overlay.loadManifest(dir)
+    check("manifest 未动", manifest and manifest.providers.system
+        and manifest.revision == manifest_before.revision)
+    check("无 intent 残留", Overlay.loadIntent(dir) == nil)
+    check("锁已释放", lfs.attributes(dir .. "/.lock", "mode") == nil)
+    local recovered = Store.deleteProvider(BOOK, LANG, "system")
+    check("恢复后删除正常", recovered ~= nil and dbCount(BOOK, LANG, "system") == 0)
+end
+
+-- ============================================================
 print("== 5. intent 崩溃模拟（reconcile 收尾） ==")
 do
     newCase("intent_rollback")

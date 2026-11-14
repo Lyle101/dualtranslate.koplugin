@@ -57,7 +57,11 @@ package.preload["util"] = function()
         trim = function(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end,
         removeFile = function() end }
 end
-package.preload["ffi/util"] = function() return { template = function(s) return s end, md5 = function() return "x" end } end
+package.preload["ffi/util"] = function()
+    return { template = function(s) return s end, md5 = function() return "x" end,
+        sleep = function() end, usleep = function() end,
+        getTimestamp = function() return os.time() end }
+end
 package.preload["ffi/archiver"] = function()
     return { Reader = { new = function() return { open = function() return false end, close = function() end } end } }
 end
@@ -451,11 +455,18 @@ do
     local same_order = #m.fallback_order == #before_order
     for i, v in ipairs(before_order) do if m.fallback_order[i] ~= v then same_order = false end end
     check("display switch keeps fallback_order", same_order)
-    -- fallback toggle
+    -- fallback toggle: on -> off -> on（回归：and/or 优先级曾导致只能关不能开）
     local fb_before = m.display_fallback
+    check("fallback initially checked", fallback_row.checked_func() == true)
     fallback_row.callback()
     local m2 = Overlay.loadManifest(Store.bookDir(BOOK, lang))
     check("fallback toggled", m2.display_fallback ~= fb_before)
+    check("fallback off persisted + unchecked", m2.display_fallback == false
+        and fallback_row.checked_func() == false)
+    fallback_row.callback()
+    local m3 = Overlay.loadManifest(Store.bookDir(BOOK, lang))
+    check("fallback toggles back on", m3.display_fallback == true
+        and fallback_row.checked_func() == true)
     -- manage menu delete flow
     local manage = manage_item.sub_item_table_func()
     local delete_sub, clear_row, repair_row
@@ -482,15 +493,33 @@ do
     delete_sub.sub_item_table[1].callback()
     last_dialog.buttons[1][2].callback()
     check("delete removes entries", Overlay.loadEntries(Store.bookDir(BOOK, lang), "system") == nil)
-    local deleted_notice = false
-    for _, n in ipairs(notifications) do if n:find("已删除", 1, true) then deleted_notice = true end end
-    check("delete notifies count", deleted_notice)
+    local deleted_notice
+    for _, n in ipairs(notifications) do if n:find("已删除", 1, true) then deleted_notice = n end end
+    check("delete notifies count", deleted_notice ~= nil)
+    -- 6.2.1 口径：通知用 entries 段数（3），不是 DB 行数（本书 DB 无行=0）
+    check("delete notice uses entries count", deleted_notice ~= nil
+        and deleted_notice:find("译文 3 段", 1, true) ~= nil, tostring(deleted_notice))
     -- repair runs full reconcile without error
     notifications = {}
     repair_row.callback()
     local repaired = false
     for _, n in ipairs(notifications) do if n:find("修复完成", 1, true) then repaired = true end end
     check("repair completes", repaired)
+    -- clear-all guard：任意 provider 的 queued 任务都阻止删除本书全部译文
+    -- （与按服务删除同一 hasActiveJob 口径，不再只看 progress.active）
+    p._translation_queue = { { book_path = BOOK, status = "queued", provider = "microsoft_free" } }
+    p._translation_progress = nil
+    notifications = {}
+    clear_row.callback()
+    last_dialog.buttons[1][2].callback()
+    local clear_blocked = false
+    for _, n in ipairs(notifications) do
+        if n:find("这本书正在翻译", 1, true) then clear_blocked = true end
+    end
+    check("queued job blocks clear-all", clear_blocked)
+    check("blocked clear keeps entries",
+        Overlay.loadEntries(Store.bookDir(BOOK, lang), "microsoft_free") ~= nil)
+    p._translation_queue = {}
     -- migration failure disables translate entry
     p._translation_migration_failed = true
     local translate_enabled

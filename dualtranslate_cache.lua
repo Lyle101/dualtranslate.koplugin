@@ -171,8 +171,34 @@ local function dbScalar(db, sql, ...)
         local row = stmt:step()
         return row and tonumber(row[1]) or nil
     end)
-    if not ok then return nil end
+    if not ok then return nil, tostring(value) end
     return value
+end
+
+-- ljsqlite3 reports either the numeric code or its lowercase name
+-- ("ljsqlite3[26] ..." / "ljsqlite3[notadb] file is not a database").
+-- SQLITE_NOTADB (26) and SQLITE_CORRUPT (11) mean the file itself is
+-- damaged; anything else (busy, cantopen, ...) must keep degrading to nil.
+local function is_corruption_error(err)
+    local message = tostring(err)
+    return message:find("not a database", 1, true) ~= nil
+        or message:find("database disk image is malformed", 1, true) ~= nil
+        or message:find("ljsqlite3%[notadb%]") ~= nil
+        or message:find("ljsqlite3%[corrupt%]") ~= nil
+        or message:find("ljsqlite3%[26%]") ~= nil
+        or message:find("ljsqlite3%[11%]") ~= nil
+end
+
+local function remove_db_files(db_path)
+    os.remove(db_path)
+    os.remove(db_path .. "-wal")
+    os.remove(db_path .. "-shm")
+end
+
+local function setup_pragmas(db)
+    execSql(db, "PRAGMA journal_mode=WAL;")
+    execSql(db, "PRAGMA busy_timeout=5000;")
+    execSql(db, "PRAGMA synchronous=NORMAL;")
 end
 
 local function copyFile(source_path, target_path)
@@ -258,23 +284,29 @@ function Cache:_connect()
     local ok, db = pcall(SQ3.open, db_path)
     if not ok or not db then
         logger.warn("dualtranslate: cache db corrupt, recreating:", db_path)
-        os.remove(db_path)
-        os.remove(db_path .. "-wal")
-        os.remove(db_path .. "-shm")
+        remove_db_files(db_path)
         ok, db = pcall(SQ3.open, db_path)
         if not ok or not db then
             logger.err("dualtranslate: cannot recreate cache db:", db)
             return nil
         end
     end
-    local setup_ok, setup_err = pcall(function()
-        execSql(db, "PRAGMA journal_mode=WAL;")
-        execSql(db, "PRAGMA busy_timeout=5000;")
-        execSql(db, "PRAGMA synchronous=NORMAL;")
-    end)
+    local setup_ok, setup_err = pcall(setup_pragmas, db)
+    if not setup_ok and is_corruption_error(setup_err) then
+        -- ljsqlite3 opens a damaged header lazily: "file is not a database"
+        -- only surfaces on the first exec/prepare (9.3).  Delete the db and
+        -- its WAL sidecars and reopen a fresh file.
+        logger.warn("dualtranslate: cache db corrupt, recreating:", db_path)
+        pcall(function() db:close() end)
+        remove_db_files(db_path)
+        ok, db = pcall(SQ3.open, db_path)
+        if ok and db then
+            setup_ok, setup_err = pcall(setup_pragmas, db)
+        end
+    end
     if not setup_ok then
         logger.warn("dualtranslate: cache db setup failed:", setup_err)
-        pcall(function() db:close() end)
+        if ok and db then pcall(function() db:close() end) end
         return nil
     end
     return db
@@ -297,33 +329,41 @@ end
 
 -- Single DDL entry point: open() only connects, so a fresh install can never
 -- create the v2 table first and then run the migration on it.
+-- A corruption-class failure (9.3) deletes the db and rebuilds fresh once;
+-- any other error keeps degrading to nil so callers fall back to cache miss.
 function Cache:initSchema()
+    local ok, err = self:_initSchemaOnce()
+    if ok then return true end
+    if is_corruption_error(err) then
+        logger.warn("dualtranslate: cache db corrupt, recreating:", self:getDbPath())
+        self:close()
+        remove_db_files(self:getDbPath())
+        ok, err = self:_initSchemaOnce()
+        if ok then return true end
+    end
+    self:close()
+    return nil, err
+end
+
+function Cache:_initSchemaOnce()
     local db = self.db
     if not db then
         db = self:_connect()
         if not db then return nil, "cannot open cache db" end
         self.db = db
     end
-    local version = dbScalar(db, "PRAGMA user_version")
+    local version, version_err = dbScalar(db, "PRAGMA user_version")
     if not version then
-        self:close()
-        return nil, "cannot read cache schema version"
+        return nil, version_err or "cannot read cache schema version"
     end
     if version >= SCHEMA_VERSION then return true end
     local has_book_table = dbScalar(db,
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
         "book_translations") == 1
-    local ok, err
     if has_book_table then
-        ok, err = self:_migrateToV3(db)
-    else
-        ok, err = self:_createFreshSchema(db)
+        return self:_migrateToV3(db)
     end
-    if not ok then
-        self:close()
-        return nil, err
-    end
-    return true
+    return self:_createFreshSchema(db)
 end
 
 function Cache:_createFreshSchema(db)

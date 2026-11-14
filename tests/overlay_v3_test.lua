@@ -44,6 +44,12 @@ package.preload["logger"] = function()
         info = function() end,
     }
 end
+-- 锁模块（经 Store 引入）依赖 ffi/util 的睡眠/墙钟；本测试无锁竞争，
+-- 提供 no-op 睡眠与秒级墙钟即可。
+package.preload["ffi/util"] = function()
+    return { sleep = function() end, usleep = function() end,
+        getTimestamp = function() return os.time() end }
+end
 package.preload["util"] = function()
     return { makePath = function(path)
         if lfs.attributes(path, "mode") == "directory" then return true end
@@ -206,6 +212,45 @@ do
     check("loadEntries 不存在返回 nil", Overlay.loadEntries(dir, "mcp:none") == nil)
     check("saveEntries 空 provider 拒绝", Overlay.saveEntries(dir, "", { entries = {} }) == false)
     check("saveManifest 非表拒绝", Overlay.saveManifest(dir, nil) == false)
+
+    -- 满盘耐久性：write/close 失败必须删 tmp、返回 false、绝不 rename
+    -- 截断的 tmp 覆盖好文件（manifest/entries/intent 共用 write_file）。
+    local real_io_open = io.open
+    local function fakeHandle(write_ok, close_ok)
+        return {
+            write = function() if write_ok then return true end return nil, "No space left on device" end,
+            close = function() if close_ok then return true end return nil, "No space left on device" end,
+        }
+    end
+    local function withBrokenWrites(write_ok, close_ok, fn)
+        io.open = function(path, mode)
+            if mode == "wb" then return fakeHandle(write_ok, close_ok) end
+            return real_io_open(path, mode)
+        end
+        local ok, err = pcall(fn)
+        io.open = real_io_open
+        assert(ok, err)
+    end
+    local before_raw = readFile(dir .. "/manifest.json")
+    local rev_before = manifest.revision
+    withBrokenWrites(false, true, function()
+        check("write 失败：saveManifest 返回 false", Overlay.saveManifest(dir, manifest) == false)
+    end)
+    check("write 失败：revision 回滚", manifest.revision == rev_before, tostring(manifest.revision))
+    check("write 失败：好文件未被覆盖", readFile(dir .. "/manifest.json") == before_raw)
+    check("write 失败：无 .tmp 残留", noTmpLeft(dir))
+    withBrokenWrites(true, false, function()
+        check("close 失败：saveManifest 返回 false", Overlay.saveManifest(dir, manifest) == false)
+        check("close 失败：saveEntries 返回 false", Overlay.saveEntries(dir, "system",
+            { entries = { entry("p[3]", "坏") } }) == false)
+        check("close 失败：saveIntent 返回 false", Overlay.saveIntent(dir,
+            { op = "delete_provider", provider = "system" }) == false)
+    end)
+    check("close 失败：revision 回滚", manifest.revision == rev_before, tostring(manifest.revision))
+    check("close 失败：好文件未被覆盖", readFile(dir .. "/manifest.json") == before_raw)
+    check("close 失败：entries 未被覆盖", Overlay.loadEntries(dir, "system").entries[1].selector == "p[2]")
+    check("close 失败：无 .tmp 残留", noTmpLeft(dir) and noTmpLeft(dir .. "/entries"))
+    check("失败后仍可正常写入", Overlay.saveManifest(dir, manifest) == true)
 end
 
 -- ============================================================

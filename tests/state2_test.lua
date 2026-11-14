@@ -162,5 +162,45 @@ return {
     check("损坏文件返回空表", type(empty2) == "table" and #empty2 == 0)
 end
 
+-- ============================================================
+-- 3. loadQueue 旧队列回填（13.4）
+-- ============================================================
+print("== 3. loadQueue 旧队列回填 ==")
+do
+    local f = io.open(State.getQueuePath(), "w")
+    f:write([[
+return {
+    { book_path = "/old1.epub", status = "queued", fragment = "3", span = 2 },
+    { book_path = "/old2.epub", status = "queued", all_chapters = true, fragment = "9", span = 4 },
+    { book_path = "/old3.epub", status = "queued" },
+    { book_path = "/old4.epub", status = "active", all_chapters = false, fragment = "2" },
+    { book_path = "/old5.epub", status = "queued", all_chapters = true, provider = "system" },
+    { book_path = "/old6.epub", status = "queued", all_chapters = false, fragment = "1", provider = "" },
+}
+]])
+    f:close()
+    local queue = State.loadQueue()
+    local by_path = {}
+    for _, item in ipairs(queue) do by_path[item.book_path] = item end
+    local old1 = by_path["/old1.epub"]
+    check("无 all_chapters 有 fragment → 章节任务", old1 ~= nil
+        and old1.all_chapters == false and old1.span == 2 and old1.fragment == "3")
+    check("无 provider 保持 nil（不回填当前 mode）", old1 ~= nil and old1.provider == nil)
+    local old2 = by_path["/old2.epub"]
+    check("整书任务清理 fragment/span", old2 ~= nil and old2.all_chapters == true
+        and old2.fragment == nil and old2.span == nil)
+    local old3 = by_path["/old3.epub"]
+    check("无法推断范围 → failed 并带错误提示", old3 ~= nil and old3.status == "failed"
+        and type(old3.error) == "string" and #old3.error > 0)
+    local old4 = by_path["/old4.epub"]
+    check("章节任务缺 span 补默认 1", old4 ~= nil and old4.status == "queued"
+        and old4.all_chapters == false and old4.span == 1)
+    local old5 = by_path["/old5.epub"]
+    check("已有 provider 原样保留", old5 ~= nil and old5.provider == "system")
+    local old6 = by_path["/old6.epub"]
+    check("空串 provider 归一为 nil", old6 ~= nil and old6.provider == nil)
+    os.remove(State.getQueuePath())
+end
+
 print(string.format("\n==== State 第二层结果：%d 通过，%d 失败 ====", passed, failed))
 os.exit(failed == 0 and 0 or 1)

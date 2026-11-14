@@ -13,7 +13,9 @@ local stubs = {
         makePath = function(path) os.execute('mkdir -p "' .. path .. '"') return true end,
         trim = function(text) return (text:gsub("^%s+", ""):gsub("%s+$", "")) end,
     },
-    ["ffi/util"] = { template = function(text) return text end },
+    ["ffi/util"] = { template = function(text) return text end,
+        sleep = function() end, usleep = function() end,
+        getTimestamp = function() return os.time() end },
     ["ffi/archiver"] = {},
     ["device"] = { screen = { getWidth = function() return 600 end, getHeight = function() return 800 end } },
     ["libs/libkoreader-lfs"] = {
