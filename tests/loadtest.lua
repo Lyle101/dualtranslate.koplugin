@@ -96,3 +96,16 @@ local n = 0
 for _ in pairs(provider_names) do n = n + 1 end
 assert(n == 2, "provider names not distinct: " .. tostring(n))
 print("provider names distinct: true")
+
+-- 翻译本书: the three scopes (整本 / 当前章节 / 选择章节…) live in one submenu.
+assert(type(dualtranslate.showChapterPicker) == "function", "showChapterPicker not attached")
+local translate_entry
+for _, item in ipairs(sub) do
+    if item.text == "翻译本书" then translate_entry = item end
+end
+assert(translate_entry and translate_entry.sub_item_table, "translate submenu missing")
+local labels = {}
+for _, item in ipairs(translate_entry.sub_item_table) do labels[#labels + 1] = item.text end
+assert(labels[1] == "翻译整本" and labels[2] == "翻译当前章节" and labels[3] == "选择章节…",
+    "translate submenu labels: " .. table.concat(labels, ","))
+print("translate submenu: true")

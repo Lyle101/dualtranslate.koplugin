@@ -12,6 +12,7 @@ local Languages = require("dualtranslate_languages")
 local State = require("dualtranslate_state")
 local Reader = require("dualtranslate_reader")
 local PageTrans = require("dualtranslate_pagetrans")
+local Picker = require("dualtranslate_picker")
 local Store = require("dualtranslate_store")
 local Overlay = require("dualtranslate_overlay")
 
@@ -24,6 +25,7 @@ function dualtranslate:init()
     State.attach(self)
     Reader.attach(self)
     PageTrans.attach(self)
+    Picker.attach(self)
     -- One-time migration of older standalone config files into KOReader's
     -- native G_reader_settings (see State.loadConfig).  All settings are then
     -- read and written through the standard KOReader settings API.
@@ -184,6 +186,12 @@ function dualtranslate:addToMainMenu(menu_items)
 end
 
 function dualtranslate:buildMenuTable()
+    -- Every translation entry needs an open EPUB whose data migration did not
+    -- fail; the picker and the two direct scopes share this guard.
+    local function book_enabled()
+        return self:isEpub() and not self:isLegacyBilingualEpub(self.ui.document.file)
+            and not self._translation_migration_failed
+    end
     local menu = {
         -- Master switch as a plain tap-to-toggle checkbox inside the submenu.
         {
@@ -193,38 +201,44 @@ function dualtranslate:buildMenuTable()
             callback = function(menu) self:togglePluginEnabled(menu) end,
         },
         {
+            -- 7.1: the three scopes live under one entry so the menu does not
+            -- keep growing a flat list of translation commands.
             text = "翻译本书",
-            enabled_func = function()
-                return self:isEpub() and not self:isLegacyBilingualEpub(self.ui.document.file)
-                    and not self._translation_migration_failed
-            end,
-            callback = function()
-                -- 7.4: whole-book translation is unconditional and never
-                -- consults the 逐章模式 preference.
-                self:translateWholeBook(true)
-            end,
+            enabled_func = book_enabled,
+            sub_item_table = {
+                {
+                    text = "翻译整本",
+                    enabled_func = book_enabled,
+                    callback = function()
+                        -- 7.4: whole-book translation is unconditional and
+                        -- never consults the 逐章模式 preference.
+                        self:translateWholeBook(true)
+                    end,
+                },
+                {
+                    text = "翻译当前章节",
+                    enabled_func = book_enabled,
+                    callback = function()
+                        self:translateCurrentChapter(true)
+                    end,
+                },
+                {
+                    text = "选择章节…",
+                    enabled_func = book_enabled,
+                    callback = function()
+                        self:showChapterPicker()
+                    end,
+                },
+            },
         },
         {
-            text = "翻译当前章",
-            enabled_func = function()
-                return self:isEpub() and not self:isLegacyBilingualEpub(self.ui.document.file)
-                    and not self._translation_migration_failed
-            end,
-            callback = function()
-                self:translateCurrentChapter(true)
-            end,
-        },
-        {
-            -- "逐章模式" preference: only governs whether "翻译当前章" arms
+            -- "逐章模式" preference: only governs whether "翻译当前章节" arms
             -- page-turn follow (turning pages silently translates newly
             -- reached chapters).  Whole-book translation is unaffected.
             text = "逐章模式（翻页自动续译）",
             checkbox = true,
             checked_func = function() return self:isPageTranslationEnabled() end,
-            enabled_func = function()
-                return self:isEpub() and not self:isLegacyBilingualEpub(self.ui.document.file)
-                    and not self._translation_migration_failed
-            end,
+            enabled_func = book_enabled,
             callback = function(menu) self:togglePageTranslation(menu) end,
         },
         -- Generation engine selector (12.2: 翻译引擎 = which service

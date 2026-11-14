@@ -22,7 +22,7 @@ local attached = { "getTranslationQueuePath", "loadConfig", "saveTranslationQueu
     "getBookCacheDirectory", "getTranslationOverlayPath", "hasTranslationOverlay",
     "toggleTranslationVisible", "removeTranslationFilesForBook", "currentChapterIndex",
     "getCurrentFragment", "getBookOutline", "translateWholeBook",
-    "translateCurrentChapter", "translateSelectedChapters", "_runTranslation",
+    "translateCurrentChapter",     "translateSelectedChapters", "showChapterPicker", "_runTranslation",
     "reopenTranslationProgress",
     "isCacheEnabled", "inlineStyleMenu", "getInlineFontSize", "getInlineFontCssSize",
     "getInlineFontFamily", "getInlineFontFamilyLabel", "showFontFamilyDialog",
