@@ -668,6 +668,8 @@ function dualtranslate:onCloseDocument()
     self._page_translation_follow_active = nil
     self._page_translation_last_fragment = nil
     self._chapter_index_cache = nil
+    -- 7.2: the parsed outline belongs to the book that was just closed.
+    self._book_outline_cache = nil
     self._style_refresh_scheduled = nil
     self._translation_stale = nil
     self.cache:close()

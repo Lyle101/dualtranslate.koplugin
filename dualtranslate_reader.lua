@@ -344,6 +344,27 @@ function dualtranslate:getCurrentFragment()
     return ok and xpointer or nil
 end
 
+-- 7.2: on-demand outline behind the chapter picker.  The EPUB module already
+-- caches the parsed result on disk keyed by (path, size, mtime); this keeps one
+-- parsed copy in memory for the open book, so reopening the picker or opening
+-- it again after closing and reopening the book does not unpack the EPUB.
+function dualtranslate:getBookOutline(book_path)
+    book_path = book_path
+        or (self.ui and self.ui.document and self.ui.document.file)
+    if not book_path then return nil, "缺少书路径" end
+    if not book_path:lower():match("%.epub$") then
+        return nil, "目录解析目前仅支持 EPUB"
+    end
+    local cached = self._book_outline_cache
+    if cached and cached.book_path == book_path then return cached.outline end
+    local Epub = self.epub or (self.loadEpubModule and self:loadEpubModule())
+    if not Epub or not Epub.outline then return nil, "EPUB 引擎不可用" end
+    local outline, err = Epub.outline(book_path)
+    if not outline then return nil, err end
+    self._book_outline_cache = { book_path = book_path, outline = outline }
+    return outline
+end
+
 -- 7.4: the three chapter scopes are decoupled.  Whole-book translation is
 -- unconditional and never consults the 逐章模式 preference; that preference
 -- only governs whether the current-chapter entry arms page-turn follow.
