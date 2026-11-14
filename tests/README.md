@@ -9,6 +9,10 @@
     lua tests/cache_test.lua    # SQLite cache（mock）
     lua tests/cache_provider_test.lua  # P0：缓存查询按 provider 隔离
     lua tests/migration_test.lua # P1-a：真实 SQLite 的 v3 schema / v2→v3 迁移 / providers
+    lua tests/lock_test.lua     # P1-b：书目录锁（互斥/超时/陈旧回收/异常释放）
+    lua tests/overlay_v3_test.lua # P1-b：manifest/entries 读写 / buildCss v3 / 迁移分支
+    lua tests/overlay_revision_test.lua # P1-b：revision 缓存键 / 命中与失效 / 8MB LRU
+    lua tests/store_delete_test.lua # P1-b：真实 SQLite 的按 provider 删除 / intent 收尾 / reconcile
     lua tests/clear_path_test.lua      # P0：清除路径必须传书路径
     lua tests/overlay_provider_test.lua # P0：overlay 续跑按 provider 隔离
     lua tests/langmenu_test.lua # 语言子菜单闭包
@@ -16,9 +20,11 @@
 
 注意：
 - 测试读写 /tmp 下临时目录（/tmp/dt_data、/tmp/dt_state_test、/tmp/dualtranslate_epub_test 等）。
-- migration_test.lua 是唯一用真实 SQLite 的测试：需要 KOReader 自带的 lua-ljsqlite3
-  （默认 /Applications/KOReader.app/Contents/koreader，可用 KO_ROOT 覆盖），缺失时打印 SKIP 并退出 0；
-  checkpoint 冲突用例要等 busy_timeout 重试，整体约 20 秒。
+- migration_test.lua / store_delete_test.lua 用真实 SQLite；lock_test.lua /
+  overlay_v3_test.lua / overlay_revision_test.lua 用真实 lfs + json。
+  均依赖 KOReader 自带库（默认 /Applications/KOReader.app/Contents/koreader，可用 KO_ROOT 覆盖），
+  需用 luajit 运行，缺失时打印 SKIP 并退出 0；
+  checkpoint 冲突用例要等 busy_timeout 重试，migration_test 整体约 20 秒。
 - G_reader_settings 桩必须用冒号调用签名 (self, key[, value])。
 - 新增模块级函数后，把函数名加入 callcheck.lua 的 attached 白名单。
 - 新增模块后若 /tmp 被清，测试脚本可从本目录复制回去（或直接在此运行）。

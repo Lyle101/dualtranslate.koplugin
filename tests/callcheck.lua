@@ -2,7 +2,8 @@ local files = {}
 for _, name in ipairs({ "main.lua", "dualtranslate_reader.lua", "dualtranslate_state.lua",
     "dualtranslate_pagetrans.lua", "dualtranslate_ui.lua", "dualtranslate_epub.lua",
     "dualtranslate_cache.lua", "dualtranslate_overlay.lua", "dualtranslate_providers.lua",
-    "dualtranslate_tools.lua", "dualtranslate_languages.lua" }) do
+    "dualtranslate_tools.lua", "dualtranslate_languages.lua",
+    "dualtranslate_lock.lua", "dualtranslate_store.lua" }) do
     local f = io.open(name, "rb")
     if f then files[name] = f:read("*a"); f:close() end
 end
