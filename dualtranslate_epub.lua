@@ -107,27 +107,35 @@ local function looks_translatable(text)
     return text:match("[\128-\255]") ~= nil
 end
 
-function Epub:resolve(book_path, work_dir, fragment)
-    local container = read_file(work_dir .. "/META-INF/container.xml")
-    if not container then return nil, "找不到 META-INF/container.xml" end
-    local opf_path
+-- resolve() and outline() share these so the spine index (chapter identity,
+-- design 6.5) is derived from one set of manifest/spine rules.
+local function container_opf_path(container)
     -- EPUBs may use a namespace prefix (for example container:rootfile),
     -- and some put rootfiles/rootfile on separate formatting lines.
+    local opf_path
     for rootfile_tag in container:gmatch("<[^>]*rootfile[^>]*>") do
         opf_path = attr(rootfile_tag, "full-path")
         if opf_path then break end
     end
-    if not opf_path then return nil, "找不到 OPF 路径" end
-    opf_path = normalize_path(socket_url.unescape(opf_path))
-    local opf = read_file(work_dir .. "/" .. opf_path)
-    if not opf then return nil, "找不到 OPF 文件" end
+    if not opf_path then return nil end
+    return normalize_path(socket_url.unescape(opf_path))
+end
 
-    local manifest = {}
+local function parse_package(opf, opf_path)
+    local base = dirname(opf_path)
+    local manifest, items = {}, {}
     for item in opf:gmatch("<[%w_%-]*:?item[^>]*>") do
         local id = attr(item, "id")
         local href = attr(item, "href")
         if id and href then
-            manifest[id] = normalize_path(dirname(opf_path) .. "/" .. socket_url.unescape(href:gsub("#.*$", "")))
+            local entry = {
+                id = id,
+                href = normalize_path(base .. "/" .. socket_url.unescape(href:gsub("#.*$", ""))),
+                media_type = attr(item, "media-type"),
+                properties = attr(item, "properties"),
+            }
+            manifest[id] = entry
+            items[#items + 1] = entry
         end
     end
 
@@ -135,9 +143,33 @@ function Epub:resolve(book_path, work_dir, fragment)
     for itemref in opf:gmatch("<[%w_%-]*:?itemref[^>]*>") do
         local idref = attr(itemref, "idref")
         if idref and manifest[idref] then
-            table.insert(spine, manifest[idref])
+            table.insert(spine, manifest[idref].href)
         end
     end
+
+    local toc_id
+    for spine_tag in opf:gmatch("<[%w_%-]*:?spine[^>]*>") do
+        toc_id = attr(spine_tag, "toc")
+        if toc_id then break end
+    end
+
+    return {
+        manifest = manifest,
+        items = items,
+        spine = spine,
+        toc_id = toc_id,
+    }
+end
+
+function Epub:resolve(book_path, work_dir, fragment)
+    local container = read_file(work_dir .. "/META-INF/container.xml")
+    if not container then return nil, "找不到 META-INF/container.xml" end
+    local opf_path = container_opf_path(container)
+    if not opf_path then return nil, "找不到 OPF 路径" end
+    local opf = read_file(work_dir .. "/" .. opf_path)
+    if not opf then return nil, "找不到 OPF 文件" end
+
+    local spine = parse_package(opf, opf_path).spine
 
     -- fragment is either a plain spine index (preferred: the reader resolves
     -- the current chapter index because CREngine xpointers carry no
@@ -622,6 +654,377 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
         cancelled = cancelled,
         last_chapter = last_processed_index >= (chapter.spine_count or 1),
     }
+end
+
+-- EPUB outline (design 7.2): the chapter list behind the picker.  Identity is
+-- the spine index, titles are display-only (design 6.5).
+
+local function parse_elements(text)
+    local root = { name = "#root", children = {} }
+    local stack = { root }
+    local position = 1
+    while true do
+        local tag_start, tag_end = text:find("<[^>]*>", position)
+        if not tag_start then break end
+        local raw = text:sub(tag_start, tag_end)
+        position = tag_end + 1
+        if not raw:match("^<%s*[!?]") then
+            local closing = raw:match("^<%s*/") ~= nil
+            local name = raw:match("^<%s*/?%s*([%w_:%-]+)")
+            if name then
+                name = name:lower():gsub("^.-:", "")
+                if closing then
+                    for index = #stack, 2, -1 do
+                        if stack[index].name == name then
+                            stack[index].inner = text:sub(stack[index].inner_start, tag_start - 1)
+                            for drop = #stack, index, -1 do table.remove(stack) end
+                            break
+                        end
+                    end
+                else
+                    local node = { name = name, raw = raw, children = {}, inner_start = tag_end + 1 }
+                    local parent = stack[#stack]
+                    parent.children[#parent.children + 1] = node
+                    if raw:match("/%s*>$") or void_tags[name] then
+                        node.inner = ""
+                    else
+                        table.insert(stack, node)
+                    end
+                end
+            end
+        end
+    end
+    return root
+end
+
+local function direct_child(node, name)
+    for _, child in ipairs(node.children) do
+        if child.name == name then return child end
+    end
+    return nil
+end
+
+local function collect_elements(node, name, out)
+    for _, child in ipairs(node.children) do
+        if child.name == name then out[#out + 1] = child end
+        collect_elements(child, name, out)
+    end
+    return out
+end
+
+local function element_title(node)
+    return html_to_text(node and node.inner or "")
+end
+
+-- EPUB2: navMap/navPoint, recursively (nested navPoints carry the level).
+local function ncx_toc(tree)
+    local navmaps = collect_elements(tree, "navmap", {})
+    if #navmaps == 0 then return nil end
+    local entries = {}
+    local function walk(node, level)
+        for _, child in ipairs(node.children) do
+            if child.name == "navpoint" then
+                local label = direct_child(child, "navlabel")
+                local content = direct_child(child, "content")
+                entries[#entries + 1] = {
+                    title = element_title(label and direct_child(label, "text")),
+                    href = content and attr(content.raw, "src"),
+                    level = level,
+                }
+                walk(child, level + 1)
+            end
+        end
+    end
+    walk(navmaps[1], 0)
+    return entries
+end
+
+-- EPUB3: nav[epub:type=toc] -> ol/li/a, nested ol one level deeper.
+local function nav_toc(tree)
+    local navs = collect_elements(tree, "nav", {})
+    local chosen
+    for _, node in ipairs(navs) do
+        local kind = attr(node.raw, "type") or ""
+        if (" " .. kind .. " "):find(" toc ", 1, true) then chosen = node; break end
+    end
+    if not chosen then
+        -- Books that omit epub:type entirely still have a single reading-order
+        -- nav; landmarks/page-list navs must never be mistaken for the TOC.
+        for _, node in ipairs(navs) do
+            local kind = attr(node.raw, "type")
+            if not kind or kind == "" then chosen = node; break end
+        end
+    end
+    if not chosen then return nil end
+    local entries = {}
+    local function walk_list(list, level)
+        for _, item in ipairs(list.children) do
+            if item.name == "li" then
+                local anchor = direct_child(item, "a")
+                if anchor then
+                    entries[#entries + 1] = {
+                        title = element_title(anchor),
+                        href = attr(anchor.raw, "href"),
+                        level = level,
+                    }
+                end
+                for _, child in ipairs(item.children) do
+                    if child.name == "ol" then walk_list(child, level + 1) end
+                end
+            end
+        end
+    end
+    for _, child in ipairs(chosen.children) do
+        if child.name == "ol" then walk_list(child, 0) end
+    end
+    return entries
+end
+
+local function toc_href(base, href)
+    if not href or href == "" then return nil end
+    local path = href:gsub("#.*$", "")
+    if path == "" then return nil end
+    path = socket_url.unescape(path)
+    if path:sub(1, 1) == "/" then return normalize_path(path) end
+    return normalize_path(base .. "/" .. path)
+end
+
+local function build_spine_lookup(spine)
+    local exact, lowered = {}, {}
+    for index, href in ipairs(spine) do
+        if not exact[href] then exact[href] = index end
+        local key = href:lower()
+        local bucket = lowered[key]
+        if not bucket then
+            lowered[key] = { index = index, href = href, count = 1 }
+        elseif bucket.href ~= href then
+            bucket.count = bucket.count + 1
+        end
+    end
+    return exact, lowered
+end
+
+local function map_to_spine(href, spine, exact, lowered)
+    local index = exact[href]
+    if index then return index, spine[index] end
+    local bucket = lowered[href:lower()]
+    -- Zip member names are case sensitive: a case-insensitive guess is only
+    -- safe when exactly one spine file answers to it (design 7.2 step 5).
+    if bucket and bucket.count == 1 then return bucket.index, bucket.href end
+    return nil
+end
+
+local function spine_chapters(spine)
+    local chapters = {}
+    for index = 1, #spine do
+        chapters[index] = { index = index, title = string.format("第 %d 节", index),
+            href = spine[index], level = 0 }
+    end
+    return chapters
+end
+
+local function remember_alias(chapter, title)
+    if not title or title == "" or title == chapter.title then return end
+    chapter.aliases = chapter.aliases or {}
+    for _, existing in ipairs(chapter.aliases) do
+        if existing == title then return end
+    end
+    chapter.aliases[#chapter.aliases + 1] = title
+end
+
+local function toc_chapters(entries, base, spine, exact, lowered, logger)
+    local chapters, by_index = {}, {}
+    for _, entry in ipairs(entries) do
+        local href = toc_href(base, entry.href)
+        local index, original
+        if href then index, original = map_to_spine(href, spine, exact, lowered) end
+        if not index then
+            logger.warn("dualtranslate: outline entry not in spine, skipped:",
+                tostring(entry.href))
+        else
+            local level = tonumber(entry.level) or 0
+            local title = entry.title
+            if not title or title == "" then title = string.format("第 %d 节", index) end
+            local kept = by_index[index]
+            if not kept then
+                kept = { index = index, title = title, href = original, level = level }
+                by_index[index] = kept
+                chapters[#chapters + 1] = kept
+            elseif level < kept.level then
+                local previous = kept.title
+                kept.title, kept.level = title, level
+                remember_alias(kept, previous)
+            else
+                remember_alias(kept, title)
+            end
+        end
+    end
+    return chapters
+end
+
+-- Priority: NCX (EPUB2) -> properties="nav" XHTML (EPUB3) -> OPF spine toc.
+local function outline_candidates(package)
+    local ncx, nav
+    for _, item in ipairs(package.items) do
+        local media = (item.media_type or ""):lower()
+        if media == "application/x-dtbncx+xml" then
+            if not ncx or item.href:lower():match("[^/]+$") == "toc.ncx" then ncx = item end
+        end
+        if not nav and (" " .. (item.properties or "") .. " "):find(" nav ", 1, true) then
+            nav = item
+        end
+    end
+    local spine_toc = package.toc_id and package.manifest[package.toc_id]
+    local candidates, seen = {}, {}
+    local function add(item)
+        if item and item.href ~= "" and not seen[item.href] then
+            seen[item.href] = true
+            candidates[#candidates + 1] = item.href
+        end
+    end
+    add(ncx)
+    add(nav)
+    add(spine_toc)
+    return candidates
+end
+
+local function parse_outline(book_path, work_dir)
+    local logger = require("logger")
+    -- Three on-demand passes instead of one full unzip: each iterate() only
+    -- walks the central directory, so image-heavy books cost nothing extra.
+    local first = Tools.extract_entries(book_path, work_dir,
+        { ["META-INF/container.xml"] = true })
+    if not first then return nil, "无法解包 EPUB（可能受 DRM 保护）" end
+    local container = first["META-INF/container.xml"]
+        and read_file(first["META-INF/container.xml"])
+    if not container then return nil, "找不到 META-INF/container.xml" end
+    local opf_path = container_opf_path(container)
+    if not opf_path then return nil, "找不到 OPF 路径" end
+
+    local second = Tools.extract_entries(book_path, work_dir, { [opf_path] = true })
+    local opf = second and second[opf_path] and read_file(second[opf_path])
+    if not opf then return nil, "找不到 OPF 文件" end
+    local package = parse_package(opf, opf_path)
+    if #package.spine == 0 then return nil, "找不到可读取的 spine 项" end
+
+    local candidates = outline_candidates(package)
+    local wanted = {}
+    for _, href in ipairs(candidates) do wanted[href] = true end
+    local third = next(wanted) and Tools.extract_entries(book_path, work_dir, wanted) or {}
+    local base = dirname(opf_path)
+    local exact, lowered = build_spine_lookup(package.spine)
+    for _, href in ipairs(candidates) do
+        local text = third[href] and read_file(third[href])
+        if text then
+            local tree = parse_elements(text)
+            local entries, source = ncx_toc(tree), "ncx"
+            if not entries or #entries == 0 then
+                entries, source = nav_toc(tree), "nav"
+            end
+            local chapters = entries
+                and toc_chapters(entries, base, package.spine, exact, lowered, logger) or {}
+            if #chapters > 0 then
+                return { source = source, spine_count = #package.spine, chapters = chapters }
+            end
+        end
+    end
+    return { source = "spine", spine_count = #package.spine,
+        chapters = spine_chapters(package.spine) }
+end
+
+local function outline_cache_file(book_path)
+    return DataStorage:getDataDir() .. "/cache/dualtranslate/outline/"
+        .. Tools.stable_path_hash(book_path) .. ".json"
+end
+
+local function load_outline_cache(book_path, size, mtime)
+    local raw = read_file(outline_cache_file(book_path))
+    if not raw then return nil end
+    local JSON = require("json")
+    local ok, doc = pcall(JSON.decode, raw)
+    if not ok or type(doc) ~= "table" or doc.version ~= 1 then return nil end
+    -- size/mtime are part of the key: a replaced or edited book must reparse.
+    if doc.book_path ~= book_path or doc.book_size ~= size or doc.book_mtime ~= mtime then
+        return nil
+    end
+    if doc.source ~= "ncx" and doc.source ~= "nav" and doc.source ~= "spine" then return nil end
+    if type(doc.spine_count) ~= "number" or type(doc.chapters) ~= "table" then return nil end
+    local chapters = {}
+    for _, chapter in ipairs(doc.chapters) do
+        if type(chapter) ~= "table" or type(chapter.index) ~= "number"
+            or type(chapter.title) ~= "string" or type(chapter.href) ~= "string" then
+            return nil
+        end
+        chapters[#chapters + 1] = {
+            index = chapter.index,
+            title = chapter.title,
+            href = chapter.href,
+            level = tonumber(chapter.level) or 0,
+            aliases = type(chapter.aliases) == "table" and chapter.aliases or nil,
+        }
+    end
+    if #chapters == 0 then return nil end
+    return { source = doc.source, spine_count = doc.spine_count, chapters = chapters }
+end
+
+local function save_outline_cache(book_path, size, mtime, outline)
+    local logger = require("logger")
+    local JSON = require("json")
+    local path = outline_cache_file(book_path)
+    local ok, encoded = pcall(JSON.encode, {
+        version = 1, book_path = book_path, book_size = size, book_mtime = mtime,
+        source = outline.source, spine_count = outline.spine_count,
+        chapters = outline.chapters,
+    })
+    if not ok then
+        logger.warn("dualtranslate: outline cache encode failed:", tostring(encoded))
+        return false
+    end
+    if not Tools.mkdir_p(path:match("^(.*)/[^/]+$")) then
+        logger.warn("dualtranslate: outline cache dir unavailable:", path)
+        return false
+    end
+    local temporary = path .. ".tmp"
+    local file = io.open(temporary, "wb")
+    if not file then
+        logger.warn("dualtranslate: outline cache write failed:", path)
+        return false
+    end
+    local written = file:write(encoded)
+    local closed = file:close()
+    if not written or not closed or not os.rename(temporary, path) then
+        os.remove(temporary)
+        logger.warn("dualtranslate: outline cache write failed:", path)
+        return false
+    end
+    return true
+end
+
+function Epub.outline(book_path, ...)
+    -- Design 7.2 spells this Epub.outline(path); also accept the module's usual
+    -- colon style so a caller cannot hand us self as the book path.
+    if type(book_path) == "table" then book_path = ... end
+    if type(book_path) ~= "string" or book_path == "" then return nil, "缺少书路径" end
+    if not book_path:lower():match("%.epub$") then
+        return nil, "目录解析目前仅支持 EPUB"
+    end
+    local size = lfs.attributes(book_path, "size")
+    local mtime = lfs.attributes(book_path, "modification") or 0
+    if not size then return nil, "找不到书文件" end
+    local cached = load_outline_cache(book_path, size, mtime)
+    if cached then return cached end
+
+    local nonce = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
+    local work_dir = DataStorage:getDataDir() .. "/cache/dualtranslate/outline_" .. nonce
+    if not Tools.mkdir_p(work_dir) then return nil, "无法创建临时目录" end
+    -- pcall keeps the cleanup unconditional: a parse error must not leave an
+    -- outline_<nonce> directory behind (design 7.2).
+    local ok, result, err = pcall(parse_outline, book_path, work_dir)
+    Tools.rmtree(work_dir)
+    if not ok then return nil, tostring(result) end
+    if not result then return nil, err end
+    save_outline_cache(book_path, size, mtime, result)
+    return result
 end
 
 return Epub

@@ -69,6 +69,45 @@ local function safe_member(entry_path)
     return table.concat(parts, "/")
 end
 
+-- Extract only the wanted members (exact paths, raw or normalized) in a single
+-- iterate() pass: reading container.xml/OPF/TOC must not unpack a whole EPUB.
+-- Returns map wanted path -> extracted path, or nil, err.  Absent members are
+-- simply missing from the map; the caller owns dest_dir and must clean it up.
+function Tools.extract_entries(archive_path, dest_dir, wanted)
+    if type(wanted) ~= "table" or next(wanted) == nil then return {} end
+    if not Tools.mkdir_p(dest_dir) then return nil, "cannot create " .. tostring(dest_dir) end
+    local arc = Archiver.Reader:new()
+    if not arc:open(archive_path) then
+        logger.warn("dualtranslate: cannot open archive:", archive_path, tostring(arc.err))
+        return nil, tostring(arc.err or "cannot open archive")
+    end
+    local extracted = {}
+    local ok, err = pcall(function()
+        for entry in arc:iterate() do
+            local safe = safe_member(entry.path)
+            if safe and entry.mode ~= "directory" and entry.path:sub(-1) ~= "/" then
+                local key = wanted[entry.path] and entry.path or (wanted[safe] and safe or nil)
+                if key then
+                    local dest_path = dest_dir .. "/" .. safe
+                    local parent = dest_path:match("^(.*)/[^/]+$")
+                    if parent then Tools.mkdir_p(parent) end
+                    if not arc:extractToPath(entry.path, dest_path) then
+                        error("extract failed: " .. tostring(entry.path)
+                            .. ": " .. tostring(arc.err))
+                    end
+                    extracted[key] = dest_path
+                end
+            end
+        end
+    end)
+    arc:close()
+    if not ok then
+        logger.warn("dualtranslate: archive extract failed:", tostring(err))
+        return nil, tostring(err)
+    end
+    return extracted
+end
+
 -- Extract a whole zip archive into dest_dir.
 -- Path-traversal safe (rejects absolute members and ".." components).
 function Tools.unzip_to(archive_path, dest_dir)

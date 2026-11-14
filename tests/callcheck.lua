@@ -26,7 +26,7 @@ local attached = { "getTranslationQueuePath", "loadConfig", "saveTranslationQueu
     "getInlineFontFamily", "getInlineFontFamilyLabel", "showFontFamilyDialog",
     "buildFontFamilyMenu", "translateTextBatchForEpub", "refreshDocumentStyles",
     "showInlineFontSpin", "buildLanguageMenu", "confirmClearCache",
-    "loadEpubModule" }
+    "loadEpubModule", "outline", "extract_entries" }
 for _, name in ipairs(attached) do pool[name] = true end
 local missing = {}
 for path, content in pairs(files) do
