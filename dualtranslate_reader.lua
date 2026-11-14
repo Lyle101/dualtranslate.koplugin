@@ -344,30 +344,52 @@ function dualtranslate:getCurrentFragment()
     return ok and xpointer or nil
 end
 
-function dualtranslate:translateBook(all_chapters, silent, span, auto)
+-- 7.4: the three chapter scopes are decoupled.  Whole-book translation is
+-- unconditional and never consults the 逐章模式 preference; that preference
+-- only governs whether the current-chapter entry arms page-turn follow.
+function dualtranslate:translateWholeBook(silent, auto)
     if not self:isEpub() then return end
     local book_path = self.ui.document.file
-    -- "翻译本书" entry (all_chapters == true) honors the 逐章模式 preference:
-    -- checked -> translate the current chapter and arm follow mode (page
-    -- turns keep scheduling newly reached chapters silently); unchecked ->
-    -- translate the whole book.
-    -- 逐章模式下"翻译本书"始终翻译当前章并武装跟随模式。这里不能再用
-    -- overlay 的 complete 标记判断"本书已翻译"：章节翻译从不写 complete，
-    -- 该标记只来自更早某次整书翻译，可能是换语言前的残留，清除缓存后也
-    -- 可能指向已删除的语言目录，据此拒绝会让用户再也无法补翻/重翻当前章。
-    if all_chapters and self:isPageTranslationEnabled() then
-        all_chapters = false
-        span = 1
+    self:enqueueTranslation({ book_path = book_path, mode = "all",
+        silent = silent, auto = auto })
+end
+
+function dualtranslate:translateCurrentChapter(silent, auto)
+    if not self:isEpub() then return end
+    local book_path = self.ui.document.file
+    local fragment = self:getCurrentFragment()
+    if fragment then self._page_translation_last_fragment = fragment end
+    -- 逐章模式: translating the current chapter arms follow so page turns keep
+    -- scheduling newly reached chapters silently.  The overlay complete flag
+    -- must not gate this: chapter runs never write complete, and a stale flag
+    -- from an earlier whole-book run (possibly another language) would block
+    -- re-translating the current chapter forever.
+    if self:isPageTranslationEnabled() then
         self._page_translation_follow_active = true
     end
-    local fragment = all_chapters and nil or self:getCurrentFragment()
-    if fragment then self._page_translation_last_fragment = fragment end
-    self:enqueueTranslation(book_path, all_chapters, fragment, silent, span, auto)
+    self:enqueueTranslation({ book_path = book_path, mode = "span",
+        fragment = fragment, span = 1, silent = silent, auto = auto })
+end
+
+-- One-shot selection from the chapter picker; never arms follow mode.
+function dualtranslate:translateSelectedChapters(indexes, silent, auto)
+    if not self:isEpub() then return end
+    local book_path = self.ui.document.file
+    self:enqueueTranslation({ book_path = book_path, mode = "selection",
+        chapter_indexes = indexes, silent = silent, auto = auto })
 end
 
 function dualtranslate:_runTranslation(item)
     local book_path = item.book_path
-    local all_chapters = item.all_chapters
+    local mode = item.mode or "all"
+    local selection_count = #(item.chapter_indexes or {})
+    local function progress_title()
+        if mode == "all" then return "正在翻译整本书…" end
+        if mode == "selection" then
+            return string.format("正在翻译所选 %d 章…", selection_count)
+        end
+        return "正在翻译当前章节…"
+    end
     self._active_translation_book = book_path
     local fragment = item.fragment
     local data_dir = DataStorage:getDataDir()
@@ -376,7 +398,7 @@ function dualtranslate:_runTranslation(item)
     Tools.mkdir_p(data_dir .. "/cache/dualtranslate")
     self._translation_progress = {
         active = true,
-        all_chapters = all_chapters,
+        mode = mode,
         book_path = book_path,
         item = item,
         path = progress_path,
@@ -392,7 +414,7 @@ function dualtranslate:_runTranslation(item)
         local progress_dialog
         if not item.silent and self.ui and self.ui.document and self.ui.document.file == book_path then
             progress_dialog = ProgressbarDialog:new{
-                title = all_chapters and "正在翻译整本书…" or "正在翻译当前章节…",
+                title = progress_title(),
                 subtitle = "准备中…\n点按进度条可取消，点按外部收起。",
                 -- Drive the native progress bar with a fixed 0-100 scale;
                 -- the real paragraph total is not known before the worker
@@ -473,7 +495,7 @@ function dualtranslate:_runTranslation(item)
                     item.failed = tonumber(failed) or 0
                     local percentage = total > 0 and math.floor(current * 100 / total + 0.5) or 0
                     progress_dialog.title = string.format("%s  %d%%",
-                        all_chapters and "正在翻译整本书…" or "正在翻译当前章节…", percentage)
+                        progress_title(), percentage)
                     progress_dialog.subtitle = string.format(
                         "段落：%d/%d\n已翻译：%d    失败：%d\n章节：%d/%d\n点按进度条可取消，点按外部收起。",
                         current, total, tonumber(translated) or 0,
@@ -532,21 +554,25 @@ function dualtranslate:_runTranslation(item)
                         provider = self:getMode()
                         logger.warn("dualtranslate: queue item without provider, using current mode:", provider)
                     end
-                    local run_ok, run_info, run_err = pcall(Epub.translate_overlay, Epub,
-                        book_path, fragment, self:getTargetLang(), self:getSourceLang(),
-                        function(text, context)
+                    local run_ok, run_info, run_err = pcall(Epub.translate_overlay, Epub, {
+                        book_path = book_path,
+                        mode = mode,
+                        fragment = fragment,
+                        span = item.span,
+                        chapter_indexes = item.chapter_indexes,
+                        source_lang = self:getSourceLang(),
+                        target_lang = self:getTargetLang(),
+                        provider = provider,
+                        translate = function(text, context)
                             return self:translateTextForEpub(text, context)
                         end,
-                        all_chapters,
-                        progress_path,
-                        function(texts, contexts)
+                        translate_batch = function(texts, contexts)
                             return self:translateTextBatchForEpub(texts, contexts)
                         end,
-                        self:getBookCacheDirectory(book_path),
-                        item.span,
-                        progress_path .. ".cancel",
-                        provider
-                    )
+                        progress_path = progress_path,
+                        cancel_path = progress_path .. ".cancel",
+                        output_dir = self:getBookCacheDirectory(book_path),
+                    })
                     if not run_ok then return nil, "翻译过程异常：" .. tostring(run_info) end
                     if not run_info then return nil, run_err end
                     return run_info
@@ -582,7 +608,7 @@ function dualtranslate:_runTranslation(item)
                         self._translation_retry_after_hide = nil
                         self:startNextQueuedTranslation()
                     end)
-                elseif all_chapters then
+                elseif mode == "all" then
                     -- Whole-book jobs are background jobs.  A transient
                     -- provider error or a reader restart must never cover the
                     -- page with a modal interruption message.  Keep the
@@ -612,7 +638,7 @@ function dualtranslate:_runTranslation(item)
                 -- one automatic clean retry instead of turning it into a
                 -- permanent false failure.
                 local retry_count = tonumber(item.retry_count) or 0
-                if all_chapters and retry_count < 1 then
+                if mode == "all" and retry_count < 1 then
                     item.retry_count = retry_count + 1
                     item.status = "queued"
                     item.error = nil
@@ -629,7 +655,7 @@ function dualtranslate:_runTranslation(item)
                     or "翻译进程未返回结果（可能内存不足或进程被终止），请查看日志后重试"
                 self:saveTranslationQueue()
                 pcall(function() UIManager:close(progress_dialog) end)
-                if all_chapters then
+                if mode == "all" then
                     -- Do not interrupt reading for a background full-book
                     -- failure.  The queue entry keeps the error and can be
                     -- retried later; the log is available for diagnosis.
@@ -665,7 +691,7 @@ function dualtranslate:_runTranslation(item)
                 return
             end
             local result_failed = tonumber(result.failed) or 0
-            if all_chapters and result_failed > 0 then
+            if mode == "all" and result_failed > 0 then
                 item.output = result.output
                 item.failed = result_failed
                 local partial_retry = tonumber(item.partial_retry_count) or 0
@@ -695,8 +721,9 @@ function dualtranslate:_runTranslation(item)
             item.error = nil
             -- Chapter-mode follow: reaching the last spine chapter ends the
             -- session, otherwise page turns would keep re-queueing an
-            -- already-complete final chapter forever.
-            if not all_chapters and result.last_chapter then
+            -- already-complete final chapter forever.  Only span mode drives
+            -- follow; a one-shot selection never arms or disarms it (7.4).
+            if mode == "span" and result.last_chapter then
                 self._page_translation_follow_active = nil
             end
             self:saveTranslationQueue()

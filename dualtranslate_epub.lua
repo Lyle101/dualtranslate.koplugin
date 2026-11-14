@@ -282,16 +282,73 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
     return candidates
 end
 
-function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
-        translate, all_chapters, progress_path, translate_batch, output_dir, span,
-        cancel_path, provider)
-    if not book_path:lower():match("%.epub$") then
+-- 7.3: filter non-numbers / out-of-range / duplicates, then sort.  Spine
+-- indexes are 1-based integers (6.5).
+local function normalize_indexes(list, spine_count)
+    local seen, out = {}, {}
+    for _, value in ipairs(type(list) == "table" and list or {}) do
+        local n = tonumber(value)
+        if n and n == math.floor(n) and n >= 1 and n <= spine_count and not seen[n] then
+            seen[n] = true
+            out[#out + 1] = n
+        end
+    end
+    table.sort(out)
+    return out
+end
+Epub.normalize_indexes = normalize_indexes
+
+-- 7.3: span must reuse Epub.resolve (the fragment may be an xpointer, not a
+-- number); selection normalizes the requested indexes against the spine.
+local function resolve_chapters(opts, book_path, work_dir, spine)
+    local mode = opts.mode or "all"
+    if mode == "all" then
+        local indexes = {}
+        for index = 1, #spine do indexes[#indexes + 1] = index end
+        return indexes
+    elseif mode == "span" then
+        local chapter = Epub:resolve(book_path, work_dir, opts.fragment)
+        local start = chapter and chapter.index or 1
+        local span_count = math.max(1, tonumber(opts.span) or 1)
+        local indexes = {}
+        for index = start, math.min(start + span_count - 1, #spine) do
+            indexes[#indexes + 1] = index
+        end
+        return indexes
+    elseif mode == "selection" then
+        return normalize_indexes(opts.chapter_indexes, #spine)
+    end
+    return {}
+end
+
+function Epub.translate_overlay(opts, ...)
+    -- Accept both Epub.translate_overlay{...} and Epub:translate_overlay{...}.
+    if opts == Epub then opts = ... end
+    opts = opts or {}
+    local book_path = opts.book_path
+    local mode = opts.mode or "all"
+    local fragment = opts.fragment
+    local source_lang = opts.source_lang
+    local target_lang = opts.target_lang
+    local provider = opts.provider
+    local translate = opts.translate
+    local translate_batch = opts.translate_batch
+    local progress_path = opts.progress_path
+    local cancel_path = opts.cancel_path
+    local output_dir = opts.output_dir
+    if not book_path or not book_path:lower():match("%.epub$") then
         return nil, "整书翻译目前仅支持 EPUB"
     end
     -- P0: the provider is part of the overlay identity.  Without it a
     -- provider switch can silently reuse the previous service's entries.
     if not provider or provider == "" then
         return nil, "缺少翻译服务标识"
+    end
+    if mode ~= "all" and mode ~= "span" and mode ~= "selection" then
+        return nil, "未知的翻译范围"
+    end
+    if type(translate) ~= "function" then
+        return nil, "缺少翻译函数"
     end
     local data_dir = DataStorage:getDataDir()
     local nonce = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
@@ -307,25 +364,18 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
         cleanup()
         return nil, "无法解包 EPUB（可能受 DRM 保护）"
     end
-    local chapter, err = self:resolve(book_path, work_dir, fragment)
-    if not chapter then cleanup(); return nil, err end
+    local resolved, err = Epub:resolve(book_path, work_dir, fragment)
+    if not resolved then cleanup(); return nil, err end
+    local spine = resolved.spine
+    local spine_count = resolved.spine_count or #spine
+    local indexes = resolve_chapters(opts, book_path, work_dir, spine)
+    if #indexes == 0 then cleanup(); return nil, "没有可翻译的章节" end
     local chapters = {}
-    if all_chapters then
-        for index, relative in ipairs(chapter.spine) do
-            table.insert(chapters, { index = index, relative = relative,
-                absolute = work_dir .. "/" .. relative })
-        end
-    else
-        -- Chapter mode translates the current chapter plus the next few
-        -- (span = number of consecutive chapters starting at the current
-        -- one, clamped to the end of the spine).
-        local span_count = math.max(1, tonumber(span) or 1)
-        for offset = 0, span_count - 1 do
-            local index = chapter.index + offset
-            local relative = chapter.spine[index]
-            if not relative then break end
-            table.insert(chapters, { index = index, relative = relative,
-                absolute = work_dir .. "/" .. relative })
+    for _, index in ipairs(indexes) do
+        local relative = spine[index]
+        if relative then
+            chapters[#chapters + 1] = { index = index, relative = relative,
+                absolute = work_dir .. "/" .. relative }
         end
     end
 
@@ -342,7 +392,6 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
         chapter_candidates[current.index] = candidates
         total = total + #candidates
     end
-    if total == 0 then cleanup(); return nil, "没有找到可翻译的段落" end
 
     if not Tools.mkdir_p(output_dir) then
         cleanup(); return nil, "无法创建本书翻译缓存目录"
@@ -350,20 +399,9 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
     local output = output_dir .. "/manifest.json"
     local legacy_path = output_dir .. "/overlay.json"
     local entries, entry_index = {}, {}
-    -- A killed subprocess or closing the book may interrupt a run.  Keep the
-    -- batches already completed and merge into them on the next run.
-    local covered_indexes, covered_seen = {}, {}
-    local function carry_chapters(list)
-        if type(list) ~= "table" then return end
-        for _, index in ipairs(list) do
-            if not covered_seen[index] then
-                covered_seen[index] = true
-                covered_indexes[#covered_indexes + 1] = index
-            end
-        end
-    end
     local previous
     local legacy_consumed = false
+    local prior_state
     local manifest = Overlay.loadManifest(output_dir)
     if manifest and manifest.book_path == book_path
         and (manifest.source_lang == source_lang
@@ -377,8 +415,7 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
                 entry_index[entry.selector] = #entries
             end
         end
-        local pstate = manifest.providers and manifest.providers[provider]
-        carry_chapters(pstate and pstate.chapters)
+        prior_state = manifest.providers and manifest.providers[provider]
     else
         -- v1.2.11 overlays have no provider field.  Accept them once as the
         -- currently configured provider so an upgrade does not discard a
@@ -396,7 +433,7 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
                     entry_index[entry.selector] = #entries
                 end
             end
-            carry_chapters(legacy.chapters)
+            prior_state = { chapters = legacy.chapters }
         end
     end
     local function provider_kind(pid)
@@ -442,18 +479,62 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
         return {
             version = 3, revision = 0, book_path = book_path,
             source_lang = source_lang, target_lang = target_lang,
-            spine_count = chapter.spine_count or 0,
+            spine_count = spine_count,
             book_size = lfs.attributes(book_path, "size") or 0,
             book_mtime = lfs.attributes(book_path, "modification") or 0,
             display_mode = "auto", display_fallback = true,
             last_used_at = {}, fallback_order = {}, providers = {},
         }
     end
-    local function save_checkpoint(complete)
+    -- Per-chapter outcome of this run, keyed by spine index.  Seeded from the
+    -- previous provider state and overridden for every chapter actually
+    -- entered below, so a re-run upgrades failed/partial chapters to done.
+    local chapter_stats = {}
+    local function classify_chapters()
+        local status = {}
+        local function seed(list, kind)
+            for _, value in ipairs(type(list) == "table" and list or {}) do
+                local index = tonumber(value)
+                if index and index >= 1 and index <= spine_count then
+                    status[index] = kind
+                end
+            end
+        end
+        if prior_state then
+            seed(prior_state.chapters, "done")
+            seed(prior_state.partial_chapters, "partial")
+            seed(prior_state.failed_chapters, "failed")
+        end
+        for index, st in pairs(chapter_stats) do
+            if st.entered then
+                if st.candidates == 0 then
+                    status[index] = "done"
+                elseif st.cancelled then
+                    status[index] = "partial"
+                elseif st.success == st.candidates and st.failed == 0 then
+                    status[index] = "done"
+                elseif st.success > 0 then
+                    status[index] = "partial"
+                else
+                    status[index] = "failed"
+                end
+            end
+        end
+        local done, partial, failed = {}, {}, {}
+        for index = 1, spine_count do
+            local kind = status[index]
+            if kind == "done" then done[#done + 1] = index
+            elseif kind == "partial" then partial[#partial + 1] = index
+            elseif kind == "failed" then failed[#failed + 1] = index end
+        end
+        return done, partial, failed
+    end
+    local function save_checkpoint(complete, allow_empty)
         -- Never replace an existing overlay with an empty one.  When the
         -- provider changed and every request failed, writing an empty
         -- checkpoint would erase the previous provider's finished entries.
-        if #entries == 0 then return true end
+        -- An empty book (allow_empty) still records its done chapters.
+        if #entries == 0 and not allow_empty then return true end
         local ok, saved = pcall(Lock.withBookLock, output_dir, function()
             -- Re-read under the lock and union by selector: another writer
             -- (MCP import, a concurrent run) may have landed entries since
@@ -475,22 +556,25 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
                     merge_entries(merged, merged_index, legacy_doc.entries)
                 end
             end
-            if #merged == 0 then return true end
+            if #merged == 0 and not allow_empty then return true end
             local manifest = Overlay.loadManifest(output_dir) or fresh_manifest()
             manifest.providers = manifest.providers or {}
             local existing = manifest.providers[provider]
+            local done, partial, failed = classify_chapters()
+            -- Only a whole-book run that finished every spine chapter may be
+            -- complete; span/selection runs always leave it incomplete (7.4).
+            local is_complete = complete == true and mode == "all"
+                and spine_count >= 1 and #partial == 0 and #failed == 0
+                and #done == spine_count
             upsert_provider_state(manifest, provider, {
                 display_name = existing and existing.display_name or provider,
                 kind = existing and existing.kind or provider_kind(provider),
                 model_name = existing and existing.model_name,
                 confirmed = existing == nil or existing.confirmed ~= false,
-                -- Spine indexes covered so far.  Chapter-mode runs never set
-                -- complete, so follow mode uses this list to tell "chapter
-                -- already translated" from "whole book done".
-                chapters = covered_indexes,
-                partial_chapters = existing and existing.partial_chapters or {},
-                failed_chapters = existing and existing.failed_chapters or {},
-                complete = complete == true,
+                chapters = done,
+                partial_chapters = partial,
+                failed_chapters = failed,
+                complete = is_complete,
                 translated_count = count_unique(merged),
                 updated_at = os.time(),
             })
@@ -546,14 +630,15 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
         return false
     end
     write_progress(progress_path, 0, total, 0, 0, 0, #chapters)
+    local chapter_pos = 0
     for _, current in ipairs(chapters) do
         if cancel_requested() then cancelled = true; break end
         last_processed_index = current.index
-        if not covered_seen[current.index] then
-            covered_seen[current.index] = true
-            covered_indexes[#covered_indexes + 1] = current.index
-        end
+        chapter_pos = chapter_pos + 1
         local candidates = chapter_candidates[current.index] or {}
+        local st = { candidates = #candidates, success = 0, failed = 0,
+            entered = true, cancelled = false }
+        chapter_stats[current.index] = st
         -- Release the collected source text of this chapter as soon as its
         -- batch loop finishes.  On a several-hundred-chapter book the full
         -- candidate list would otherwise stay resident for the whole run,
@@ -563,7 +648,7 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
         end
         local batch_size = 48
         for first = 1, #candidates, batch_size do
-            if cancel_requested() then cancelled = true; break end
+            if cancel_requested() then cancelled = true; st.cancelled = true; break end
             local last = math.min(first + batch_size - 1, #candidates)
             local sources, translations = {}, {}
             local pending_sources, pending_offsets, pending_contexts = {}, {}, {}
@@ -621,11 +706,13 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
                         entry_index[entry.selector] = #entries
                     end
                     translated_count = translated_count + 1
+                    st.success = st.success + 1
                 else
                     failed_count = failed_count + 1
+                    st.failed = st.failed + 1
                 end
                 write_progress(progress_path, processed, total, translated_count,
-                    failed_count, current.index, #chapters)
+                    failed_count, chapter_pos, #chapters)
             end
             -- Atomic JSON replacement after every network batch provides a
             -- real restart point even when KOReader or the book closes.
@@ -633,16 +720,15 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
         end
         release_chapter()
     end
-    if translated_count == 0 and not cancelled then
+    if translated_count == 0 and not cancelled and total > 0 then
         cleanup()
         return nil, type(first_error) == "table" and first_error.message
             or tostring(first_error or "翻译服务没有返回译文")
     end
-    -- Only a whole-book run may mark the overlay complete.  A chapter-mode
-    -- run (span == 1, follow mode) must leave it incomplete so page-turn
-    -- scheduling keeps working and the "翻译本书" entry does not report the
-    -- book as done while chapters are still missing.
-    local saved = save_checkpoint(all_chapters and not cancelled and failed_count == 0)
+    -- Only a whole-book run may mark the overlay complete; span/selection
+    -- runs leave it incomplete so page-turn scheduling keeps working (7.4).
+    -- An empty book (total == 0) still records its chapters as done.
+    local saved = save_checkpoint(not cancelled, total == 0)
     cleanup()
     if not saved then return nil, "无法保存本书翻译缓存" end
     return {
@@ -652,7 +738,7 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
         translated = translated_count,
         failed = failed_count,
         cancelled = cancelled,
-        last_chapter = last_processed_index >= (chapter.spine_count or 1),
+        last_chapter = last_processed_index >= spine_count,
     }
 end
 

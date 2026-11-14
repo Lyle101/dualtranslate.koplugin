@@ -77,7 +77,7 @@ function State.saveQueue(plugin)
 end
 
 -- 13.4: older persisted queue items may predate the current field set.
--- Normalize the job shape (whole-book vs chapter span) from the legacy
+-- Normalize the job shape (all / span / selection) from the legacy
 -- all_chapters/fragment fields; an item whose shape cannot be inferred is
 -- marked failed so the queue menu surfaces it instead of a worker crashing.
 -- provider is deliberately left nil here: a resumed job picks up its own
@@ -85,9 +85,14 @@ end
 -- happens to be selected when the queue loads.
 local function backfill_queue_item(item)
     if item.provider == "" then item.provider = nil end
-    if item.all_chapters == nil then
-        if item.fragment ~= nil and item.fragment ~= "" then
-            item.all_chapters = false
+    if item.mode == nil then
+        if item.chapter_indexes ~= nil then
+            item.mode = "selection"
+        elseif item.all_chapters == true then
+            item.mode = "all"
+        elseif item.all_chapters == false
+            or (item.fragment ~= nil and item.fragment ~= "") then
+            item.mode = "span"
         else
             item.status = "failed"
             item.error = "旧队列任务无法推断翻译范围，请重新发起翻译"
@@ -96,11 +101,22 @@ local function backfill_queue_item(item)
             return
         end
     end
-    if item.all_chapters then
+    item.all_chapters = nil
+    if item.mode == "all" then
         item.fragment = nil
         item.span = nil
-    else
+        item.chapter_indexes = nil
+    elseif item.mode == "span" then
         item.span = tonumber(item.span) or 1
+        item.chapter_indexes = nil
+    elseif item.mode == "selection" then
+        item.fragment = nil
+        item.span = nil
+        item.chapter_indexes = type(item.chapter_indexes) == "table"
+            and item.chapter_indexes or {}
+    else
+        item.status = "failed"
+        item.error = "旧队列任务无法推断翻译范围，请重新发起翻译"
     end
 end
 
@@ -116,8 +132,8 @@ function State.loadQueue()
         else
             if item.status == "active" then item.status = "queued" end
             backfill_queue_item(item)
-            local key = tostring(item.book_path or "") .. "\0" .. tostring(item.all_chapters)
-            local retryable = item.status == "failed" and item.all_chapters
+            local key = tostring(item.book_path or "") .. "\0" .. tostring(item.mode)
+            local retryable = item.status == "failed" and item.mode == "all"
                 and (tonumber(item.retry_count) or 0) < 2
             if retryable and not retried[key] then
                 item.status, item.error = "queued", nil
@@ -151,8 +167,12 @@ function State.clearForBook(plugin, book_path)
     return true
 end
 
-function State.enqueue(plugin, book_path, all_chapters, fragment, silent, span, auto)
+function State.enqueue(plugin, opts)
+    opts = opts or {}
+    local book_path = opts.book_path
     if not book_path or not book_path:lower():match("%.epub$") then return end
+    local mode = opts.mode or "all"
+    local silent = opts.silent == true
     if plugin._translation_migration_failed then
         if not silent then
             plugin.TranslationUI.showInfo("译文数据迁移失败，已保留备份，翻译暂不可用")
@@ -186,17 +206,18 @@ function State.enqueue(plugin, book_path, all_chapters, fragment, silent, span, 
         book_path = book_path,
         -- Generation engine at enqueue time (9.3): delete guards and queue
         -- display key off this.  Older persisted items have no provider.
-        provider = plugin.getMode and plugin:getMode() or nil,
-        all_chapters = all_chapters and true or false,
-        fragment = all_chapters and nil or fragment,
-        -- Chapter-mode span: translate the current chapter plus the next
-        -- span-1 chapters.  nil/1 means just the current chapter.
-        span = (not all_chapters) and (tonumber(span) or 1) or nil,
+        provider = opts.provider or (plugin.getMode and plugin:getMode() or nil),
+        mode = mode,
+        -- Selection mode carries the explicit spine-index list; span mode
+        -- carries the starting fragment plus the chapter count.
+        chapter_indexes = mode == "selection" and opts.chapter_indexes or nil,
+        fragment = mode == "span" and opts.fragment or nil,
+        span = mode == "span" and (tonumber(opts.span) or 1) or nil,
         status = "queued", current = 0, total = 0, translated = 0, failed = 0,
-        silent = silent == true,
+        silent = silent,
         -- Page-turn driven (逐章模式 auto-continue): completion keeps the
         -- progress dialog but skips the per-chapter completion toast.
-        auto = auto == true,
+        auto = opts.auto == true,
     }
     table.insert(plugin._translation_queue, item)
     State.saveQueue(plugin)

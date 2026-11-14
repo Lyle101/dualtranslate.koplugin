@@ -39,8 +39,9 @@ function PageTrans.attach(plugin)
     end
 
     -- Called from onPageUpdate / onPosUpdate / onDocumentRerendered (silent,
-    -- auto-continue) and from translateBook in follow mode (silent=false, so
-    -- the initial chapter translation shows its progress dialog).
+    -- auto-continue) and after translateCurrentChapter when follow mode was
+    -- armed (silent=false, so the initial chapter translation shows its
+    -- progress dialog).
     -- Queues the current chapter when this book has no complete overlay yet.
     -- The serial queue deduplicates by book, and the overlay merge is
     -- idempotent, so repeated page turns never re-translate already-covered
@@ -107,7 +108,7 @@ function PageTrans.attach(plugin)
         -- suppressed (the progress dialog is still shown — that was an
         -- explicit user request — but a toast on every chapter is noise).
         self._page_translation_last_fragment = fragment_key
-        self:translateBook(false, silent == true, nil, true)
+        self:translateCurrentChapter(silent == true, true)
     end
 end
 

@@ -199,17 +199,26 @@ function dualtranslate:buildMenuTable()
                     and not self._translation_migration_failed
             end,
             callback = function()
-                self:translateBook(true)
+                -- 7.4: whole-book translation is unconditional and never
+                -- consults the 逐章模式 preference.
+                self:translateWholeBook(true)
             end,
         },
         {
-            -- "逐章模式" preference.  Checked: tapping "翻译本书" starts from
-            -- the current chapter and follows the reading position (page
-            -- turns silently translate newly reached chapters).  Unchecked:
-            -- "翻译本书" translates the whole book.
-            text_func = function()
-                return self:isPageTranslationEnabled() and "逐章模式（从当前章开始）" or "逐章模式"
+            text = "翻译当前章",
+            enabled_func = function()
+                return self:isEpub() and not self:isLegacyBilingualEpub(self.ui.document.file)
+                    and not self._translation_migration_failed
             end,
+            callback = function()
+                self:translateCurrentChapter(true)
+            end,
+        },
+        {
+            -- "逐章模式" preference: only governs whether "翻译当前章" arms
+            -- page-turn follow (turning pages silently translates newly
+            -- reached chapters).  Whole-book translation is unaffected.
+            text = "逐章模式（翻页自动续译）",
             checkbox = true,
             checked_func = function() return self:isPageTranslationEnabled() end,
             enabled_func = function()
