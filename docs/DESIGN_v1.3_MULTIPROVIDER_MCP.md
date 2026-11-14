@@ -4,8 +4,8 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.2（评审修订） |
-| 日期 | 2026-11-13 |
+| 文档版本 | 0.3（第二轮评审修订） |
+| 日期 | 2026-11-14 |
 | 适用代码 | DualTranslate `v1.2.11-xp50` + `636f135`（P0 已合入） |
 | 目标版本 | `v1.3.0` |
 | 状态 | P0 已实施；P1 待开工（数据模型决策已定稿，见 5.4） |
@@ -17,11 +17,13 @@
 | --- | --- | --- |
 | 0.1 | 2026-11-13 | 初稿：可行性、数据模型 v3、R1-R4、P0 补丁、MCP 设计、迁移与测试计划 |
 | 0.2 | 2026-11-13 | P0 合入后对齐代码；修订迁移 SQL（缺 `providers` 表）、内置 provider seed、显示模式（`display_mode`）、fallback 顺序与「最近使用」解耦、删除意图文件、MCP 长段 part 合并、锁模块与依赖方向、0 候选章节语义、outline 解析实现路径、性能指标拆分；行号引用改为函数名 |
+| 0.3 | 2026-11-14 | 第二轮评审：缓存命中补定位行（A1）、SSH 双 key 拆分（A2）、`reconcile` 不再仅凭「DB 无行」删 entries（A3）、`storeForBook` 统一 upsert（A4）、`reload.signal` 改用单调序号（A5）、`complete` 增加 `spine_count=0` 边界（A6）、迁移备份强制 checkpoint（A7）；统一 `book_size`/`book_mtime` 口径；清理与非目标重复的开放问题；性能指标补测量口径 |
 
 **阅读约定**
 
 - 代码定位优先使用 `文件.lua#函数名`；行号会随提交漂移，只在附录 F 保留一张快照表（以 `636f135` 为准）。
 - 标注 **[已实现]** 的小节是记录，不是待办；其余小节都是 P1+ 的输入。
+- 正文按 **R1 → R3 → R4 → R2** 排列（先数据与显示，后外部链路），与执行摘要的落地顺序 P0→P1→P2→P3 不同；检索需求时以 R 编号为准。
 - 设计决策编号 D1…D13 见 5.4，正文引用决策时写编号。
 
 **目录**
@@ -169,7 +171,7 @@ B1 是用户本次现象的**直接原因**；B2 是切换服务始终无效的*
 - `Epub.translate_overlay()` 现在是 **12 个位置参数**（P0 在末尾追加了 `provider`，见 `dualtranslate_epub.lua#translate_overlay`）。历史上已经发生过参数错位事故（见 `XPLATFORM.md`）。本期必须改为**单 options 表**，否则再加章节集合/provider 参数风险很高。
 - `Overlay.buildCss(path, options)` 只接收一个**文件路径**（`overlay.json`），且 options 没有 provider 维度，无法按服务过滤（`dualtranslate_overlay.lua#buildCss`）。
 - `PageTrans.maybeSchedulePageTranslation()` 用全局 `complete/chapters` 判断是否继续翻译（`dualtranslate_pagetrans.lua#maybeSchedulePageTranslation`），多 provider 后必须按当前生成引擎判断。
-- `getBookCacheDirectory()` 只按「书 + 目标语言」分目录（`dualtranslate_reader.lua#getBookCacheDirectory`），provider 不参与目录身份，也不校验书是否被替换（见 6.3 的 `book_size`）。
+- `getBookCacheDirectory()` 只按「书 + 目标语言」分目录（`dualtranslate_reader.lua#getBookCacheDirectory`），provider 不参与目录身份，也不校验书是否被替换（见 6.3 的 `book_size`/`book_mtime`）。
 - Kindle 端没有可靠的 `sqlite3` 命令行；KOReader 自带 `luajit` 与 `lua-ljsqlite3`，这是外部导入的可执行基础。
 - Kindle 内存/IO 有限；overlay 体积会随 provider 数量线性增长，必须避免把多份译文塞进一个 JSON。
 
@@ -482,6 +484,8 @@ fresh 路径同样要执行 6.2.2 第 2 步的内置 provider seed（`INSERT OR 
 - **主键加入 provider**：同一原文可以被多个服务分别缓存，互不覆盖。
 - **主键加入 selector**：同一段原文可能在书中出现多次（不同章、同章不同段），如果只用 `source_text` 做键，`INSERT OR REPLACE` 会把 selector/xpointer/chapter_index 覆盖成最后一个位置，导致「从 DB 重建 overlay」少段或贴错位置。旧 rows 迁移时 `selector=''`，仍能凭 `source_text` 去重。
 - **selector 允许为空**：旧数据/无上下文调用使用 `''`；新翻译路径应始终写真实 selector。`lookupForBook` 只按 `source_text` 查，取 `ORDER BY last_used_at DESC LIMIT 1`（同一原文译文相同，但定位元数据要取最近一条）。
+- **命中缓存也要补定位行**：`translateTextForEpub` 命中缓存后会直接返回，不走 `storeForBook`；若不补写，同一原文在书中出现 N 次时，DB 只有第一次翻译位置的 selector 行，「N 行」并不成立。约定：命中后用 `INSERT ... ON CONFLICT(book_path, source_lang, target_lang, provider, source_text, selector) DO NOTHING` 补一条**带相同译文、只补充定位信息**的行（冲突时不改写已有行）。正常翻译几乎不触发，只有「overlay 丢失、靠 DB 回填」时才会批量发生，写入量可接受。
+- **写入统一用 upsert，不用 `INSERT OR REPLACE`**：`OR REPLACE` 先 DELETE 再 INSERT，会重置 `created_at`/`use_count`，与 10.6 导入路径的 `ON CONFLICT ... DO UPDATE` 口径不一致。v3 的 `storeForBook` 改为 `INSERT ... ON CONFLICT(book_path, source_lang, target_lang, provider, source_text, selector) DO UPDATE SET translated_text=excluded.translated_text, last_used_at=excluded.last_used_at, use_count=use_count+1`。
 - **行数不等于段数**：同一原文在书中出现 N 次就有 N 行；`translated_count` 一律以 entries 的唯一 selector 数为准，DB 行数只用于诊断。删除 provider 时按 `(book_path, target_lang, provider)` 整批删，不依赖行数。
 - **增加 selector/xpointer/chapter_index**：MCP 导入与「从 DB 重建 overlay」需要定位信息；插件自身翻译时也写入（通过 `translate(text, context)` 回调）。
 - **不拆 normalized 表**：`segments + translations` 更优雅，但迁移和查询改动大；当前按 provider 复制 source_text 的体积可接受（一本 500KB 原文 × 4 个服务 ≈ 2MB）。若后续 DB 膨胀，再引入 `segments` 表。
@@ -495,7 +499,7 @@ fresh 路径同样要执行 6.2.2 第 2 步的内置 provider seed（`INSERT OR 
 2. `PRAGMA table_info(book_translations)`：没有表 → 执行 fresh schema，结束。
 3. 有表但 `user_version < 3` → 执行下面的迁移。
 
-迁移前由 Lua 层复制 `dualtranslate_cache.sqlite3` 为 `.bak`，并尽量 `PRAGMA wal_checkpoint(TRUNCATE)`。
+迁移前由 Lua 层备份数据库，顺序不能省：先 `PRAGMA wal_checkpoint(TRUNCATE)`，用 `prepare` + `step` 读第一列（`db:exec` 拿不到返回值），非 0（仍有读事务未结束）时重试一次，仍失败则**中止迁移**并提示用户关闭阅读器后重试；checkpoint 成功后关闭连接，再复制 `dualtranslate_cache.sqlite3` 为 `.bak`。只复制主文件而不合并 WAL，`.bak` 会缺最后一个事务，回滚时丢数据。SQLite ≥ 3.27 可直接 `VACUUM INTO 'dualtranslate_cache.sqlite3.bak'` 作为等价实现。
 
 ```sql
 BEGIN IMMEDIATE;
@@ -615,6 +619,7 @@ cache/dualtranslate/books/<hash>/
   "target_lang": "zh-Hans",
   "spine_count": 61,
   "book_size": 1234567,
+  "book_mtime": 1759990000,
   "display_mode": "manual",
   "display_provider": "mcp:gpt-5",
   "display_fallback": true,
@@ -705,7 +710,7 @@ local slug = provider_id:gsub("[^%w._-]", "_")  -- mcp:gpt-5 -> mcp_gpt-5
    - `display_mode = "manual"` + `display_provider`：entry 数最多的 provider（并列时取 `updated_at` 最新）；**必须非空**，否则升级后 `buildCss` 返回空串，用户会以为译文丢失。写成 `manual` 是为了让迁移时的选择不被「自动」立刻覆盖。
    - `fallback_order`：按 `translated_count` 降序生成，至少包含 `display_provider`。
    - `last_used_at`：用该 provider 的 `updated_at` 初始化（缺失则 `now`）。
-   - `book_size`：迁移时读当前文件大小；读不到设 0（表示未知，不做 stale 判定）。
+   - `book_size` / `book_mtime`：迁移时读当前文件大小与 mtime；读不到设 0（表示未知，不做 stale 判定）。
    - `revision`：初始为 1。
 5. 原子写 manifest。
 6. `overlay.json` 重命名为 `overlay.v2.bak`。
@@ -718,9 +723,9 @@ local slug = provider_id:gsub("[^%w._-]", "_")  -- mcp:gpt-5 -> mcp_gpt-5
 - `providers[pid].chapters`：**完整翻译完成**的 spine index 列表。该章所有候选段落都成功（`failed == 0`）才加入；**候选数为 0 的章节（封面、版权页、空白页）直接计入 `chapters`**，不进入 `failed_chapters`。否则 `complete` 永远不成立，逐章模式会反复重排这些章（D13）。
 - `providers[pid].partial_chapters`：有部分译文、但仍有失败/未完成段落的章节。
 - `providers[pid].failed_chapters`：尝试过、至少有 1 段候选且 0 段成功的章节，或中断时尚未完成的章节。
-- `providers[pid].complete`：仅当 `chapters` 覆盖 `1..spine_count` 且 `partial_chapters/failed_chapters` 为空时为 true；整书任务才允许置 true。
+- `providers[pid].complete`：仅当 `spine_count >= 1` **且** `chapters` 覆盖 `1..spine_count` 且 `partial_chapters/failed_chapters` 为空时为 true；整书任务才允许置 true。`spine_count=0`（迁移读不到 OPF spine）时恒为 false——空集 `1..0` 不能被当成「已覆盖全书」。
 - `translated_count`：entries 中**唯一 selector** 的数量，用于菜单显示；DB 行数只用于诊断，不作为显示依据。
-- `book_size`：写入时的书文件字节数。打开书时与 `lfs.attributes(size)` 比较，不一致说明同一路径的 EPUB 被替换（修订版/换源），标记 `stale=true`、默认隐藏译文并提示「缓存与当前文件不符，建议清除后重译」。只 hash 路径与目标语言无法发现这种替换。
+- `book_size` / `book_mtime`：写入时的书文件字节数与 mtime。打开书时与 `lfs.attributes` 比较，**任一不一致**即说明同一路径的 EPUB 被替换（修订版/换源），标记 `stale=true`、默认隐藏译文并提示「缓存与当前文件不符，建议清除后重译」。只 hash 路径与目标语言无法发现这种替换；与 MCP job 的 `file_size`/`file_mtime` 采用同一口径，避免两处判定行为不一致。
 - `display_mode`：`"auto" | "manual"`。`auto` 时显示 provider 取 `last_used_at` 最大者；`manual` 时以 `display_provider` 为准。只存 `display_provider` 无法表达「自动」（D8）。
 - `last_used_at`：`provider_id -> epoch` 映射，仅由「翻译完成 / 导入 / 用户切换」写入，供 `display_mode=auto` 使用。
 - `fallback_order`：回退优先级，**稳定**：初始化按覆盖度降序，之后只有用户显式操作（切换显示、删除 provider、手动排序）才改；后台翻译或导入不得改写（D9）。
@@ -928,9 +933,9 @@ context = {
 ```
 
 - `Epub` 在候选循环里构造 context，传给 `translate(source, context)` / `translate_batch(sources, contexts)`。
-- `Reader:translateTextForEpub(text, context)` 把 context 透传给 `Cache:storeForBook(..., meta)`。
+- `Reader:translateTextForEpub(text, context)` 把 context 透传给 `Cache:storeForBook(..., meta)`；**命中缓存时也要用当前 context 补一条 `DO NOTHING` 的定位行**（见 6.2.1），否则「同原文多位置」在 DB 里只有第一条位置的 selector。
 - `translateTextBatchForEpub(texts, contexts)` 逐条透传；批量结果写缓存时也带 context。
-- 长段落递归 `splitTranslationText` 时，chunk 仍带同一个 context；最终合并译文用原段落 context 入库一次。
+- 长段落递归 `splitTranslationText` 时，chunk 仍带同一个 context，但递归调用必须传 `skip_store=true`：否则每个 chunk 各写一行，DB 里会同时出现 chunk 行与 parent 行（现状 `translateTextForEpub` 的递归路径就是如此），`translated_count` 与重建都会受影响。最终合并译文只用原段落 context 入库一次。
 - 没有 context 的调用（旧测试/兼容路径）允许 `selector=''`，但日志应记录一次警告，便于发现漏传。
 
 Queue item：
@@ -1219,7 +1224,7 @@ end
 - 删除顺序：**intent → DB → entries → manifest → 清 intent**。`delete.pending.json` 记录 provider 与阶段，`reconcile()` 只按意图收尾（D11）：
   - 有 intent、DB 仍有行：崩溃发生在删 DB 前/中 → **回滚删除**（清 intent），provider 原样保留。
   - 有 intent、DB 无行：删除已生效 → 继续删 entries、清 manifest 中的 provider，最后删 intent。
-  - 无 intent：不做删除推断；孤立 entries 交给 14.3 的 `reconcile`——DB 有该 provider 行则补 manifest，DB 无行则视为删除残留并清掉。
+  - 无 intent：不做删除推断；孤立 entries 交给 14.3 的 `reconcile`——DB 有该 provider 行则补 manifest；DB 无行时**不能直接判为删除残留**（设备端翻译是「先 DB 后 entries」，DB 写失败会留下合法孤儿；更极端的场景是 `Cache:open` 检测到 DB 损坏会删库重建，全书 entries 会瞬间全部变成「DB 无行」），只有 entries 文件的 mtime 超过阈值（默认 30 天）才清掉，否则只补 manifest 并 `logger.warn`。有 intent 的情况由上面两条分支处理，不走这里。
 - `reconcile()` 永不恢复用户已删除的 provider；要撤销只能重新翻译/重新导入。
 - 所有删除操作幂等：重复删除返回 0，不报错。
 - `State.hasActiveJob(book_path, provider_id)` 需要新增：遍历 `_translation_queue`（status queued/active 且 `item.provider == provider_id`），并检查 `_translation_progress`；这是 Reader 调用 Store 之前的 guard。
@@ -1381,6 +1386,7 @@ cache/dualtranslate/mcp/jobs/<job_id>/result.json     -- 翻译后
 - 导入时必须**先按 `parent_id` 分组、按 `part` 排序、用与切分相同的分隔符（单个空格）拼回一段**，再写一条 entry / 一条 DB 行。若按 selector「后写覆盖先写」，只会保留最后一个 part，长段译文会静默丢失。
 - `state.total` / `submitted` / `accepted` 按 **part** 计数（提交粒度）；`translated_count`、`chapters` 判定按 **parent**（唯一 selector）计数。
 - 任一 part 缺失 → 该 parent 视为未完成：不写 entry，计入 `partial_chapters`。
+- `dt_get_segments` 对同一 parent 的 part 2+，`prev` 必须返回**上一 part 的 source 末尾**（而不是上一段），否则 Agent 逐 part 翻译会丢跨 part 的指代与语气，拼回后语义断裂；`include_context=true` 时同时给出 `parent_total` 与 `part`，便于 Agent 判断边界。
 
 ### 10.3 MCP Server
 
@@ -1528,9 +1534,10 @@ MCP 规范支持 elicitation；实现两套路径：
 - SSH 主机密钥校验开启；禁止 `StrictHostKeyChecking=no`。
 - 删除类工具标记 `destructiveHint`，调用前要求用户确认。
 - 结果 JSON 大小上限（建议 50MB）；段落数上限；译文长度上限。
-- **SSH key 必须被限制在 dtctl**：`authorized_keys` 用
-  `command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh",no-pty,no-agent-forwarding,no-port-forwarding`
-  锁定；否则「MCP 不暴露 exec」只是 Python 层的自觉，key 泄漏即可拿到 root shell。
+- **SSH key 必须拆成两把，不能一把通吃**：
+  - **只读 key**（下载 job/result）：`restrict,command="internal-sftp"` + `ChrootDirectory` 限定到 `mcp/jobs/`，只允许 SFTP/SCP 读取；不要授予 db 与书籍目录的读权限。
+  - **写入 key**（import / delete / set-display）：`command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh",no-pty,no-agent-forwarding,no-port-forwarding`，**不允许 SFTP**。
+  - 原因：`command=` 的 forced command 会拦截 `sftp` 子系统请求，**同一把 key 不能既走 SFTP 又走 dtctl**。只用一把锁死的 key，10.4 的「SFTP 首选」必然失败；只用一把未锁的 key，「MCP 不暴露 exec」就只是 Python 层的自觉，key 泄漏即可拿到 root shell。
 - 设备侧再做一次校验（见 10.5）：`dtctl` 自己校验 `--job` 的归属、`job.book.device_path` 前缀、`--provider` 文法。两层重复是故意的。
 
 ### 10.4 传输层
@@ -1547,7 +1554,7 @@ class Transport(Protocol):
 
 | 实现 | 场景 | 说明 |
 | --- | --- | --- |
-| `SshTransport` | Kindle 越狱 + USBNetwork | 首选；SFTP 优先，**无 sftp-server 时回退 SCP 或 `ssh "cat > tmp && mv"`**；SSH 执行固定命令 |
+| `SshTransport` | Kindle 越狱 + USBNetwork | 首选；**读走只读 key 的 SFTP/SCP，写只走写入 key 的 dtctl**（见 10.3 双 key）；无 sftp-server 时读回退 SCP 或 `ssh "cat"`；不提供任意 `ssh exec` |
 | `UsbTransport` | Kindle 挂载为 U 盘 | 直接文件读写；无法执行导入命令，走「收件箱」模式 |
 | `LocalTransport` | 模拟器/测试 | 指向本地目录，CI 用 |
 | `AdbTransport` | Android 设备 | 后续扩展 |
@@ -1555,11 +1562,13 @@ class Transport(Protocol):
 SSH 调用示例（实际用参数数组，避免注入）：
 
 ```text
-sftp: get /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/job.json
+sftp: get /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/job.json   # 只读 key
 ssh:  /mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh import \
       --job /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/job.json \
-      --result /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/result.json
+      --result /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/result.json  # 写入 key
 ```
+
+两条命令用**不同的 key**：`sftp` 走只读 key，`ssh` 走写入 key；写入 key 被 forced command 锁定，客户端传入的命令会被忽略，统一落到 `dtctl.sh`。
 
 ### 10.5 设备端 CLI
 
@@ -1693,13 +1702,13 @@ end
        - 全部完成 → 加入 `chapters`；
        - 部分完成 → 加入 `partial_chapters`；
        - `parent_count > 0` 且 0 段完成 → 加入 `failed_chapters`；
-     - `complete` 仅当 `chapters` 覆盖 `1..spine_count` 且 `partial_chapters/failed_chapters` 为空；
+     - `complete` 仅当 `spine_count >= 1` 且 `chapters` 覆盖 `1..spine_count` 且 `partial_chapters/failed_chapters` 为空；
      - `updated_at=now`，`last_used_at[provider]=now`，`revision = revision + 1`；
    - 若 `set_display`，写 `display_mode="manual"` + `display_provider` 与 `last_used_at`；**不改** `fallback_order`。
    - `display_name` / `model_name` / `confirmed` 以 DB 为准（D10）：写 manifest 前从 `providers` 表回读这三个字段，manifest 只做投影。
    - 临时文件 + `rename`。
 6. **重载信号**
-   - 写 `reload.signal`（内容：provider、时间、段数）。
+   - 写 `reload.signal`：单行 JSON `{"seq": <manifest.revision>, "provider": "...", "count": N, "at": T}`。`seq` 取本次写入后的 `manifest.revision`，是刷新判定的唯一依据（见 10.7）。
 7. **释放 lock**，返回统计。
 
 写入顺序的理由：
@@ -1711,7 +1720,7 @@ end
 
 ### 10.7 插件侧刷新
 
-- `onPageUpdate` / `onPosUpdate`：检查 `reload.signal` 的 mtime（`lfs.attributes` 很便宜），比 `_last_reload_signal` 新则：
+- `onPageUpdate` / `onPosUpdate`：读取 `reload.signal` 的**内容**（几十字节，`io.open` 很便宜），`seq` 大于 `_last_reload_signal_seq` 才处理。**不要比较 mtime**：FAT32 时间戳只有 ~2 秒粒度，连续两次导入（间隔 < 2s）mtime 可能不变，刷新会被静默漏掉。新 `seq` 时：
   - 重新加载 manifest；
   - 如果新 provider 未确认，**不弹模态框**（会打断阅读并触发重新分页）：菜单标「MCP · 待确认」+ 一次性 toast，确认动作由用户进菜单主动触发（10.8）；
   - `refreshDocumentStyles()`；
@@ -1754,6 +1763,8 @@ end
 3. 命中则补一个 entry，未命中跳过。这样老书也能重建，且完全不依赖 DB 里的定位列。
 4. 重建后写 entries（`revision = manifest.revision + 1`）、更新 manifest 的 `translated_count`；**不新增 DB 行**。
 5. 成本 = 一次解包 + 一次全表查询；只在导入失败或用户点「修复本书译文数据」时执行，不进打开书的常路径。
+
+> 重建**始终以 `source_text` 匹配为准**，不依赖 DB 里的 `selector/xpointer/chapter_index`（迁移行是 `selector=''`，新数据也可能只补了部分位置）。定位列只用于诊断与排序，不参与重建判定；6.2.1 的「命中缓存补定位行」是为了让新数据的定位列尽量完整，两者并存不冲突。
 
 ### 10.10 隐私与安全
 
@@ -1831,7 +1842,7 @@ end
 +    ]], os.time(), book_path, source_lang, target_lang, source_text, provider)
 ```
 
-> P0 阶段主键仍是旧结构，切换到新 provider 时 `INSERT OR REPLACE` 会覆盖同原文的旧 provider 行。这能保证「切换后必须用新服务」，但会丢失旧服务缓存；P1 的主键升级后两者可以共存。
+> P0 阶段主键仍是旧结构，切换到新 provider 时 `INSERT OR REPLACE` 会覆盖同原文的旧 provider 行。这能保证「切换后必须用新服务」，但会丢失旧服务缓存；P1 的主键升级后两者可以共存，并把 `storeForBook` 改为 upsert（见 6.2.1），避免 `created_at`/`use_count` 被重置。
 
 ### 11.3 Overlay 续跑合并加 provider
 
@@ -1978,7 +1989,7 @@ DualTranslate
 
 ### 13.2 备份
 
-- DB：`dualtranslate_cache.sqlite3.bak`（迁移前复制；WAL 模式先 `PRAGMA wal_checkpoint(TRUNCATE)` 或关闭连接）。
+- DB：`dualtranslate_cache.sqlite3.bak`（迁移前复制；必须按 6.2.2 先 `PRAGMA wal_checkpoint(TRUNCATE)` 成功并关闭连接，checkpoint 失败则中止迁移，不能只复制主文件）。
 - overlay：`overlay.json` 重命名为 `overlay.v2.bak`，不删除。
 - 迁移失败：回滚事务，保留 `.bak`，UI 提示「迁移失败，已保留备份」。
 
@@ -2036,7 +2047,7 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 | --- | --- | --- |
 | DB 事务中 | 回滚，无变化 | 重试导入 |
 | DB 已提交、entries 未写 | DB 有译文，显示无 | 优先 `Store.rebuildEntriesFromDb`；旧行 `selector=''` 时改用「重解包抽候选 + 按 source_text 匹配」（见 10.9） |
-| entries 已写、manifest 未更新 | entries 孤立 | `reconcile` 先查 DB：有该 provider 行 → 补 manifest；无行 → 视为删除残留，删 entries |
+| entries 已写、manifest 未更新 | entries 孤立 | `reconcile` 先查 DB：有该 provider 行 → 补 manifest，不动 entries；无行且「有 delete intent」或「entries mtime 超过 30 天」→ 视为删除残留，删 entries；否则补 manifest + warn（见 9.3） |
 | manifest 已写、signal 未写 | 数据完整，插件未刷新 | 下次打开/手动刷新 |
 | 删除前崩溃（DB 仍有行） | intent 在、DB 有行 | 回滚删除：清 intent，provider 保留 |
 | 删除 DB 后、entries 删除前 | DB 无、entries 有、intent 在 | 按 intent 继续删 entries 与 manifest 条目；**不恢复** |
@@ -2052,7 +2063,7 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 
 - SQLite WAL 允许多进程读写；外部导入用短事务。
 - overlay 文件原子 rename；插件 `Overlay.buildCss` 缓存 key 含 mtime，下一次刷新会重新读。
-- `reload.signal` 只做提示；插件轮询成本低（每次翻页一次 `lfs.attributes`）。
+- `reload.signal` 只做提示；插件轮询成本低（每次翻页读一次几十字节的 `seq`，不做 JSON 全量校验）。
 - 如果插件正在翻译同一本书：book lock 冲突，导入返回 `DEVICE_BUSY`；Agent 稍后重试，或等队列空闲。
 
 ---
@@ -2120,6 +2131,8 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 | 内存增量（fallback 三服务） | < 40 MB；`css_cache` 改「每书 1 条 + 总大小上限 8 MB」，否则 16 条 × 1–3 MB 会到 30–50 MB |
 | overlay 单 provider 文件 | 3,000 段约 0.8-1.5 MB |
 
+> 表中为 Kindle 真机 P50 参考值。IO 波动会让单次测量偏差很大，验收口径统一为「同一设备 5 次取中位数，P50 相对现状不劣化超过 20%」；测量脚本随 P4 交付，避免用一次冷启动读数作为结论。
+
 ### 15.5 验收矩阵
 
 | 需求 | 必须通过 |
@@ -2135,7 +2148,7 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 - 长段切分（超过 `max_chars_per_segment`）必须按 parent 拼回后再入库，缺 part 不得写 entry。
 - 0 候选章节不得阻塞 `complete`。
 - entries 与 manifest 的 `revision` 不一致时必须重建 CSS，不能命中旧缓存。
-- 同一路径 EPUB 被替换（`book_size` 变化）时不得把旧译文贴到新文本上。
+- 同一路径 EPUB 被替换（`book_size` 或 `book_mtime` 变化）时不得把旧译文贴到新文本上。
 
 ---
 
@@ -2232,18 +2245,15 @@ SSH 直连、MCP elicitation、自动刷新作为第二阶段增强。这样即�
 
 ## 17. 开放问题
 
-> 设计层面的选择已上移到 5.4（D1…D13），这里只列需要外部条件或产品确认的问题。
+> 设计层面的选择已上移到 5.4（D1…D13），这里只列需要外部条件或产品确认的问题；与 3.5 非目标重复的选项不再重复列出。
 
 1. 用户的 Kindle 是否已具备 SSH/USBNetwork？若没有，R2 先按「USB 收件箱 + 插件导入」交付。
 2. MCP 客户端是哪一个（Claude Desktop / Cursor / 其他）？需要确认是否支持 elicitation；不支持则走「工具返回提示，Agent 问用户」路径。
 3. 是否需要 MCP Server 自己直连模型 API（不依赖 Agent）？本期不做，但架构上可加 `translate_with_api` 工具。
-4. 「显示译文」是否需要「全部服务」选项？技术上只能单选；如果产品坚持，需要改 DOM 注入，另立项目。
-5. 删除服务是「当前书 + 当前目标语言」还是「当前书所有语言」？本设计默认前者，后者作为高级选项。
-6. 是否需要术语表/风格指南？MCP job 已预留 `glossary/style_guide`，可后续做编辑 UI。
-7. 是否支持 PDF/其他格式？本期仍只支持 EPUB。
-8. 是否要把 MCP 任务纳入现有翻译队列？本设计让 MCP 任务独立（文件 + 状态），避免与设备端 worker 抢锁；如果希望统一展示，可在 P4 加只读列表。
-9. 旧 `translations` 表是否需要 provider 化？当前整书流程不用；若未来恢复划词翻译，再改造。
-10. overlay 是否需要按章节拆分以支持超大书？当前按 provider 分文件；若 10k+ 段仍慢，P4 评估 `entries/<provider>/<chapter>.json`。
+4. 删除服务是「当前书 + 当前目标语言」还是「当前书所有语言」？本设计默认前者，后者作为高级选项。
+5. 是否需要术语表/风格指南？MCP job 已预留 `glossary/style_guide`，可后续做编辑 UI。
+6. 旧 `translations` 表是否需要 provider 化？当前整书流程不用；若未来恢复划词翻译，再改造。
+7. overlay 是否需要按章节拆分以支持超大书？当前按 provider 分文件；若 10k+ 段仍慢，P4 评估 `entries/<provider>/<chapter>.json`。
 
 ---
 
@@ -2274,8 +2284,9 @@ PRAGMA user_version;
     "book_path": { "type": "string" },
     "source_lang": { "type": "string" },
     "target_lang": { "type": "string" },
-    "spine_count": { "type": "integer", "minimum": 1 },
+    "spine_count": { "type": "integer", "minimum": 0 },
     "book_size": { "type": "integer", "minimum": 0 },
+    "book_mtime": { "type": "integer", "minimum": 0 },
     "display_mode": { "enum": ["auto", "manual"] },
     "display_provider": { "type": ["string", "null"] },
     "display_fallback": { "type": "boolean" },
