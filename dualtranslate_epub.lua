@@ -8,6 +8,8 @@ local Overlay = require("dualtranslate_overlay")
 local Tools = require("dualtranslate_tools")
 local DataStorage = require("datastorage")
 local socket_url = require("socket.url")
+local Lock = require("dualtranslate_lock")
+local lfs = require("libs/libkoreader-lfs")
 
 local function read_file(path)
     local file = io.open(path, "rb")
@@ -313,50 +315,193 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
     if not Tools.mkdir_p(output_dir) then
         cleanup(); return nil, "无法创建本书翻译缓存目录"
     end
-    local output = output_dir .. "/overlay.json"
+    local output = output_dir .. "/manifest.json"
+    local legacy_path = output_dir .. "/overlay.json"
     local entries, entry_index = {}, {}
     -- A killed subprocess or closing the book may interrupt a run.  Keep the
     -- batches already completed and merge into them on the next run.
-    local previous = Overlay.load(output)
-    -- Spine indexes covered by previous runs, carried forward so a partial
-    -- resume never forgets chapters translated in earlier sessions.
-    local covered_indexes = {}
-    if previous
-        and previous.book_path == book_path
-        and previous.source_lang == source_lang
-        and previous.target_lang == target_lang
-        -- v1.2.11 overlays have no provider field.  Accept them once as the
-        -- currently configured provider so an upgrade does not discard a
-        -- finished book; the next checkpoint stamps the actual provider.
-        and (previous.provider == provider or previous.provider == nil) then
+    local covered_indexes, covered_seen = {}, {}
+    local function carry_chapters(list)
+        if type(list) ~= "table" then return end
+        for _, index in ipairs(list) do
+            if not covered_seen[index] then
+                covered_seen[index] = true
+                covered_indexes[#covered_indexes + 1] = index
+            end
+        end
+    end
+    local previous
+    local legacy_consumed = false
+    local manifest = Overlay.loadManifest(output_dir)
+    if manifest and manifest.book_path == book_path
+        and (manifest.source_lang == source_lang
+            or manifest.source_lang == nil or manifest.source_lang == "") then
+        previous = Overlay.loadEntries(output_dir, provider)
+    end
+    if previous then
         for _, entry in ipairs(previous.entries or {}) do
             if entry.selector and entry.translation then
                 entries[#entries + 1] = entry
                 entry_index[entry.selector] = #entries
             end
         end
-        if type(previous.chapters) == "table" then
-            for _, index in ipairs(previous.chapters) do
-                covered_indexes[#covered_indexes + 1] = index
+        local pstate = manifest.providers and manifest.providers[provider]
+        carry_chapters(pstate and pstate.chapters)
+    else
+        -- v1.2.11 overlays have no provider field.  Accept them once as the
+        -- currently configured provider so an upgrade does not discard a
+        -- finished book; the next checkpoint stamps the actual provider.
+        local legacy = Overlay.load(legacy_path)
+        if legacy
+            and legacy.book_path == book_path
+            and legacy.source_lang == source_lang
+            and legacy.target_lang == target_lang
+            and (legacy.provider == provider or legacy.provider == nil) then
+            legacy_consumed = true
+            for _, entry in ipairs(legacy.entries or {}) do
+                if entry.selector and entry.translation then
+                    entries[#entries + 1] = entry
+                    entry_index[entry.selector] = #entries
+                end
+            end
+            carry_chapters(legacy.chapters)
+        end
+    end
+    local function provider_kind(pid)
+        if pid == "system" then return "builtin" end
+        if pid == "microsoft_free" then return "http" end
+        if pid == "legacy" then return "legacy" end
+        return "mcp"
+    end
+    local function count_unique(list)
+        local seen, count = {}, 0
+        for _, entry in ipairs(list) do
+            local selector = entry.selector
+            if selector and selector ~= "" and not seen[selector] then
+                seen[selector] = true
+                count = count + 1
             end
         end
+        return count
+    end
+    local function merge_entries(target, index, list)
+        for _, entry in ipairs(list or {}) do
+            if entry.selector and entry.selector ~= "" then
+                local at = index[entry.selector]
+                if at then target[at] = entry
+                else
+                    target[#target + 1] = entry
+                    index[entry.selector] = #target
+                end
+            end
+        end
+    end
+    local function upsert_provider_state(manifest, pid, state)
+        manifest.providers[pid] = state
+        manifest.last_used_at = manifest.last_used_at or {}
+        manifest.last_used_at[pid] = os.time()
+        manifest.fallback_order = manifest.fallback_order or {}
+        for _, existing in ipairs(manifest.fallback_order) do
+            if existing == pid then return end
+        end
+        manifest.fallback_order[#manifest.fallback_order + 1] = pid
+    end
+    local function fresh_manifest()
+        return {
+            version = 3, revision = 0, book_path = book_path,
+            source_lang = source_lang, target_lang = target_lang,
+            spine_count = chapter.spine_count or 0,
+            book_size = lfs.attributes(book_path, "size") or 0,
+            book_mtime = lfs.attributes(book_path, "modification") or 0,
+            display_mode = "auto", display_fallback = true,
+            last_used_at = {}, fallback_order = {}, providers = {},
+        }
     end
     local function save_checkpoint(complete)
         -- Never replace an existing overlay with an empty one.  When the
         -- provider changed and every request failed, writing an empty
         -- checkpoint would erase the previous provider's finished entries.
         if #entries == 0 then return true end
-        return Overlay.save(output, {
-            version = 2, complete = complete == true, provider = provider,
-            book_path = book_path, source_lang = source_lang,
-            target_lang = target_lang, entries = entries,
-            -- Spine indexes covered so far.  Chapter-mode runs never set
-            -- complete, so the follow mode uses this list to tell "this
-            -- chapter is already translated" from "the whole book is done";
-            -- without it, visiting an already-covered chapter would re-queue
-            -- it and the overlay merge would "finish" instantly at 100%.
-            chapters = covered_indexes,
-        })
+        local ok, saved = pcall(Lock.withBookLock, output_dir, function()
+            -- Re-read under the lock and union by selector: another writer
+            -- (MCP import, a concurrent run) may have landed entries since
+            -- the last read, and they must not be clobbered (14.1).
+            local merged, merged_index = {}, {}
+            local disk = Overlay.loadEntries(output_dir, provider)
+            merge_entries(merged, merged_index, disk and disk.entries)
+            merge_entries(merged, merged_index, entries)
+            local legacy_doc = Overlay.load(legacy_path)
+            local legacy_pid
+            if legacy_doc then
+                legacy_pid = legacy_doc.provider
+                if not legacy_pid or legacy_pid == "" then
+                    -- An unmarked overlay already reused as this provider
+                    -- (P0 compat) must not be double-attributed to "legacy".
+                    legacy_pid = legacy_consumed and provider or "legacy"
+                end
+                if legacy_pid == provider then
+                    merge_entries(merged, merged_index, legacy_doc.entries)
+                end
+            end
+            if #merged == 0 then return true end
+            local manifest = Overlay.loadManifest(output_dir) or fresh_manifest()
+            manifest.providers = manifest.providers or {}
+            local existing = manifest.providers[provider]
+            upsert_provider_state(manifest, provider, {
+                display_name = existing and existing.display_name or provider,
+                kind = existing and existing.kind or provider_kind(provider),
+                model_name = existing and existing.model_name,
+                confirmed = existing == nil or existing.confirmed ~= false,
+                -- Spine indexes covered so far.  Chapter-mode runs never set
+                -- complete, so follow mode uses this list to tell "chapter
+                -- already translated" from "whole book done".
+                chapters = covered_indexes,
+                partial_chapters = existing and existing.partial_chapters or {},
+                failed_chapters = existing and existing.failed_chapters or {},
+                complete = complete == true,
+                translated_count = count_unique(merged),
+                updated_at = os.time(),
+            })
+            -- A leftover v2 overlay (queue resumed before any book open) is
+            -- absorbed so its entries are never stranded, then retired.
+            if legacy_pid and legacy_pid ~= provider then
+                local lmerged, lindex = {}, {}
+                local ldisk = Overlay.loadEntries(output_dir, legacy_pid)
+                merge_entries(lmerged, lindex, ldisk and ldisk.entries)
+                merge_entries(lmerged, lindex, legacy_doc.entries)
+                if #lmerged > 0 then
+                    local lexisting = manifest.providers[legacy_pid]
+                    local legacy_chapters = legacy_pid ~= "legacy"
+                        and type(legacy_doc.chapters) == "table"
+                        and legacy_doc.chapters or {}
+                    upsert_provider_state(manifest, legacy_pid, {
+                        display_name = lexisting and lexisting.display_name or legacy_pid,
+                        kind = lexisting and lexisting.kind or provider_kind(legacy_pid),
+                        model_name = lexisting and lexisting.model_name,
+                        confirmed = lexisting == nil or lexisting.confirmed ~= false,
+                        chapters = legacy_chapters,
+                        partial_chapters = {}, failed_chapters = {},
+                        complete = false,
+                        translated_count = count_unique(lmerged),
+                        updated_at = os.time(),
+                    })
+                    if not Overlay.saveEntries(output_dir, legacy_pid,
+                        { target_lang = target_lang, entries = lmerged }) then
+                        return false
+                    end
+                end
+            end
+            if not Overlay.saveEntries(output_dir, provider,
+                { target_lang = target_lang, entries = merged }) then
+                return false
+            end
+            if not Overlay.saveManifest(output_dir, manifest) then return false end
+            if legacy_doc then
+                os.rename(legacy_path, output_dir .. "/overlay.v2.bak")
+            end
+            return true
+        end)
+        return ok and saved == true
     end
     local processed, translated_count, failed_count = 0, 0, 0
     local first_error
@@ -372,7 +517,10 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
     for _, current in ipairs(chapters) do
         if cancel_requested() then cancelled = true; break end
         last_processed_index = current.index
-        covered_indexes[#covered_indexes + 1] = current.index
+        if not covered_seen[current.index] then
+            covered_seen[current.index] = true
+            covered_indexes[#covered_indexes + 1] = current.index
+        end
         local candidates = chapter_candidates[current.index] or {}
         -- Release the collected source text of this chapter as soon as its
         -- batch loop finishes.  On a several-hundred-chapter book the full
@@ -386,7 +534,7 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
             if cancel_requested() then cancelled = true; break end
             local last = math.min(first + batch_size - 1, #candidates)
             local sources, translations = {}, {}
-            local pending_sources, pending_offsets = {}, {}
+            local pending_sources, pending_offsets, pending_contexts = {}, {}, {}
             for index = first, last do
                 local candidate = candidates[index]
                 local offset = #sources + 1
@@ -398,10 +546,16 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
                 else
                     pending_sources[#pending_sources + 1] = candidate.source
                     pending_offsets[#pending_offsets + 1] = offset
+                    pending_contexts[#pending_contexts + 1] = {
+                        selector = candidate.selector,
+                        xpointer = candidate.xpointer,
+                        chapter_index = current.index,
+                        chapter_title = current.title,
+                    }
                 end
             end
             if translate_batch and #pending_sources > 0 then
-                local ok, values, batch_err = pcall(translate_batch, pending_sources)
+                local ok, values, batch_err = pcall(translate_batch, pending_sources, pending_contexts)
                 if ok and values then
                     for index = 1, #pending_offsets do
                         translations[pending_offsets[index]] = values[index]
@@ -412,15 +566,21 @@ function Epub:translate_overlay(book_path, fragment, target_lang, source_lang,
                 local candidate = candidates[first + offset - 1]
                 local translated = translations[offset]
                 if not translated or translated == "" then
-                    local ok, value, single_err = pcall(translate, source)
+                    local ok, value, single_err = pcall(translate, source, {
+                        selector = candidate.selector,
+                        xpointer = candidate.xpointer,
+                        chapter_index = current.index,
+                        chapter_title = current.title,
+                    })
                     if ok then translated = value else first_error = first_error or value end
                     first_error = first_error or single_err
                 end
                 processed = processed + 1
                 if translated and translated ~= "" then
                     local entry = { selector = candidate.selector,
-                        xpointer = candidate.xpointer, source = source,
-                        translation = translated }
+                        xpointer = candidate.xpointer, chapter_index = current.index,
+                        source = source, translation = translated,
+                        created_at = os.time() }
                     local existing = entry_index[entry.selector]
                     if existing then
                         entries[existing] = entry

@@ -51,7 +51,7 @@ function Tools.rmtree(path)
         end
         pcall(lfs.rmdir, path)
     else
-        pcall(lfs.remove, path)
+        pcall(os.remove, path)
     end
     return lfs.attributes(path, "mode") == nil
 end

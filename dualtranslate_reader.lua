@@ -15,9 +15,22 @@ local DataStorage = require("datastorage")
 local Cache = require("dualtranslate_cache")
 local Providers = require("dualtranslate_providers")
 local Overlay = require("dualtranslate_overlay")
+local Store = require("dualtranslate_store")
 local Tools = require("dualtranslate_tools")
 
 local Reader = {}
+
+-- 7.3: the no-context compatibility path stores selector='' but warns once.
+local missing_context_warned = false
+
+local function context_meta(context)
+    if not context then return nil end
+    return {
+        selector = context.selector,
+        xpointer = context.xpointer,
+        chapter_index = context.chapter_index,
+    }
+end
 
 function Reader.attach(plugin)
     local dualtranslate = plugin
@@ -70,16 +83,26 @@ end
 
 -- Whole-book translation uses DualTranslate's provider registry directly and
 -- stores the result in a non-destructive per-book overlay cache.
-function dualtranslate:translateTextForEpub(text)
+function dualtranslate:translateTextForEpub(text, context, skip_store)
     local mode = self:getMode()
     local source_lang = self:getSourceLang()
     local target_lang = self:getTargetLang()
     local result, err
+    local meta = context_meta(context)
+    if not context and not missing_context_warned then
+        missing_context_warned = true
+        logger.warn("dualtranslate: translateTextForEpub without context; storing empty selector")
+    end
 
     if self:isCacheEnabled() then
         local cached = self.cache:lookupForBook(self._active_translation_book,
             source_lang, target_lang, text, mode)
         if cached and cached.translated_text then
+            -- A hit still records the locator of this occurrence (7.3).
+            if meta and not skip_store and self.cache.insertLocationRow then
+                self.cache:insertLocationRow(self._active_translation_book,
+                    source_lang, target_lang, text, cached.translated_text, mode, meta)
+            end
             return cached.translated_text, nil
         end
     end
@@ -95,14 +118,16 @@ function dualtranslate:translateTextForEpub(text)
     if #text > limit then
         local translated_parts = {}
         for _, chunk in ipairs(self:splitTranslationText(text, limit)) do
-            local translated, chunk_err = self:translateTextForEpub(chunk)
+            -- Chunks never store their own rows: only the merged paragraph
+            -- is stored once, under the original context (7.3).
+            local translated, chunk_err = self:translateTextForEpub(chunk, context, true)
             if not translated then return nil, chunk_err end
             table.insert(translated_parts, translated)
         end
         local combined = table.concat(translated_parts, " ")
-        if self:isCacheEnabled() then
+        if self:isCacheEnabled() and not skip_store then
             self.cache:storeForBook(self._active_translation_book, source_lang,
-                target_lang, text, combined, mode)
+                target_lang, text, combined, mode, meta)
         end
         return combined, nil
     end
@@ -113,9 +138,9 @@ function dualtranslate:translateTextForEpub(text)
     result, err = Providers.translate(mode, text, source_lang, target_lang)
 
     if result and result.translated_text and result.translated_text ~= "" then
-        if self:isCacheEnabled() then
+        if self:isCacheEnabled() and not skip_store then
             self.cache:storeForBook(self._active_translation_book, source_lang,
-                target_lang, text, result.translated_text, mode)
+                target_lang, text, result.translated_text, mode, meta)
         end
         return result.translated_text, nil
     end
@@ -139,13 +164,25 @@ end
 
 function dualtranslate:getTranslationOverlayPath(book_path)
     if not book_path then return nil end
-    return self:getBookCacheDirectory(book_path) .. "/overlay.json"
+    return self:getBookCacheDirectory(book_path) .. "/manifest.json"
+end
+
+function dualtranslate:getEntriesPath(book_path, provider)
+    if not book_path or not provider or provider == "" then return nil end
+    return Overlay.entriesPath(self:getBookCacheDirectory(book_path), provider)
 end
 
 function dualtranslate:hasTranslationOverlay(book_path)
     if not book_path then return false end
-    local path = self:getTranslationOverlayPath(book_path)
-    return path and Overlay.exists(path) or false
+    local dir = self:getBookCacheDirectory(book_path)
+    if Overlay.exists(dir .. "/manifest.json") then return true end
+    if Overlay.exists(dir .. "/overlay.json") then
+        -- Lazy v2 -> v3 migration so the display/delete menus stay enabled
+        -- right after an upgrade (13.1).
+        pcall(Store.migrateBookIfNeeded, book_path, self:getTargetLang(), self.cache)
+        return true
+    end
+    return false
 end
 
 function dualtranslate:toggleTranslationVisible()
@@ -157,20 +194,25 @@ function dualtranslate:toggleTranslationVisible()
 end
 
 -- Remove every artifact this plugin owns for a book: the per-book overlay
--- cache directories (overlay.json + any legacy files), across every target
--- language the book has been translated into.  Restrict deletion to the exact
--- DualTranslate books root.
+-- cache directories (manifest.json + entries/ + any legacy files), across
+-- every target language the book has been translated into.  Restrict deletion
+-- to the exact DualTranslate books root.
 function dualtranslate:removeTranslationFilesForBook(book_path)
     if not book_path then return 0 end
     local lfs = require("libs/libkoreader-lfs")
     local data_dir = DataStorage:getDataDir()
     local books_root = data_dir .. "/cache/dualtranslate/books/"
     local removed = 0
+    local function belongs_to_book(dir)
+        local manifest = Overlay.loadManifest(dir)
+        if manifest then return manifest.book_path == book_path end
+        local legacy = Overlay.load(dir .. "/overlay.json")
+        return legacy ~= nil and legacy.book_path == book_path
+    end
     -- 1) Fast path: the directory for the *current* target language.  This
     -- also catches legacy overlays that carry no book metadata.
     local current_dir = self:getBookCacheDirectory(book_path)
-    local current_overlay = Overlay.load(current_dir .. "/overlay.json")
-    if current_overlay and current_overlay.book_path == book_path then
+    if belongs_to_book(current_dir) then
         removed = removed + 1
     end
     if current_dir:sub(1, #books_root) == books_root
@@ -187,12 +229,9 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
         for name in iterator, state do
             if name ~= "." and name ~= ".." then
                 local dir = books_root .. name
-                if dir ~= current_dir then
-                    local overlay = Overlay.load(dir .. "/overlay.json")
-                    if overlay and overlay.book_path == book_path then
-                        removed = removed + 1
-                        Tools.rmtree(dir)
-                    end
+                if dir ~= current_dir and belongs_to_book(dir) then
+                    removed = removed + 1
+                    Tools.rmtree(dir)
                 end
             end
         end
@@ -487,13 +526,13 @@ function dualtranslate:_runTranslation(item)
                     end
                     local run_ok, run_info, run_err = pcall(Epub.translate_overlay, Epub,
                         book_path, fragment, self:getTargetLang(), self:getSourceLang(),
-                        function(text)
-                            return self:translateTextForEpub(text)
+                        function(text, context)
+                            return self:translateTextForEpub(text, context)
                         end,
                         all_chapters,
                         progress_path,
-                        function(texts)
-                            return self:translateTextBatchForEpub(texts)
+                        function(texts, contexts)
+                            return self:translateTextBatchForEpub(texts, contexts)
                         end,
                         self:getBookCacheDirectory(book_path),
                         item.span,
@@ -875,13 +914,16 @@ end
 -- Microsoft Edge accepts an array of texts and returns one translation per
 -- item. Batch short paragraphs to reduce network round trips while keeping
 -- the original paragraph boundaries for EPUB insertion.
-function dualtranslate:translateTextBatchForEpub(texts)
+function dualtranslate:translateTextBatchForEpub(texts, contexts)
     local mode = self:getMode()
+    local function context_at(index)
+        return contexts and contexts[index] or nil
+    end
     if mode ~= "microsoft_free" then
         local results = {}
         local first_error
         for index, text in ipairs(texts) do
-            local translated, err = self:translateTextForEpub(text)
+            local translated, err = self:translateTextForEpub(text, context_at(index))
             if translated then
                 results[index] = translated
             else
@@ -898,7 +940,7 @@ function dualtranslate:translateTextBatchForEpub(texts)
     local limit = self:getTranslationChunkLimit()
     for index, text in ipairs(texts) do
         if #text > limit then
-            local translated, err = self:translateTextForEpub(text)
+            local translated, err = self:translateTextForEpub(text, context_at(index))
             if translated then
                 results[index] = translated
             else
@@ -910,11 +952,19 @@ function dualtranslate:translateTextBatchForEpub(texts)
                 self:getSourceLang(), self:getTargetLang(), text, mode)
             if cached and cached.translated_text then
                 results[index] = cached.translated_text
+                local meta = context_meta(context_at(index))
+                if meta and self.cache.insertLocationRow then
+                    self.cache:insertLocationRow(self._active_translation_book,
+                        self:getSourceLang(), self:getTargetLang(), text,
+                        cached.translated_text, mode, meta)
+                end
             else
-                table.insert(pending, { index = index, text = text })
+                table.insert(pending, { index = index, text = text,
+                    context = context_at(index) })
             end
         else
-            table.insert(pending, { index = index, text = text })
+            table.insert(pending, { index = index, text = text,
+                context = context_at(index) })
         end
     end
 
@@ -947,7 +997,7 @@ function dualtranslate:translateTextBatchForEpub(texts)
             -- batch failure instead of producing no EPUB at all.
             if err and (err.code ~= nil or err.message) then
                 for _, item in ipairs(batch) do
-                    local single, single_err = self:translateTextForEpub(item.text)
+                    local single, single_err = self:translateTextForEpub(item.text, item.context)
                     if single then
                         results[item.index] = single
                     else
@@ -967,7 +1017,7 @@ function dualtranslate:translateTextBatchForEpub(texts)
                     if self:isCacheEnabled() then
                         self.cache:storeForBook(self._active_translation_book,
                             self:getSourceLang(), self:getTargetLang(), item.text,
-                            value, mode)
+                            value, mode, context_meta(item.context))
                     end
                 else
                     results[item.index] = false
@@ -1013,12 +1063,21 @@ function dualtranslate:refreshDocumentStyles()
     local book_path = document.file
     local overlay_css = ""
     if book_path then
+        local overlay_path = self:getTranslationOverlayPath(book_path)
+        if not Overlay.exists(overlay_path) then
+            -- Pre-migration v2 book: buildCss resolves the legacy overlay
+            -- from the book directory.
+            overlay_path = self:getBookCacheDirectory(book_path)
+        end
         -- Visibility (translation_visible + plugin_enabled) is enforced here:
         -- buildCss omits the ::after rules entirely when hidden, so the
         -- source text stays untouched and no empty layer is laid out.
-        overlay_css = Overlay.buildCss(self:getTranslationOverlayPath(book_path), {
+        -- Provider/fallback choices are resolved inside buildCss from the
+        -- manifest (auto/manual), never from a global setting.
+        overlay_css = Overlay.buildCss(overlay_path, {
             translation_visible = plugin_enabled
-                and self:getSetting("translation_visible", true) == true,
+                and self:getSetting("translation_visible", true) == true
+                and not self._translation_stale,
             translation_color = color,
             translation_size = font_size,
             translation_font_family = font_family,

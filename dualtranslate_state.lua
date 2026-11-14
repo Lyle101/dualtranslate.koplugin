@@ -124,6 +124,12 @@ end
 
 function State.enqueue(plugin, book_path, all_chapters, fragment, silent, span, auto)
     if not book_path or not book_path:lower():match("%.epub$") then return end
+    if plugin._translation_migration_failed then
+        if not silent then
+            plugin.TranslationUI.showInfo("译文数据迁移失败，已保留备份，翻译暂不可用")
+        end
+        return
+    end
     if plugin.isPluginEnabled and not plugin:isPluginEnabled() then
         if not silent then
             plugin.TranslationUI.showInfo("插件当前已禁用，请在 DualTranslate 菜单中启用后再翻译")
@@ -149,6 +155,9 @@ function State.enqueue(plugin, book_path, all_chapters, fragment, silent, span, 
     end
     local item = {
         book_path = book_path,
+        -- Generation engine at enqueue time (9.3): delete guards and queue
+        -- display key off this.  Older persisted items have no provider.
+        provider = plugin.getMode and plugin:getMode() or nil,
         all_chapters = all_chapters and true or false,
         fragment = all_chapters and nil or fragment,
         -- Chapter-mode span: translate the current chapter plus the next
@@ -302,6 +311,7 @@ end
 local STALE_TRANSLATION_SECONDS = 10 * 60 -- watchdog: progress not touched
 
 function State.startNext(plugin)
+    if plugin._translation_migration_failed then return end
     if plugin.isPluginEnabled and not plugin:isPluginEnabled() then return end
     if plugin._translation_progress and plugin._translation_progress.active then
         -- Watchdog: a worker that has not written to its progress file for a
@@ -353,6 +363,32 @@ function State.startNext(plugin)
     end
 end
 
+-- 9.3: is a queued/active job touching this book (and provider) right now?
+-- Used as the delete guard.  Old queue items carry no provider: they match
+-- any requested provider (conservative — an unidentified running job must
+-- block deletion rather than race it).
+function State.hasActiveJob(plugin, book_path, provider_id)
+    if not book_path then return false end
+    local function matches(item)
+        local pid = item and item.provider
+        if pid == nil or pid == "" then return true end
+        return provider_id == nil or pid == provider_id
+    end
+    for _, item in ipairs(plugin._translation_queue or {}) do
+        if type(item) == "table" and item.book_path == book_path
+            and (item.status == "queued" or item.status == "active")
+            and matches(item) then
+            return true
+        end
+    end
+    local progress = plugin._translation_progress
+    if progress and progress.active and progress.book_path == book_path
+        and matches(progress.item) then
+        return true
+    end
+    return false
+end
+
 function State.attach(plugin)
     plugin.TranslationUI = require("dualtranslate_ui")
     plugin.getTranslationQueuePath = State.getQueuePath
@@ -362,6 +398,7 @@ function State.attach(plugin)
     plugin.clearTranslationQueueForBook = State.clearForBook
     plugin.enqueueTranslation = State.enqueue
     plugin.cancelTranslation = State.cancelTranslation
+    plugin.hasActiveJob = State.hasActiveJob
     plugin.getQueueProgress = function(_, item) return State.progress(item) end
     plugin.buildTranslationQueueMenu = State.buildQueueMenu
     plugin.startNextQueuedTranslation = State.startNext

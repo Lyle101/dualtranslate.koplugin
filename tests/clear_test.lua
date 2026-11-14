@@ -174,7 +174,8 @@ plugin.TranslationUI = { showInfo = function() end }
 
 -- 1. 模拟整书翻译完成：写 complete=true 的 overlay
 local book = "/books/test.epub"
-local overlay_path = plugin:getTranslationOverlayPath(book)
+-- v3 后 getTranslationOverlayPath 指向 manifest.json；v2 残留仍在 overlay.json
+local overlay_path = plugin:getBookCacheDirectory(book) .. "/overlay.json"
 Tools.mkdir_p(plugin:getBookCacheDirectory(book))
 -- 手写真实 overlay.json（完整格式）
 local f = io.open(overlay_path, "w")

@@ -18,7 +18,23 @@ local stubs = {
     ["json"] = { encode = function() return "{}" end, decode = function() return {} end },
     ["socket.http"] = {}, ["ltn12"] = {}, ["socketutil"] = { request = function() return false end, set_timeout = function() end, reset_timeout = function() end },
     ["socket.url"] = { escape = function(s) return s end, unescape = function(s) return s end },
-    ["lua-ljsqlite3/init"] = {},
+    -- init() now runs Store.migrateIfNeeded -> Cache:initSchema; a fake
+    -- connection reporting user_version=3 keeps the migration a no-op.
+    ["lua-ljsqlite3/init"] = {
+        open = function()
+            return {
+                prepare = function(_, sql)
+                    local row = sql:find("user_version", 1, true) and { 3 } or nil
+                    return {
+                        bind = function() end,
+                        step = function() return row end,
+                        close = function() end,
+                    }
+                end,
+                close = function() end,
+            }
+        end,
+    },
     ["ui/uimanager"] = { show = function() end, close = function() end, setDirty = function() end, scheduleIn = function() end, nextTick = function() end },
     ["ui/widget/notification"] = { Notification = {} },
     ["ui/widget/textviewer"] = {}, ["ui/widget/buttondialog"] = {}, ["ui/widget/menu"] = {},

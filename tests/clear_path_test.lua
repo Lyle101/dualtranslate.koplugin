@@ -53,6 +53,7 @@ local stubs = {
             end
             return nil
         end,
+        loadManifest = function() return nil end,
         exists = function() return true end,
         buildCss = function() return "" end,
     },

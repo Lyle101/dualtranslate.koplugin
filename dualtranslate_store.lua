@@ -342,9 +342,14 @@ function Store.listProviders(book_path, target_lang)
         local provider = index.providers[pid]
         if provider and not seen[pid] then
             seen[pid] = true
+            local display_name = provider.display_name
+            if not display_name or display_name == pid then
+                display_name = provider_meta_from_db(default_cache(), pid).display_name
+            end
             out[#out + 1] = {
                 id = pid,
-                display_name = provider.display_name or pid,
+                display_name = display_name,
+                model_name = provider.model_name,
                 count = tonumber(provider.translated_count) or 0,
                 complete = provider.complete == true,
                 confirmed = provider.confirmed ~= false,
@@ -396,6 +401,25 @@ function Store.setDisplayProvider(book_path, target_lang, provider_id_or_auto)
     end)
 end
 
+function Store.setDisplayFallback(book_path, target_lang, enabled)
+    if not book_path or not target_lang then
+        return nil, "book_path and target_lang are required"
+    end
+    local dir = Store.bookDir(book_path, target_lang)
+    return Lock.withBookLock(dir, function()
+        local manifest = Overlay.loadManifest(dir)
+        if not manifest then
+            return nil, "no v3 manifest for this book"
+        end
+        manifest.display_fallback = enabled == true
+        if not Overlay.saveManifest(dir, manifest) then
+            return nil, "cannot write manifest"
+        end
+        Overlay.clearCssCache()
+        return manifest
+    end)
+end
+
 local function read_entries_file(path)
     local file = io.open(path, "rb")
     if not file then return nil end
@@ -411,11 +435,13 @@ end
 
 -- Crash recovery (design 9.3/14.3): finish or roll back delete intents, heal
 -- orphan entries and missing files, catch the manifest revision up.  Never
--- resurrects a provider the user deleted.
-function Store.reconcile(book_path, target_lang, cache)
+-- resurrects a provider the user deleted.  opts.light is the book-open path
+-- (14.3): intents + missing entries only, no orphan scan or revision work.
+function Store.reconcile(book_path, target_lang, cache, opts)
     if not book_path or not target_lang then
         return nil, "book_path and target_lang are required"
     end
+    local light = type(opts) == "table" and opts.light == true
     cache = cache or default_cache()
     local dir = Store.bookDir(book_path, target_lang)
     return Lock.withBookLock(dir, function()
@@ -492,7 +518,10 @@ function Store.reconcile(book_path, target_lang, cache)
         end
 
         local entries_dir = dir .. "/entries"
-        local ok, iterator, state = pcall(lfs.dir, entries_dir)
+        local ok, iterator, state = false, nil, nil
+        if not light then
+            ok, iterator, state = pcall(lfs.dir, entries_dir)
+        end
         if ok and iterator then
             for name in iterator, state do
                 if name:match("%.json$") then
@@ -530,7 +559,7 @@ function Store.reconcile(book_path, target_lang, cache)
             end
         end
 
-        if manifest then
+        if manifest and not light then
             local max_entries_revision = 0
             for pid in pairs(manifest.providers) do
                 local doc = Overlay.loadEntries(dir, pid)

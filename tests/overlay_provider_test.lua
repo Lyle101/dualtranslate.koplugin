@@ -54,9 +54,34 @@ end
 package.preload["dualtranslate_overlay"] = function()
     return {
         load = function() return previous_overlay end,
-        save = function(_, data) saved_data = data return true end,
+        loadManifest = function() return nil end,
+        loadEntries = function() return nil end,
         exists = function() return previous_overlay ~= nil end,
+        -- v3 checkpoint shape: entries first, manifest second.  The recorded
+        -- saved_data keeps the P0 assertion shape (provider/entries/chapters
+        -- plus the book identity the legacy-reuse guard checks).
+        saveEntries = function(_, provider, doc)
+            saved_data = { provider = provider, entries = doc.entries }
+            return true
+        end,
+        saveManifest = function(_, manifest)
+            if saved_data then
+                saved_data.book_path = manifest.book_path
+                saved_data.source_lang = manifest.source_lang
+                saved_data.target_lang = manifest.target_lang
+                local state = manifest.providers[saved_data.provider]
+                saved_data.chapters = state and state.chapters
+                saved_data.complete = state and state.complete
+            end
+            return true
+        end,
     }
+end
+package.preload["dualtranslate_lock"] = function()
+    return { withBookLock = function(_, fn) return fn() end }
+end
+package.preload["libs/libkoreader-lfs"] = function()
+    return { attributes = function() return nil end }
 end
 
 local script_dir = (arg and arg[0] or ""):match("^(.*)/") or "."

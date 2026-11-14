@@ -59,6 +59,12 @@ print("== 1. Epub.resolve ==")
 do
     package.preload["ffi/archiver"] = function() return {} end
     package.preload["dualtranslate_overlay"] = function() return {} end
+    package.preload["dualtranslate_lock"] = function()
+        return { withBookLock = function(_, fn) return fn() end }
+    end
+    package.preload["libs/libkoreader-lfs"] = function()
+        return { attributes = function() return nil end }
+    end
     package.preload["dualtranslate_tools"] = function() return { mkdir_p = function() return true end, unzip_to = function() return true end, rmtree = function() return true end, stable_path_hash = function() return "x" end } end
     package.preload["datastorage"] = function() return { getDataDir = function() return "/tmp/dt_data" end } end
     package.preload["socket.url"] = function() return { escape = function(s) return s end, unescape = function(s) return s end } end
@@ -225,18 +231,27 @@ do
             stable_path_hash = function() return "x" end,
         }
     end
-    -- Overlay.save 记录到真实文件
+    -- v3 checkpoint（saveEntries + saveManifest）记录到真实文件，
+    -- 行格式与 P0 断言保持一致：saved:complete:#entries:#chapters:provider
+    local last_entries
     package.preload["dualtranslate_overlay"] = function()
         return {
-            save = function(path, data)
-                local f = io.open(path, "w")
-                f:write("saved:" .. tostring(data.complete) .. ":" .. tostring(#data.entries)
-                    .. ":" .. tostring(data.chapters and #data.chapters or 0)
-                    .. ":" .. tostring(data.provider))
+            saveEntries = function(_, provider, doc)
+                last_entries = { provider = provider, count = #doc.entries }
+                return true
+            end,
+            saveManifest = function(dir, manifest)
+                local state = manifest.providers[last_entries.provider]
+                local f = io.open(dir .. "/overlay.json", "w")
+                f:write("saved:" .. tostring(state.complete) .. ":" .. tostring(last_entries.count)
+                    .. ":" .. tostring(state.chapters and #state.chapters or 0)
+                    .. ":" .. tostring(last_entries.provider))
                 f:close()
                 return true
             end,
             load = function(path) return nil end,
+            loadManifest = function() return nil end,
+            loadEntries = function() return nil end,
         }
     end
     -- 重新加载 Epub（Tools mock 变了；require 缓存也要清）

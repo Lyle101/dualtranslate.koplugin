@@ -12,6 +12,8 @@ local Languages = require("dualtranslate_languages")
 local State = require("dualtranslate_state")
 local Reader = require("dualtranslate_reader")
 local PageTrans = require("dualtranslate_pagetrans")
+local Store = require("dualtranslate_store")
+local Overlay = require("dualtranslate_overlay")
 
 local dualtranslate = WidgetContainer:extend{
     name = "dualtranslate",
@@ -27,6 +29,15 @@ function dualtranslate:init()
     -- read and written through the standard KOReader settings API.
     self:loadConfig()
     self.cache = Cache:new()
+    Store.setCache(self.cache)
+    -- 13.1: the schema migration must finish before any queue worker can
+    -- start.  On failure keep the backup and disable the translation
+    -- entries instead of running workers on the old schema.
+    local migrated, migrate_err = Store.migrateIfNeeded(self.cache)
+    if not migrated then
+        self._translation_migration_failed = true
+        logger.err("dualtranslate: cache migration failed:", tostring(migrate_err))
+    end
     self._translation_queue = self:loadTranslationQueue()
     -- Persist cleanup of completed entries immediately after startup.
     self:saveTranslationQueue()
@@ -55,7 +66,11 @@ function dualtranslate:init()
 
     -- The reader hooks open the companion after document-ready. Keep the
     -- queue startup here, but do not replace a document during init.
-    self:startNextQueuedTranslation()
+    if self._translation_migration_failed then
+        TranslationUI.showInfo(_("迁移失败，已保留备份。翻译入口已禁用，请查看日志后重试。"))
+    else
+        self:startNextQueuedTranslation()
+    end
 end
 
 -- Load the EPUB engine module.
@@ -181,6 +196,7 @@ function dualtranslate:buildMenuTable()
             text = "翻译本书",
             enabled_func = function()
                 return self:isEpub() and not self:isLegacyBilingualEpub(self.ui.document.file)
+                    and not self._translation_migration_failed
             end,
             callback = function()
                 self:translateBook(true)
@@ -198,8 +214,17 @@ function dualtranslate:buildMenuTable()
             checked_func = function() return self:isPageTranslationEnabled() end,
             enabled_func = function()
                 return self:isEpub() and not self:isLegacyBilingualEpub(self.ui.document.file)
+                    and not self._translation_migration_failed
             end,
             callback = function(menu) self:togglePageTranslation(menu) end,
+        },
+        -- Generation engine selector (12.2: 翻译引擎 = which service
+        -- produces translations; 显示译文 = whose translations are shown).
+        {
+            text_func = function()
+                return _("翻译引擎") .. "：" .. Providers.getProviderName(self:getMode())
+            end,
+            sub_item_table = self:buildProviderSelector(),
         },
         {
             -- Queue as a native sub-menu: items expand inline instead of
@@ -218,25 +243,23 @@ function dualtranslate:buildMenuTable()
             end,
         },
         {
-            -- 译文可见性开关：勾选 = 在正文中显示译文（不勾 = 隐藏）。
-            text = "显示译文",
-            checked_func = function()
-                local path = self.ui and self.ui.document and self.ui.document.file
-                return path and self:hasTranslationOverlay(path)
-                    and self:getSetting("translation_visible", true) == true or false
-            end,
+            -- 显示译文子菜单（8.1）：可见性开关 + 显示哪个服务的译文 +
+            -- 缺失段落回退。显示选择只写 manifest，不改 fallback_order。
+            text_func = function() return self:displayText() end,
             enabled_func = function()
-                local path = self.ui and self.ui.document and self.ui.document.file
+                local path = self:currentBookPath()
                 return self:isEpub() and self:hasTranslationOverlay(path)
             end,
-            callback = function() self:toggleTranslationVisible() end,
-        },
-        -- Provider / Mode selector
-        {
-            text_func = function()
-                return "翻译服务：" .. Providers.getProviderName(self:getMode())
+            sub_item_table_func = function()
+                return self:buildDisplayMenu()
             end,
-            sub_item_table = self:buildProviderSelector(),
+        },
+        {
+            text = _("管理译文"),
+            enabled_func = function() return self:isEpub() end,
+            sub_item_table_func = function()
+                return self:buildManageMenu()
+            end,
         },
         -- Language settings: plain sub-menus with radio items (the same
         -- structure the translator_switch plugin uses), no pop-up dialog.
@@ -279,18 +302,209 @@ function dualtranslate:buildMenuTable()
             { value = "#333333", label = "80% 灰" },
             { value = "#1a1a1a", label = "90% 灰" },
         }),
-        {
-            text = "清除本书译文",
-            enabled_func = function()
-                return self:isEpub()
-            end,
-            callback = function()
-                self:confirmClearCache()
-            end,
-        },
     }
 
     return menu
+end
+
+function dualtranslate:currentBookPath()
+    return self.ui and self.ui.document and self.ui.document.file
+end
+
+function dualtranslate:currentManifest()
+    local path = self:currentBookPath()
+    if not path then return nil end
+    return Overlay.loadManifest(self:getBookCacheDirectory(path))
+end
+
+function dualtranslate:displayText()
+    local label = _("显示译文")
+    local manifest = self:currentManifest()
+    if not manifest then return label end
+    if manifest.display_mode ~= "manual" then
+        return label .. "：" .. _("自动（最近使用）")
+    end
+    local pid = manifest.display_provider
+    local provider = pid and manifest.providers[pid]
+    local name = provider and provider.display_name or pid
+    if not name then return label end
+    return label .. "：" .. name
+end
+
+function dualtranslate:buildDisplayMenu()
+    local path = self:currentBookPath()
+    local target_lang = self:getTargetLang()
+    local items = {
+        {
+            text = _("显示译文"),
+            checkbox = true,
+            checked_func = function()
+                return self:getSetting("translation_visible", true) == true
+            end,
+            callback = function() self:toggleTranslationVisible() end,
+        },
+        {
+            text = _("自动（最近使用）"),
+            radio = true,
+            checked_func = function()
+                local manifest = self:currentManifest()
+                return not manifest or manifest.display_mode ~= "manual"
+            end,
+            callback = function()
+                if not path then return end
+                local ok, result, err = pcall(Store.setDisplayProvider, path, target_lang, "auto")
+                if not ok or not result then
+                    TranslationUI.showInfo(_("切换显示失败：") .. tostring(ok and err or result))
+                    return
+                end
+                self:refreshDocumentStyles()
+            end,
+        },
+    }
+    for idx, item in ipairs(path and Store.listProviders(path, target_lang) or {}) do
+        -- Lua 5.1: capture per-iteration values for the closures below.
+        local pid, name, count = item.id, item.display_name, item.count
+        local confirmed, model_name = item.confirmed, item.model_name
+        items[#items + 1] = {
+            text_func = function()
+                if not confirmed then
+                    return _("MCP · 待确认") .. "（" .. (model_name or pid) .. "）"
+                end
+                return string.format("%s（%d %s）", name, count, _("段"))
+            end,
+            radio = true,
+            enabled_func = function() return confirmed end,
+            checked_func = function()
+                local manifest = self:currentManifest()
+                return manifest ~= nil and manifest.display_mode == "manual"
+                    and manifest.display_provider == pid
+            end,
+            callback = function()
+                if not confirmed then
+                    -- The model confirmation dialog is P3; until then an
+                    -- unconfirmed provider cannot be selected for display.
+                    TranslationUI.showInfo(_("该模型尚未确认，暂不能显示其译文"))
+                    return
+                end
+                local ok, result, err = pcall(Store.setDisplayProvider, path, target_lang, pid)
+                if not ok or not result then
+                    TranslationUI.showInfo(_("切换显示失败：") .. tostring(ok and err or result))
+                    return
+                end
+                self:refreshDocumentStyles()
+            end,
+        }
+    end
+    items[#items + 1] = {
+        text = _("缺失段落回退到其他服务"),
+        checkbox = true,
+        checked_func = function()
+            local manifest = self:currentManifest()
+            return not manifest or manifest.display_fallback ~= false
+        end,
+        callback = function()
+            if not path then return end
+            local manifest = self:currentManifest()
+            local enabled = manifest and manifest.display_fallback ~= false or true
+            local ok, result, err = pcall(Store.setDisplayFallback, path, target_lang, not enabled)
+            if not ok or not result then
+                TranslationUI.showInfo(_("设置回退失败：") .. tostring(ok and err or result))
+                return
+            end
+            self:refreshDocumentStyles()
+        end,
+    }
+    return items
+end
+
+function dualtranslate:buildManageMenu()
+    local path = self:currentBookPath()
+    local target_lang = self:getTargetLang()
+    local delete_items = {}
+    for idx, item in ipairs(path and Store.listProviders(path, target_lang) or {}) do
+        local pid, name, count = item.id, item.display_name, item.count
+        delete_items[#delete_items + 1] = {
+            text_func = function()
+                return string.format("%s（%d %s）", name, count, _("段"))
+            end,
+            callback = function()
+                self:confirmDeleteProvider(pid, name, count)
+            end,
+        }
+    end
+    return {
+        {
+            text = _("删除某服务的译文…"),
+            enabled_func = function() return #delete_items > 0 end,
+            sub_item_table = delete_items,
+        },
+        {
+            text = _("删除本书全部译文"),
+            enabled_func = function() return self:isEpub() end,
+            callback = function() self:confirmClearCache() end,
+        },
+        {
+            text = _("修复本书译文数据"),
+            enabled_func = function() return self:isEpub() end,
+            callback = function() self:repairBookTranslationData() end,
+        },
+    }
+end
+
+function dualtranslate:confirmDeleteProvider(provider_id, display_name, count)
+    local book_path = self:currentBookPath()
+    if not book_path then return end
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local dialog
+    dialog = ButtonDialog:new{
+        title = string.format(_("将删除 %s 在本书的 %d 段译文\n（SQLite 缓存 + overlay 条目），原书不会被修改。"),
+            display_name, count),
+        buttons = {{
+            {
+                text = _("Cancel"),
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("Delete"),
+                callback = function()
+                    UIManager:close(dialog)
+                    -- 9.3: never delete under a running job of the same
+                    -- provider (or an unidentified legacy job).
+                    if self:hasActiveJob(book_path, provider_id) then
+                        TranslationUI.showInfo(_("该服务正在翻译中，请在任务结束后再删除"))
+                        return
+                    end
+                    local ok, result, err = pcall(Store.deleteProvider,
+                        book_path, self:getTargetLang(), provider_id)
+                    if not ok or not result then
+                        TranslationUI.showInfo(_("删除失败：") .. tostring(ok and err or result))
+                        return
+                    end
+                    self._page_translation_overlay_state = nil
+                    self:refreshDocumentStyles()
+                    TranslationUI.showInfo(string.format(_("已删除 %s 译文 %d 段"),
+                        display_name, result.deleted or 0))
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+end
+
+function dualtranslate:repairBookTranslationData()
+    local book_path = self:currentBookPath()
+    if not book_path then return end
+    -- Full reconcile (14.3): orphan scan + revision catch-up, only on this
+    -- explicit user action, never on the book-open path.
+    local ok, summary, err = pcall(Store.reconcile,
+        book_path, self:getTargetLang(), self.cache)
+    if not ok or not summary then
+        TranslationUI.showInfo(_("修复失败：") .. tostring(ok and err or summary))
+        return
+    end
+    self._page_translation_overlay_state = nil
+    self:refreshDocumentStyles()
+    TranslationUI.showInfo(_("本书译文数据修复完成"))
 end
 
 function dualtranslate:buildProviderSelector()
@@ -385,6 +599,16 @@ function dualtranslate:confirmClearCache()
                             TranslationUI.showInfo("这本书正在翻译，请在任务结束后再清除。")
                             return
                         end
+                        -- v3: the SQLite rows and per-provider entries must
+                        -- go through the delete protocol before the book
+                        -- directories are swept (9.1/9.2).
+                        local ok, result, err = pcall(Store.deleteAllProviders,
+                            book_path, self:getTargetLang())
+                        if not ok or not result then
+                            UIManager:close(dialog)
+                            TranslationUI.showInfo(_("删除失败：") .. tostring(ok and err or result))
+                            return
+                        end
                         local removed = self:clearBookTranslationData(book_path)
                         self:saveSetting("translation_visible", false)
                         -- Stop follow-mode after a clear: the page-turn
@@ -419,6 +643,7 @@ function dualtranslate:onCloseDocument()
     self._page_translation_last_fragment = nil
     self._chapter_index_cache = nil
     self._style_refresh_scheduled = nil
+    self._translation_stale = nil
     self.cache:close()
 end
 
@@ -434,7 +659,27 @@ end
 -- part of the initial render and appears immediately without a toggle cycle.
 function dualtranslate:onReadSettings()
     local path = self.ui and self.ui.document and self.ui.document.file
-    if path and self:hasTranslationOverlay(path)
+    if not path then return end
+    local dir = self:getBookCacheDirectory(path)
+    if Overlay.exists(dir .. "/manifest.json") or Overlay.exists(dir .. "/overlay.json") then
+        -- 13.1: lazy per-book migration before any read.  14.3: book open
+        -- only runs the light reconcile (delete intents + missing entries);
+        -- the full orphan scan belongs to import/delete-failure/repair.
+        pcall(Store.migrateBookIfNeeded, path, self:getTargetLang(), self.cache)
+        pcall(Store.reconcile, path, self:getTargetLang(), self.cache, { light = true })
+        local manifest = Overlay.loadManifest(dir)
+        if manifest and Overlay.isStale(manifest, path) then
+            -- Hide the layer for this session instead of persisting a global
+            -- translation_visible=false (which would leak to other books).
+            self._translation_stale = true
+            TranslationUI.showInfo(_("缓存与当前文件不符，建议清除后重译"))
+        else
+            self._translation_stale = nil
+        end
+    else
+        self._translation_stale = nil
+    end
+    if self:hasTranslationOverlay(path)
         and self:getSetting("translation_visible", true) == true then
         self:refreshDocumentStyles(true)
     end

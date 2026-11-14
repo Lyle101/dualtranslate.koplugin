@@ -2,10 +2,11 @@
 --
 -- Instead of painting framebuffer overlays with a line cap, page translation
 -- now reuses the full-book overlay pipeline: translating the current chapter
--- writes entries into the per-book overlay.json, which refreshDocumentStyles
--- exposes to CREngine as generated ::after CSS.  The translation therefore
--- lives in the document flow exactly like the book-level overlay: complete
--- text, toggleable visibility, persistent across reopens, no line limit.
+-- writes entries into the per-book v3 overlay (manifest.json + entries/),
+-- which refreshDocumentStyles exposes to CREngine as generated ::after CSS.
+-- The translation therefore lives in the document flow exactly like the
+-- book-level overlay: complete text, toggleable visibility, persistent
+-- across reopens, no line limit.
 --
 -- Exposed as the "逐章模式" checkbox next to "翻译本书": checking it is a
 -- preference only.  Tapping "翻译本书" while it is checked translates the
@@ -45,6 +46,9 @@ function PageTrans.attach(plugin)
     -- idempotent, so repeated page turns never re-translate already-covered
     -- paragraphs.
     plugin.maybeSchedulePageTranslation = function(self, silent)
+        -- 7.4: MCP providers are import-driven; never auto-schedule pages
+        -- for them (no mcp_external option exists before P3).
+        if self:getMode() == "mcp_external" then return end
         if not self:isPageTranslationEnabled() then return end
         -- Only auto-continue while a follow session was explicitly started
         -- from "翻译本书" (or its chapter-mode variant).
@@ -66,37 +70,35 @@ function PageTrans.attach(plugin)
         local fragment = self:getCurrentFragment()
         local fragment_key = fragment or "__unknown_fragment__"
         if fragment_key == self._page_translation_last_fragment then return end
-        -- The whole book is already translated: nothing left to schedule.
-        -- Cache the overlay's complete flag briefly so ordinary page turns
-        -- do not re-read and re-parse overlay.json every time.
-        local get_overlay = self.getTranslationOverlayPath
-        local overlay = get_overlay and get_overlay(self, book_path)
-        if overlay then
-            local cached = self._page_translation_overlay_state
-            local now = os.time()
-            if not cached or cached.path ~= overlay or now - cached.at > 3 then
-                local data = Overlay.load(overlay)
-                cached = {
-                    path = overlay,
-                    complete = data and data.complete == true or false,
-                    chapters = data and data.chapters or nil,
-                    at = now,
-                }
-                self._page_translation_overlay_state = cached
-            end
-            if cached.complete then return end
-            -- Chapter-mode runs never set complete, so "this chapter is
-            -- already translated" is tracked through the overlay's chapters
-            -- list.  Without this check, turning back into a covered chapter
-            -- (or a mis-resolved fragment pointing at one) re-queues it and
-            -- the overlay merge finishes it instantly at 100% with zero
-            -- requests — the "点翻页直接显示翻完了" symptom.
-            if cached.chapters and type(cached.chapters) == "table" then
-                local fragment_index = tonumber(fragment_key)
-                if fragment_index then
-                    for _, covered in ipairs(cached.chapters) do
-                        if covered == fragment_index then return end
-                    end
+        -- The whole book is already translated by the *current generation
+        -- engine* (7.4): completeness is judged per provider, so a book
+        -- finished with one engine still schedules for another.  Cache the
+        -- index briefly so ordinary page turns do not re-parse it each time.
+        local dir = self:getBookCacheDirectory(book_path)
+        local cached = self._page_translation_overlay_state
+        local now = os.time()
+        if not cached or cached.path ~= dir or now - cached.at > 3 then
+            local index = Overlay.loadBookIndex(dir)
+            local state = index and index.providers
+                and index.providers[self:getMode()]
+            cached = {
+                path = dir,
+                complete = state and state.complete == true or false,
+                chapters = state and state.chapters or nil,
+                at = now,
+            }
+            self._page_translation_overlay_state = cached
+        end
+        if cached.complete then return end
+        -- Chapter-mode runs never set complete, so "this chapter is already
+        -- translated" is tracked through the provider's chapters list.
+        -- partial_chapters/failed_chapters are deliberately NOT treated as
+        -- covered: those chapters must stay re-queueable (7.4).
+        if cached.chapters and type(cached.chapters) == "table" then
+            local fragment_index = tonumber(fragment_key)
+            if fragment_index then
+                for _, covered in ipairs(cached.chapters) do
+                    if covered == fragment_index then return end
                 end
             end
         end
