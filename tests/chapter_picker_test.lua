@@ -28,7 +28,7 @@ local stubs = {
         nextTick = function() end,
     },
     ["ui/widget/notification"] = {
-        Notification = { new = function(_, opts) return opts end },
+        new = function(_, opts) return opts end,
     },
     ["ui/widget/menu"] = {
         new = function(_, opts)
@@ -112,6 +112,147 @@ do
     plugin.epub = { outline = function() return nil, "坏的 container.xml" end }
     local parse_failed, parse_err = plugin:getBookOutline("/books/four.epub")
     check("解析失败透传错误", parse_failed == nil and parse_err == "坏的 container.xml")
+end
+
+local Picker = require("dualtranslate_picker")
+
+-- ============================================================
+print("== 2. 选择器纯逻辑 ==")
+do
+    local ascii = Picker.truncate_title(string.rep("a", 45))
+    check("ASCII 截断到 40 字符 + 省略号",
+        ascii:sub(1, 40) == string.rep("a", 40) and ascii:sub(41) == "…")
+
+    local chinese = Picker.truncate_title(string.rep("章", 45))
+    check("中文按字符截断", chinese == string.rep("章", 40) .. "…")
+
+    local emoji = Picker.truncate_title(string.rep("😀", 8), 5)
+    check("4 字节字符不被切半", emoji == string.rep("😀", 5) .. "…")
+
+    check("短标题原样返回", Picker.truncate_title("第一章") == "第一章")
+    check("空标题返回空串", Picker.truncate_title(nil) == "")
+
+    local chapters = Picker.chapters({
+        spine_count = 4,
+        chapters = {
+            { index = 1, title = "封面", level = 0 },
+            { index = 3, title = "第三章", level = 1 },
+        },
+    })
+    check("按 spine 补齐缺失章节", #chapters == 4)
+    check("目录标题保留", chapters[1].title == "封面" and chapters[3].title == "第三章")
+    check("缺失章节用第 N 节", chapters[2].title == "第 2 节" and chapters[4].index == 4)
+
+    local state = Picker.new_state({ spine_count = 3, chapters = {} })
+    check("初始未选", Picker.count(state) == 0)
+    Picker.toggle(state, 2)
+    check("勾选单章", Picker.count(state) == 1 and Picker.selected_indexes(state)[1] == 2)
+    Picker.invert(state)
+    local inverted = Picker.selected_indexes(state)
+    check("反选", Picker.count(state) == 2 and inverted[1] == 1 and inverted[2] == 3)
+    Picker.select_all(state)
+    check("全选本书", Picker.count(state) == 3)
+    Picker.select_none(state)
+    check("全不选", Picker.count(state) == 0)
+    Picker.select_indexes(state, { 3, 1, 9 })
+    check("按页选择忽略越界并保持升序",
+        #Picker.selected_indexes(state) == 2
+        and Picker.selected_indexes(state)[1] == 1
+        and Picker.selected_indexes(state)[2] == 3)
+
+    local big = Picker.new_state({ spine_count = 31, chapters = {} })
+    check("分页数量", Picker.page_count(big, 30) == 2)
+    check("首页 30 章", #Picker.page_chapters(big, 1, 30) == 30)
+    local last_page = Picker.page_chapters(big, 2, 30)
+    check("末页剩余 1 章", #last_page == 1 and last_page[1].index == 31)
+
+    local visible = Picker.visible_chapter_indexes({
+        { text = "开始翻译" }, { text = "全选本书" },
+        { chapter_index = 1 }, { chapter_index = 2 }, { chapter_index = 3 },
+    }, 1, 5)
+    check("本页可见章节", #visible == 3 and visible[1] == 1 and visible[3] == 3)
+
+    local empty_state = Picker.new_state({ spine_count = 3, chapters = {} })
+    local items = Picker.build_item_table(empty_state, {})
+    check("首行为开始翻译且未选时禁用",
+        items[1].text:find("开始翻译", 1, true) ~= nil and items[1].select_enabled == false)
+    check("包含全选/本页/全不选/反选",
+        items[2].text == "全选本书" and items[3].text == "全选本页"
+        and items[4].text == "全不选" and items[5].text == "反选")
+    check("状态行显示章节与已选数",
+        items[6].text == "共 3 章 · 已选 0 章" and items[6].select_enabled == false)
+    check("章节行带未选标记与索引",
+        items[7].text:sub(1, 4) == "[ ] " and items[7].chapter_index == 1)
+    check("末行为开始翻译", items[#items].text:find("开始翻译", 1, true) ~= nil)
+
+    Picker.toggle(empty_state, 1)
+    local selected_items = Picker.build_item_table(empty_state, {})
+    check("勾选后标记与计数同步",
+        selected_items[7].text:sub(1, 4) == "[x] "
+        and selected_items[1].select_enabled == true
+        and selected_items[1].text == "开始翻译（1 章）")
+end
+
+-- ============================================================
+print("== 3. ChapterPickerDialog 流程 ==")
+do
+    local plugin = {}
+    local outline = {
+        spine_count = 3,
+        chapters = {
+            { index = 1, title = "Chapter One", level = 0 },
+            { index = 2, title = "Chapter Two", level = 0 },
+            { index = 3, title = "Chapter Three", level = 0 },
+        },
+    }
+    plugin.currentBookPath = function() return "/books/picker.epub" end
+    plugin.getBookOutline = function() return outline end
+    local started
+    plugin.translateSelectedChapters = function(_, indexes) started = indexes end
+
+    opened_menus, closed_widgets = {}, {}
+    Picker.show(plugin)
+    local menu = opened_menus[1]
+    check("打开选择器菜单", menu ~= nil and menu.title == "选择章节")
+    check("副标题为书名", menu.subtitle == "picker")
+    check("未选时开始禁用", menu.item_table[1].select_enabled == false)
+    check("状态行显示章节数", menu.item_table[6].text == "共 3 章 · 已选 0 章")
+
+    local function find_item(predicate)
+        for _, item in ipairs(menu.item_table) do
+            if predicate(item) then return item end
+        end
+    end
+
+    menu.perpage = 14
+    menu:onMenuSelect(find_item(function(item) return item.chapter_index == 2 end))
+    check("勾选章节不关闭菜单", #closed_widgets == 0)
+    check("菜单原地刷新", menu.updated and menu.updated >= 1)
+    local row = find_item(function(item) return item.chapter_index == 2 end)
+    check("章节行标记为已选", row.text:sub(1, 4) == "[x] ")
+    check("开始项计数更新",
+        menu.item_table[1].select_enabled == true and menu.item_table[1].text == "开始翻译（1 章）")
+
+    menu:onMenuSelect(find_item(function(item) return item.text == "全选本页" end))
+    check("全选本页选中全部可见章节", menu.item_table[1].text == "开始翻译（3 章）")
+
+    menu:onMenuSelect(menu.item_table[1])
+    check("开始翻译关闭菜单", #closed_widgets == 1 and closed_widgets[1] == menu)
+    check("交付升序章节号",
+        started ~= nil and #started == 3 and started[1] == 1 and started[3] == 3)
+
+    -- 目录解析失败：提示，不打开空菜单
+    plugin.getBookOutline = function() return nil, "坏的 container.xml" end
+    opened_menus = {}
+    Picker.show(plugin)
+    check("目录失败给出提示", #opened_menus == 1
+        and tostring(opened_menus[1].text):find("目录解析失败", 1, true) ~= nil)
+
+    plugin.getBookOutline = function() return { spine_count = 0, chapters = {} } end
+    opened_menus = {}
+    Picker.show(plugin)
+    check("空目录给出提示", #opened_menus == 1
+        and tostring(opened_menus[1].text):find("没有可选择的章节", 1, true) ~= nil)
 end
 
 print(string.format("\n==== 章节选择器结果：%d 通过，%d 失败 ====", passed, failed))
