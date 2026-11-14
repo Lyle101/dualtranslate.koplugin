@@ -4,7 +4,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.3（第二轮评审修订） |
+| 文档版本 | 0.4（第三轮评审修订） |
 | 日期 | 2026-11-14 |
 | 适用代码 | DualTranslate `v1.2.11-xp50` + `636f135`（P0 已合入） |
 | 目标版本 | `v1.3.0` |
@@ -18,6 +18,7 @@
 | 0.1 | 2026-11-13 | 初稿：可行性、数据模型 v3、R1-R4、P0 补丁、MCP 设计、迁移与测试计划 |
 | 0.2 | 2026-11-13 | P0 合入后对齐代码；修订迁移 SQL（缺 `providers` 表）、内置 provider seed、显示模式（`display_mode`）、fallback 顺序与「最近使用」解耦、删除意图文件、MCP 长段 part 合并、锁模块与依赖方向、0 候选章节语义、outline 解析实现路径、性能指标拆分；行号引用改为函数名 |
 | 0.3 | 2026-11-14 | 第二轮评审：缓存命中补定位行（A1）、SSH 双 key 拆分（A2）、`reconcile` 不再仅凭「DB 无行」删 entries（A3）、`storeForBook` 统一 upsert（A4）、`reload.signal` 改用单调序号（A5）、`complete` 增加 `spine_count=0` 边界（A6）、迁移备份强制 checkpoint（A7）；统一 `book_size`/`book_mtime` 口径；清理与非目标重复的开放问题；性能指标补测量口径 |
+| 0.4 | 2026-11-14 | 第三轮评审：补全 SSH 写入链路（forced command 经 `SSH_ORIGINAL_COMMAND` 传参、新增 `dtctl put` 上传通道）；§11.1 diff 与 §11.4 测试断言对齐实际提交；§2.3/§2.6 现状更新到 P0 后；`dtctl.sh` 导出 `KO_ROOT`；logger 重定向不再吞首参；只读 key chroot 路径/`dt_list_providers` 路由/SCP 回退措辞修正；`reload.signal` 增加 `op` 字段区分导入/删除/显示切换 |
 
 **阅读约定**
 
@@ -127,7 +128,7 @@ CREATE TABLE book_translations (
 );
 ```
 
-`provider` 有列，但**不在主键、不在查询条件**。
+`provider` 有列，P0 后**已进入查询条件**（`lookupForBook` 的 SELECT 与命中后的 usage UPDATE 都带 `AND provider = ?`），但**不在主键**——`INSERT OR REPLACE` 仍会覆盖同原文的旧 provider 行（见 2.4）。
 
 **overlay**（`cache/dualtranslate/books/<hash>/overlay.json`）：
 
@@ -135,6 +136,7 @@ CREATE TABLE book_translations (
 {
   "version": 2,
   "complete": false,
+  "provider": "microsoft_free",
   "book_path": "/mnt/us/documents/Pride.epub",
   "source_lang": "en",
   "target_lang": "zh-Hans",
@@ -150,7 +152,7 @@ CREATE TABLE book_translations (
 }
 ```
 
-每个 selector 只有一条译文，没有 provider 维度。
+entries 层面每个 selector 仍只有一条译文，没有 provider 维度；顶层 `provider` 是 P0 新增字段，标记这份 overlay 由哪个服务生成，供续跑合并隔离（见 2.4 B2）。v1.2.11 的旧 overlay 没有该字段，P0 按「当前配置的服务」兼容复用一次。
 
 ### 2.4 历史缺陷与修复记录（P0）[已实现]
 
@@ -182,11 +184,11 @@ B1 是用户本次现象的**直接原因**；B2 是切换服务始终无效的*
 | `Reader:getTranslationOverlayPath` | 返回 `overlay.json` | 返回 `manifest.json`；另加 `getEntriesPath(provider)` |
 | `Reader:hasTranslationOverlay` | 只查 `overlay.json` | v3 查 manifest；v2 仍返回 true，并触发 `Store.migrateBookIfNeeded`，避免升级后菜单 disabled |
 | `Reader:removeTranslationFilesForBook` | 只扫 `overlay.json` | 同时扫 `manifest.json` 与 legacy `overlay.json`；返回只保留 `removed` |
-| `Reader:clearBookTranslationData`（新） | 无 | 统一“删 overlay + clearForBook(book_path)”，供菜单与测试复用 |
+| `Reader:clearBookTranslationData` | 已实现（P0）：统一「删 overlay + `clearForBook(book_path)`」，菜单与测试复用 | 保留；P3「删除本书全部译文」在此基础上追加清理该书的 MCP job/inbox 残留（见 10.2） |
 | `Reader:refreshDocumentStyles` | `buildCss(overlay_path, opts)` | `buildCss(manifest_path, opts + display provider/fallback)` |
 | `Reader:onReadSettings` | 只 `hasTranslationOverlay` | 先 `Store.migrateBookIfNeeded`，再 refresh |
-| `Reader:translateTextForEpub` | 缓存查询不带 provider | 传 provider；store 带 selector/xpointer/chapter 元数据 |
-| `Reader:translateTextBatchForEpub` | 同上 | 同上；批量分支传 mode |
+| `Reader:translateTextForEpub` | P0 后缓存查询/写入已带 provider（函数开头的 `mode`） | store 带 selector/xpointer/chapter 元数据 |
+| `Reader:translateTextBatchForEpub` | 同上（P0 后查询带 provider，批量分支统一用 `mode`） | 同上 |
 | `Epub.translate_overlay` | 12 个位置参数（P0 后） | 单 options 表；新增 `mode/chapter_indexes/provider` |
 | `Overlay.buildCss` | 遍历单文件 entries | 读 manifest + 选定 provider entries；支持 fallback；key 含 revision |
 | `Overlay.load` | 强制要求 `data.entries` | 保留给 entries；新增 `loadManifest`/`loadBookIndex`（兼容 v2） |
@@ -1262,8 +1264,9 @@ sequenceDiagram
     S->>U: elicitation：确认模型名称
     U-->>S: 输入/确认
     A->>S: dt_submit_translations(job_id, segments)
+    S->>K: dtctl put 上传 result.partial.json（写入 key，stdin）
     A->>S: dt_commit_job(job_id)
-    S->>K: SSH 执行 dtctl import
+    S->>K: dtctl put 上传 result.json + SSH 执行 dtctl import
     K->>K: 写 SQLite + entries + manifest
     K-->>U: 刷新提示 / 询问是否切换显示
 ```
@@ -1291,7 +1294,8 @@ sequenceDiagram
 ```
 cache/dualtranslate/mcp/jobs/<job_id>/job.json
 cache/dualtranslate/mcp/jobs/<job_id>/state.json
-cache/dualtranslate/mcp/jobs/<job_id>/result.json     -- 翻译后
+cache/dualtranslate/mcp/jobs/<job_id>/result.partial.json  -- 分批提交（dtctl put 上传）
+cache/dualtranslate/mcp/jobs/<job_id>/result.json          -- 翻译后（dtctl put 上传）
 ```
 
 任务目录保留策略：`committed` 且超过 7 天的 job 由 `dtctl` 在下次导入成功时顺带清理；「删除本书全部译文」必须同时删除 `job.book.device_path` 指向该书的 job 目录与 inbox 结果（`job.json` 含原文，不能留）。这是 P3 的必做项，不能推到 P4。
@@ -1433,11 +1437,13 @@ book_root = "/mnt/us/documents"
 | `dt_submit_translations` | 分批提交译文，可断点续传 | 否 |
 | `dt_commit_job` | 校验并写入设备 DB/overlay | 否 |
 | `dt_job_status` | 查询任务状态/已提交数量 | 是 |
-| `dt_list_providers` | 列出某本书已有服务 | 是 |
+| `dt_list_providers` | 列出某本书已有服务 | 是（走写入 key，见下注） |
 | `dt_delete_provider` | 删除某服务在某本书的译文 | 否 |
 | `dt_set_display_provider` | 设置当前显示服务 | 否 |
 | `dt_refresh_device` | 通知插件刷新外部译文 | 否 |
 | `dt_prepare_job` | （可选）PC 发起抽取 | 否 |
+
+传输归属（双 key 见本节「工具安全约束」与 10.4）：`dt_list_jobs` / `dt_get_job` / `dt_get_segments` / `dt_job_status` 的数据都在 `mcp/jobs/` 内，走**只读 key** 的 SFTP。`dt_list_providers` 语义上只读，但数据源是 DB 与 `books/<hash>/manifest.json`，在只读 key 的 chroot 之外，必须走**写入 key** 的 `dtctl list-providers`。其余写工具（confirm/submit/commit/delete/set-display/refresh/prepare）一律走写入 key 的 dtctl；文件上传（state.json、result*.json）走 `dtctl put`（stdin，见 10.5）。
 
 `dt_get_segments` 输入：
 
@@ -1477,7 +1483,7 @@ book_root = "/mnt/us/documents"
 
 - 每次最多 100 段；单段最多 20,000 字符。
 - 校验 `id` 属于该 job、`text` 非空、无 NUL、长度合理。
-- 写入 `result.partial.json`，合并去重；返回 `accepted/rejected/remaining`。
+- Server 在**本地工作副本**中合并去重 `result.partial.json`，再经写入 key 的 `dtctl put`（stdin）上传覆盖设备端同名文件，并同步上传 `state.json`；返回 `accepted/rejected/remaining`。设备端没有 SFTP 写权限，上传只有这一条通道（见 10.5）。
 - 支持 Agent 分多次提交，避免上下文/请求过大。
 
 `dt_commit_job` 输入：
@@ -1488,7 +1494,7 @@ book_root = "/mnt/us/documents"
 
 - 要求 `state.provider_id` 已确认；否则返回 `needs_model_confirmation`。
 - 校验 `submitted >= total`：`allow_partial=false`（默认）时拒绝，返回 `incomplete_job` 与 `remaining` 列表；显式传 `allow_partial=true` 才允许部分导入，并在回执与 manifest 中标 `partial`。
-- 合并 `result.partial.json` 为 `result.json`（先写 `.tmp` 再 rename）。
+- 在本地工作副本把 `result.partial.json` 合并为 `result.json`，经 `dtctl put` 上传（设备端先写 `.tmp` 再 rename）。
 - 通过 SSH 执行 `dtctl import`。
 - 返回导入统计与设备回执。
 
@@ -1500,7 +1506,7 @@ exported → confirmed → submitting → committed
 ```
 
 - `state.json` 每次转移都原子写（tmp + rename），并校验合法前驱；非法转移返回 `INVALID_STATE`。
-- 同一 job 的 `dt_submit_translations` / `dt_commit_job` 必须持 **per-job 锁**（`jobs/<id>/.lock`，mkdir 语义）。没有锁时两个 Agent 同时读改写 `result.partial.json` 会互相覆盖。
+- 同一 job 的 `dt_submit_translations` / `dt_commit_job` 必须串行：Server 持本地 per-job 锁保护工作副本的读改写；设备端 `dtctl put` / `import` 持 `jobs/<id>/.lock`（mkdir 语义），避免上传与导入并发写。没有锁时两个 Agent 同时提交会互相覆盖 `result.partial.json`。
 - 已 `committed` 的 job 再提交返回 `ALREADY_COMMITTED`（幂等提示），不重复计数。
 
 #### 模型确认握手
@@ -1535,8 +1541,9 @@ MCP 规范支持 elicitation；实现两套路径：
 - 删除类工具标记 `destructiveHint`，调用前要求用户确认。
 - 结果 JSON 大小上限（建议 50MB）；段落数上限；译文长度上限。
 - **SSH key 必须拆成两把，不能一把通吃**：
-  - **只读 key**（下载 job/result）：`restrict,command="internal-sftp"` + `ChrootDirectory` 限定到 `mcp/jobs/`，只允许 SFTP/SCP 读取；不要授予 db 与书籍目录的读权限。
-  - **写入 key**（import / delete / set-display）：`command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh",no-pty,no-agent-forwarding,no-port-forwarding`，**不允许 SFTP**。
+  - **只读 key**（下载 job/result）：`restrict,command="internal-sftp -R"` + `ChrootDirectory` 限定到 `mcp/jobs/`，只允许 SFTP 读取（`-R` 强制只读；forced command 下 SCP 与 `ssh "cat"` 同样被拦截，不能用作读通道）。不要授予 db 与书籍目录的读权限。注意：sshd 要求 `ChrootDirectory` 及其所有上级目录 root 所有且不可被组/其他用户写，P3 部署前必须真机验证。
+  - **写入 key**（put / import / delete / set-display 等）：`command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh",no-pty,no-agent-forwarding,no-port-forwarding`，**不允许 SFTP**。forced command 下 sshd **不执行**客户端请求的命令行，只把它放进 `SSH_ORIGINAL_COMMAND` 环境变量——`dtctl.sh` 的 `"$@"` 是空的，dtctl.lua 必须解析该环境变量并做白名单校验后再分发（见 10.5），否则所有子命令都收到空参数。
+  - **上传通道**：只读 key 不能写、写入 key 没有 SFTP，因此文件上传（`state.json` / `result.partial.json` / `result.json` / inbox 降级）一律走写入 key 的 `dtctl put`，文件内容经 stdin 传入（见 10.5）。
   - 原因：`command=` 的 forced command 会拦截 `sftp` 子系统请求，**同一把 key 不能既走 SFTP 又走 dtctl**。只用一把锁死的 key，10.4 的「SFTP 首选」必然失败；只用一把未锁的 key，「MCP 不暴露 exec」就只是 Python 层的自觉，key 泄漏即可拿到 root shell。
 - 设备侧再做一次校验（见 10.5）：`dtctl` 自己校验 `--job` 的归属、`job.book.device_path` 前缀、`--provider` 文法。两层重复是故意的。
 
@@ -1554,7 +1561,7 @@ class Transport(Protocol):
 
 | 实现 | 场景 | 说明 |
 | --- | --- | --- |
-| `SshTransport` | Kindle 越狱 + USBNetwork | 首选；**读走只读 key 的 SFTP/SCP，写只走写入 key 的 dtctl**（见 10.3 双 key）；无 sftp-server 时读回退 SCP 或 `ssh "cat"`；不提供任意 `ssh exec` |
+| `SshTransport` | Kindle 越狱 + USBNetwork | 首选；**读走只读 key 的 SFTP（`internal-sftp -R`），写（含上传）只走写入 key 的 dtctl**（见 10.3 双 key）；`write_text` 实现为 `dtctl put`（stdin）；SCP/`ssh "cat"` 读回退仅适用于未配置 forced command 的设备，双 key 配置下会被 forced command 拦截；不提供任意 `ssh exec` |
 | `UsbTransport` | Kindle 挂载为 U 盘 | 直接文件读写；无法执行导入命令，走「收件箱」模式 |
 | `LocalTransport` | 模拟器/测试 | 指向本地目录，CI 用 |
 | `AdbTransport` | Android 设备 | 后续扩展 |
@@ -1562,13 +1569,14 @@ class Transport(Protocol):
 SSH 调用示例（实际用参数数组，避免注入）：
 
 ```text
-sftp: get /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/job.json   # 只读 key
-ssh:  /mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh import \
-      --job /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/job.json \
+sftp: get /<id>/job.json                        # 只读 key；chroot 到 mcp/jobs/，用相对路径
+ssh:  put --job /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/job.json \
+      --name result.json < result.json          # 写入 key；stdin 上传
+ssh:  import --job /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/job.json \
       --result /mnt/us/koreader/cache/dualtranslate/mcp/jobs/<id>/result.json  # 写入 key
 ```
 
-两条命令用**不同的 key**：`sftp` 走只读 key，`ssh` 走写入 key；写入 key 被 forced command 锁定，客户端传入的命令会被忽略，统一落到 `dtctl.sh`。
+两类命令用**不同的 key**：`sftp` 走只读 key（chroot 后路径相对 `mcp/jobs/`，写绝对路径会找不到文件）；`ssh` 走写入 key。写入 key 被 forced command 锁定：sshd 不执行客户端发来的命令串，而是放进 `SSH_ORIGINAL_COMMAND`，由 `dtctl.sh` → `dtctl.lua` 白名单解析后执行（见 10.5）。因此命令串直接以子命令（`put`/`import`/…）开头，不带 dtctl.sh 路径；文件内容经 stdin 传入。
 
 ### 10.5 设备端 CLI
 
@@ -1585,11 +1593,14 @@ tools/dtctl.lua         # 子命令实现
 #!/bin/sh
 set -e
 KO_ROOT="${KO_ROOT:-/mnt/us/koreader}"
+export KO_ROOT
 cd "$KO_ROOT"
 export KO_HOME="$KO_ROOT"
 export LD_LIBRARY_PATH="$KO_ROOT/libs:$LD_LIBRARY_PATH"
 exec ./luajit "$KO_ROOT/plugins/dualtranslate.koplugin/tools/dtctl.lua" "$@"
 ```
+
+> `KO_ROOT` 必须 `export`：dtctl.lua 用 `os.getenv("KO_ROOT")` 定位安装目录，未导出时非默认安装路径下 shell 的 `cd` 与 Lua 的 root 会不一致。经 SSH forced command 调用时 `"$@"` 为空，客户端命令在 `SSH_ORIGINAL_COMMAND` 环境变量里（exec 后由 luajit 继承），由 dtctl.lua 解析，见下。
 
 `dtctl.lua` 启动时优先复用 KOReader 自己的 `setupkoenv.lua`，不要手写一份不完整的 path：
 
@@ -1618,16 +1629,43 @@ end
 
 > `setupkoenv.lua` 会设置 `package.path/cpath`、`LD_LIBRARY_PATH` 相关环境与 KOReader 的 loader；这是 headless 模式最稳的入口。若它不存在，兜底 path 必须包含 `common/`（`json`、`socket.url` 在 `common/`）和 `root/?.so`（`libs/libkoreader-lfs` 的 `require` 会拼出 `libs/libkoreader-lfs.so`）。
 
+**forced command 传参（SSH 写入 key 必经）：**
+
+经写入 key 调用时，sshd 不执行客户端请求的命令行，`dtctl.sh` 的 `"$@"` 为空；客户端命令串只存在于 `SSH_ORIGINAL_COMMAND` 环境变量。dtctl.lua 入口必须优先解析它：
+
+```lua
+local raw = os.getenv("SSH_ORIGINAL_COMMAND")
+local argv = arg
+if raw then
+    argv = parse_original_command(raw)   -- 白名单校验失败返回 nil
+    if not argv then
+        -- stdout 输出 {"ok":false,"code":"INVALID_ARGUMENT",...}，退出码 2
+    end
+end
+```
+
+`parse_original_command` 规则（任一违反即拒绝）：
+
+- 按空白切分；首个 token 必须是子命令白名单（`extract` / `put` / `import` / `delete-provider` / `set-display` / `list-providers` / `touch-reload`）；
+- 只接受 `--key value` 对，key 在该子命令的参数白名单内；不接受位置参数、引号与 shell 元字符（`; | & $ < >` 反引号等）；
+- 解析出的 argv 走与本地调用完全相同的参数/路径校验（见下）。
+
+shell 层因此从不对不可信输入做分词或 eval，注入风险收敛到 Lua 的白名单校验。客户端用写入 key 请求 sftp 子系统时 `SSH_ORIGINAL_COMMAND` 为 `sftp`，不在白名单，直接拒绝——这就是「不允许 SFTP」的实现；纯 shell 请求没有该环境变量也没有参数，输出用法错误。
+
 子命令：
 
 ```text
 dtctl extract --book <path> --chapters 5,6 --source en --target zh-Hans --out <job.json>
+dtctl put --job <job.json> --name <state.json|result.partial.json|result.json>  # stdin 读文件内容
+dtctl put --job <job.json> --inbox                     # 降级模式：写 mcp/inbox/<job_id>.json
 dtctl import --job <job.json> --result <result.json>
 dtctl delete-provider --book <path> --target zh-Hans --provider mcp:gpt-5
 dtctl set-display --book <path> --target zh-Hans --provider mcp:gpt-5
 dtctl list-providers --book <path> --target zh-Hans
-dtctl touch-reload --book <path>
+dtctl touch-reload --book <path> [--op import|delete|display|refresh]  # 缺省 refresh
 ```
+
+`put` 是双 key 模型下**唯一的文件上传通道**（只读 key 无写权限、写入 key 无 SFTP）：从 stdin 读内容，校验后原子写入 job 目录（持 per-job 锁）。`--name` 白名单外的文件名一律拒绝；`--inbox` 用于 headless 导入降级（见下），落点为 `mcp/inbox/<job_id>.json`，`job_id` 从 `--job` 路径解析并校验。
 
 输出：stdout 只输出**单行 JSON** 结果；日志写 stderr；退出码 0/非 0。
 
@@ -1636,7 +1674,7 @@ KOReader 的 `logger` 默认会写 stdout，`Cache`/`Epub` 的 `logger.warn` 会
 ```lua
 local logger = require("logger")
 local function to_stderr(level)
-    return function(_, ...)
+    return function(...)
         local parts = {}
         for i = 1, select("#", ...) do parts[i] = tostring(select(i, ...)) end
         io.stderr:write("[" .. level .. "] " .. table.concat(parts, " ") .. "\n")
@@ -1645,6 +1683,8 @@ end
 logger.dbg, logger.info, logger.warn, logger.err = to_stderr("DBG"), to_stderr("INFO"), to_stderr("WARN"), to_stderr("ERR")
 ```
 
+> 插件里 logger 全部是点调用（`logger.warn("msg", ...)`），消息在第一个实参，包装函数必须是 `function(...)`；写成 `function(_, ...)` 会把日志主体吞掉。
+
 最后只允许 `print(json.encode(result))` 走 stdout；测试要断言 stdout 只有一行且能 `json.decode`。
 
 `extract` 复用 `Epub.resolve()` 与公开后的 `collect_candidates()`；`import` 复用 `Store.importResult()`。CLI 不得 require 任何 `ui/` 模块。
@@ -1652,8 +1692,9 @@ logger.dbg, logger.info, logger.warn, logger.err = to_stderr("DBG"), to_stderr("
 **参数与路径校验（必须在 dtctl 内做，不能只靠 MCP Server）：**
 
 - `--job` / `--result` 必须位于 `mcp/jobs/<job_id>/` 下；`job_id` 匹配 `^[0-9A-Za-z_-]+$`；`realpath` 后仍在该目录内（防 `..` 与符号链接逃逸）。
+- `put` 的 `--name` 只允许 `state.json` / `result.partial.json` / `result.json`；stdin 内容必须是合法 JSON 且不超过 50MB；写入持 per-job 锁，临时文件 + rename。`--inbox` 只允许写 `mcp/inbox/<job_id>.json`。
 - `job.book.device_path` 必须位于 `book_root` 下，且与 `--book`（若传）一致；拒绝空值或 `/`。
-- `--provider` 必须匹配 provider_id 文法；`--target` 必须在语言白名单内。
+- `--provider` 必须匹配 provider_id 文法；`--target` 必须在语言白名单内；`touch-reload --op` 必须在 `import|delete|display|refresh` 内。
 - 校验失败：stdout 输出 `{"ok":false,"code":"INVALID_ARGUMENT",...}`，退出码 2，不写任何文件。
 
 stdout 纯净性：除重定向 `logger` 外还要接管 `print`（业务模块可能直接 print）：
@@ -1674,7 +1715,7 @@ end
 - `datastorage` 依赖 `libs/libkoreader-lfs`，`lua-ljsqlite3` 依赖 KOReader 的 FFI/动态库。
 - `dtctl.sh` 必须模拟 `koreader.sh` 的 `LD_LIBRARY_PATH` 与 `package.path`。
 - 真机验证项：打开数据库、读 manifest、写 entries、返回 JSON。
-- 若失败：`dt_commit_job` 降级为把 `result.json` 放到 `mcp/inbox/`，由插件在下次打开时导入；MCP 返回 `pending_import`，功能仍可用，只是不是「KOReader 关闭时立即入库」。
+- 若失败：`dt_commit_job` 降级为经 `dtctl put --inbox` 把 `result.json` 放到 `mcp/inbox/`，由插件在下次打开时导入；MCP 返回 `pending_import`，功能仍可用，只是不是「KOReader 关闭时立即入库」。
 
 ### 10.6 导入流程（DB + overlay）
 
@@ -1708,7 +1749,8 @@ end
    - `display_name` / `model_name` / `confirmed` 以 DB 为准（D10）：写 manifest 前从 `providers` 表回读这三个字段，manifest 只做投影。
    - 临时文件 + `rename`。
 6. **重载信号**
-   - 写 `reload.signal`：单行 JSON `{"seq": <manifest.revision>, "provider": "...", "count": N, "at": T}`。`seq` 取本次写入后的 `manifest.revision`，是刷新判定的唯一依据（见 10.7）。
+   - 写 `reload.signal`：单行 JSON `{"seq": <manifest.revision>, "op": "import", "provider": "...", "count": N, "at": T}`。`seq` 取本次写入后的 `manifest.revision`，是刷新判定的唯一依据（见 10.7）。
+   - `op` 标记操作类型：`import`（导入）/ `delete`（删除 provider）/ `display`（外部设置显示）/ `refresh`（仅刷新，`dtctl touch-reload` 默认值）。删除与显示切换同样以 reload 信号结尾（见 14.2），没有 `op` 时插件会把它们误报成「译文已导入」。
 7. **释放 lock**，返回统计。
 
 写入顺序的理由：
@@ -1720,11 +1762,11 @@ end
 
 ### 10.7 插件侧刷新
 
-- `onPageUpdate` / `onPosUpdate`：读取 `reload.signal` 的**内容**（几十字节，`io.open` 很便宜），`seq` 大于 `_last_reload_signal_seq` 才处理。**不要比较 mtime**：FAT32 时间戳只有 ~2 秒粒度，连续两次导入（间隔 < 2s）mtime 可能不变，刷新会被静默漏掉。新 `seq` 时：
-  - 重新加载 manifest；
-  - 如果新 provider 未确认，**不弹模态框**（会打断阅读并触发重新分页）：菜单标「MCP · 待确认」+ 一次性 toast，确认动作由用户进菜单主动触发（10.8）；
-  - `refreshDocumentStyles()`；
-  - 通知「MCP 译文已导入：GPT-5，410 段」。
+- `onPageUpdate` / `onPosUpdate`：读取 `reload.signal` 的**内容**（约百字节，`io.open` 很便宜），`seq` 大于 `_last_reload_signal_seq` 才处理。**不要比较 mtime**：FAT32 时间戳只有 ~2 秒粒度，连续两次导入（间隔 < 2s）mtime 可能不变，刷新会被静默漏掉。新 `seq` 时先重新加载 manifest 并 `refreshDocumentStyles()`，再按 `op` 分支通知：
+  - `import`：如果新 provider 未确认，**不弹模态框**（会打断阅读并触发重新分页）：菜单标「MCP · 待确认」+ 一次性 toast，确认动作由用户进菜单主动触发（10.8）；通知「MCP 译文已导入：GPT-5，410 段」。
+  - `delete`：通知「已删除 GPT-5 的译文」；若删除的是当前显示服务，按第 9 节的 fallback 规则自动切换。
+  - `display` / `refresh`：只刷新，不弹导入类通知。
+  - 信号缺 `op` 字段时按 `refresh` 处理（只刷新不通知），不得默认成 `import`。
 - 菜单「刷新外部译文」手动触发同一逻辑。
 - 如果书未打开：下次 `onReaderReady` 读取 manifest 即可，不依赖信号。
 - 自动切换显示：默认 `auto_switch_after_import=false`，导入后只通知「已导入 GPT-5，是否切换显示？」；用户确认后再切。只有设置显式为 true 时才自动切换。若用户正在阅读，刷新会导致重新分页，因此默认不强制。
@@ -1783,23 +1825,32 @@ end
 
 ### 11.1 清除路径错位
 
-`main.lua`：
+`main.lua`（菜单唯一调用点）：
 
 ```diff
 -                        local removed, cleared_path = self:removeTranslationFilesForBook(book_path)
 -                        self.cache:clearForBook(cleared_path or book_path)
-+                        local removed = self:removeTranslationFilesForBook(book_path)
-+                        self.cache:clearForBook(book_path)
++                        local removed = self:clearBookTranslationData(book_path)
 ```
 
-`dualtranslate_reader.lua`：
+`dualtranslate_reader.lua`：`removeTranslationFilesForBook` 只保留 `removed` 返回值，并新增统一入口：
 
 ```diff
 -    return removed, cleared_dir or book_path
 +    return removed
++end
++
++function dualtranslate:clearBookTranslationData(book_path)
++    if not book_path then return 0 end
++    local removed = self:removeTranslationFilesForBook(book_path)
++    if self.cache and self.cache.clearForBook then
++        self.cache:clearForBook(book_path)
++    end
++    return removed
+ end
 ```
 
-同时把 `cleared_dir` 局部变量删掉（或仅用于日志），避免再次误用。
+同时把 `cleared_dir` 局部变量删掉，避免再次误用。与 2.4 B1 口径一致：菜单与测试统一走 `clearBookTranslationData(book_path)`，「删 overlay」和「清 DB」永远拿到同一个书路径。
 
 > MCP 任务文件（`mcp/jobs/*/job.json`）包含书籍原文。执行「删除本书全部译文」时，应同时清理 `job.json/book_path` 指向该书的 job 目录与 inbox 结果，避免残留原文；这一点在 P0 可先不做，P3 上线 MCP 时必须补上。
 
@@ -1896,15 +1947,17 @@ local provider_matches = previous
    - 调 `clearBookTranslationData(book_path)`，断言 fake cache 的 `clearForBook` 收到的是**书路径**，不是缓存目录；
    - 断言 overlay 目录被删除、`removeTranslationFilesForBook` 不再返回第二个路径值。
 2. `tests/cache_provider_test.lua`（P0 范围）：
-   - `lookupForBook(..., "system")` 的 SQL 包含 `provider = ?`，绑定参数数量正确；
-   - 旧 provider 行在 `system` 查询下不命中；
-   - 写入 `system` 后旧 `microsoft_free` 行被替换（P0 旧主键的预期行为，不是 bug）；
+   - `lookupForBook(..., "system")` 的 SQL 包含 `provider = ?`，绑定参数数量正确（lookup 5 个、usage UPDATE 6 个）；
+   - 以 `microsoft_free` 查询不命中 `system` 行，且 miss 不发出 usage UPDATE；
+   - `storeForBook` 写 8 列、`provider` 为第 6 绑定参数；跨 provider 行替换属 SQLite 旧主键语义，mock DB 无法断言，由 P1 迁移测试覆盖；
    - 不要断言两个 provider 共存；共存是 P1 主键升级后的测试。
 3. `tests/overlay_provider_test.lua`：
    - overlay `provider = "system"`，当前 provider `system` → 复用；
    - overlay `provider = "microsoft_free"`，当前 provider `system` → 不复用；
    - 旧 overlay 没有 `provider` → P0 兼容复用，且 checkpoint 写入当前 provider；
-   - 调用点必须传 provider：测试直接断言 `translate_overlay` 返回结果里的 checkpoint 含 provider。
+   - 调用点必须传 provider：测试断言 `Overlay.save` mock 收到的数据含当前 provider（`saved_data.provider`）；`translate_overlay` 的返回表本身不含 checkpoint 字段；
+   - 切换 provider 后全部请求失败时不得写空 checkpoint（`Overlay.save` mock 不被调用）；
+   - 缺 provider 在做任何工作前被拒绝（错误信息含「翻译服务」）。
 4. `tests/cache_test.lua` 的 `binds` 断言已改为 `5/6`（lookup/update 各多一个 provider）；`provider == nil` 的查询必须不产生 SQL（见该文件开头两条断言）。
 5. `tests/clear_test.lua` 的 `plugin.cache` 不再整体 stub，至少断言 `clearForBook` 参数；同时把它写死的 `package.path` 改为相对路径。
 
@@ -2037,9 +2090,11 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 | 操作 | 顺序 |
 | --- | --- |
 | 正常翻译 checkpoint | entries 临时文件 → rename → manifest 临时文件 → rename（持 book lock） |
-| MCP 导入 | DB 事务 → entries → manifest → reload signal |
-| 删除 provider | intent → DB → entries 删除 → manifest → 清 intent → reload |
-| 显示切换 | manifest → reload（只改一个字段，仍原子写） |
+| MCP 导入 | DB 事务 → entries → manifest → reload signal（`op="import"`） |
+| 删除 provider | intent → DB → entries 删除 → manifest → 清 intent → reload signal（`op="delete"`） |
+| 显示切换（dtctl set-display） | manifest → reload signal（`op="display"`；只改一个字段，仍原子写） |
+
+> reload.signal 只由**外部写入**（dtctl）产生。插件内部的显示切换/删除在本进程内直接刷新，不写信号，避免自己触发自己的「外部变更」通知。
 
 ### 14.3 崩溃恢复矩阵
 
@@ -2063,7 +2118,7 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 
 - SQLite WAL 允许多进程读写；外部导入用短事务。
 - overlay 文件原子 rename；插件 `Overlay.buildCss` 缓存 key 含 mtime，下一次刷新会重新读。
-- `reload.signal` 只做提示；插件轮询成本低（每次翻页读一次几十字节的 `seq`，不做 JSON 全量校验）。
+- `reload.signal` 只做提示；插件轮询成本低（每次翻页读一次约百字节的信号并解析 `seq/op`，不做译文数据的全量校验）。
 - 如果插件正在翻译同一本书：book lock 冲突，导入返回 `DEVICE_BUSY`；Agent 稍后重试，或等队列空闲。
 
 ---
@@ -2100,7 +2155,9 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
   - 非法 id、空译文、超长、重复 id；
   - 导入失败重试、busy；
   - 删除 provider / 设置显示；
-  - 路径穿越、job_id 注入。
+  - 路径穿越、job_id 注入；
+  - `SSH_ORIGINAL_COMMAND` 白名单解析（合法子命令、非法元字符、sftp 子系统请求拒绝）；
+  - `dtctl put` 文件名白名单、非法 JSON、超限大小、inbox 落点。
 
 ### 15.3 设备端 E2E
 
@@ -2385,6 +2442,7 @@ PRAGMA user_version;
 │   └── mcp/
 │       ├── jobs/<job_id>/job.json
 │       ├── jobs/<job_id>/state.json
+│       ├── jobs/<job_id>/result.partial.json
 │       ├── jobs/<job_id>/result.json
 │       └── inbox/
 └── plugins/dualtranslate.koplugin/
