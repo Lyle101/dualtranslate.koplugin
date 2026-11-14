@@ -267,17 +267,18 @@ do
     local translated_texts = {}
     local progress_path = "/tmp/dualtranslate_prog.txt"
     local progress_seen
-    local result, err = Epub2:translate_overlay("/books/x.epub", "1", "zh-Hans", "auto",
-        function(text)
+    local result, err = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = progress_path, output_dir = output_dir,
+        translate = function(text)
             if not progress_seen then
                 local f = io.open(progress_path, "r")
                 if f then progress_seen = f:read("*l"); f:close() end
             end
             return "T:" .. text
-        end, -- 单条翻译
-        true, -- all_chapters
-        progress_path,
-        function(texts) -- 批量翻译（真实主路径）
+        end,
+        translate_batch = function(texts) -- 批量翻译（真实主路径）
             if not progress_seen then
                 local f = io.open(progress_path, "r")
                 if f then progress_seen = f:read("*l"); f:close() end
@@ -286,10 +287,7 @@ do
             for i, t in ipairs(texts) do out[i] = "B:" .. t end
             return out
         end,
-        output_dir,
-        nil, -- span
-        nil, -- cancel_path
-        "microsoft_free")
+    })
     check("整书翻译成功", result ~= nil, tostring(err))
     check("整书翻译输出", result and result.overlay == true)
     check("整书翻译章节数", result and result.chapters == 2)
@@ -307,12 +305,13 @@ do
     local output_dir2 = "/tmp/dualtranslate_out2"
     os.execute("rm -rf " .. output_dir2)
     local progress_path2 = "/tmp/dualtranslate_prog2.txt"
-    local result2, err2 = Epub2:translate_overlay("/books/x.epub", "2", "zh-Hans", "auto",
-        function(text) return "T:" .. text end,
-        false, -- 章节
-        progress_path2,
-        function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
-        output_dir2, 1, nil, "microsoft_free")
+    local result2, err2 = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "span", fragment = "2", span = 1,
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = progress_path2, output_dir = output_dir2,
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
+    })
     check("章节模式成功", result2 ~= nil, tostring(err2))
     check("章节模式只翻一章", result2 and result2.chapters == 1)
     check("章节模式段落数", result2 and result2.translated == 1)
@@ -327,17 +326,25 @@ do
     os.execute("rm -rf " .. output_dir3)
     local cancel_flag = "/tmp/dualtranslate_cancel.txt"
     local f = io.open(cancel_flag, "w"); f:write("x"); f:close()
-    local result3 = Epub2:translate_overlay("/books/x.epub", "1", "zh-Hans", "auto",
-        function(text) return "T:" .. text end, true, "/tmp/dualtranslate_prog3.txt",
-        function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
-        output_dir3, nil, cancel_flag, "microsoft_free")
+    local result3 = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dualtranslate_prog3.txt", output_dir = output_dir3,
+        cancel_path = cancel_flag,
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
+    })
     check("取消标志生效", result3 and result3.cancelled == true)
     os.remove(cancel_flag)
 
     -- 非 EPUB 报错
-    local bad_res, bad_err = Epub2:translate_overlay("/books/x.txt", "1", "zh-Hans", "auto",
-        function(text) return "T" end, true, "/tmp/p.txt",
-        function(texts) return {} end, "/tmp/out4", nil, nil, "system")
+    local bad_res, bad_err = Epub2:translate_overlay({
+        book_path = "/books/x.txt", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "system",
+        progress_path = "/tmp/p.txt", output_dir = "/tmp/out4",
+        translate = function(text) return "T" end,
+        translate_batch = function(texts) return {} end,
+    })
     check("非 EPUB 报错", bad_res == nil and bad_err and bad_err:find("EPUB") ~= nil)
 end
 

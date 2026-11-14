@@ -75,20 +75,22 @@ do
     -- batch success: contexts array must align with sources
     local batch_contexts, single_calls
     local out_dir = DATA_DIR .. "/out_batch"
-    local result, err = Epub:translate_overlay("/books/ctx.epub", "1", "zh-Hans", "auto",
-        function(text, context)
+    local result, err = Epub:translate_overlay({
+        book_path = "/books/ctx.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "system",
+        progress_path = "/tmp/dt_ctx_prog.txt", output_dir = out_dir,
+        translate = function(text, context)
             single_calls = single_calls or {}
             single_calls[#single_calls + 1] = { text = text, context = context }
             return "S:" .. text
         end,
-        true, "/tmp/dt_ctx_prog.txt",
-        function(texts, contexts)
+        translate_batch = function(texts, contexts)
             batch_contexts = contexts
             local out = {}
             for i, t in ipairs(texts) do out[i] = "B:" .. t end
             return out
         end,
-        out_dir, nil, nil, "system")
+    })
     check("batch run ok", result ~= nil, tostring(err))
     check("batch contexts aligned", batch_contexts and #batch_contexts == 2)
     check("context selector", batch_contexts and batch_contexts[1]
@@ -106,15 +108,17 @@ do
     -- batch failure -> single fallback still receives context
     batch_contexts, single_calls = nil, nil
     local out_dir2 = DATA_DIR .. "/out_single"
-    local result2, err2 = Epub:translate_overlay("/books/ctx.epub", "1", "zh-Hans", "auto",
-        function(text, context)
+    local result2, err2 = Epub:translate_overlay({
+        book_path = "/books/ctx.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "system",
+        progress_path = "/tmp/dt_ctx_prog2.txt", output_dir = out_dir2,
+        translate = function(text, context)
             single_calls = single_calls or {}
             single_calls[#single_calls + 1] = { text = text, context = context }
             return "S:" .. text
         end,
-        true, "/tmp/dt_ctx_prog2.txt",
-        function() return nil, { message = "batch down" } end,
-        out_dir2, nil, nil, "system")
+        translate_batch = function() return nil, { message = "batch down" } end,
+    })
     check("single fallback run ok", result2 ~= nil, tostring(err2))
     check("single fallback got contexts", single_calls and #single_calls == 2
         and single_calls[1].context and single_calls[1].context.chapter_index == 1

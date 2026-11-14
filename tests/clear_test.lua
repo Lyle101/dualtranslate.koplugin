@@ -187,15 +187,15 @@ local function is_complete(p) local d = Overlay.load(p) return d ~= nil and d.co
 -- 2. 逐章模式开启（用户开着开关）
 settings["dualtranslate_page_translation"] = true
 
--- 3. 点"翻译本书"（逐章分支）—— 修复后不得误报"已翻译完成"，应直接入队章节模式
+-- 3. 点"翻译当前章"（逐章入口）—— 修复后不得误报"已翻译完成"，应直接入队章节模式
 plugin._page_translation_follow_active = false
 notified = {}
 local enqueued = nil
-plugin.enqueueTranslation = function(self, bp, all_chapters, fragment, silent, span, auto)
-    enqueued = { all_chapters = all_chapters, span = span }
+plugin.enqueueTranslation = function(self, opts)
+    enqueued = { mode = opts.mode, span = opts.span }
 end
-plugin:translateBook(true)
-assert(enqueued and enqueued.all_chapters == false and enqueued.span == 1,
+plugin:translateCurrentChapter(true)
+assert(enqueued and enqueued.mode == "span" and enqueued.span == 1,
     "stale complete must not block chapter translation")
 assert(#notified == 0, "no false 'already translated' notification, got " .. tostring(#notified))
 print("  stale complete no longer blocks chapter mode")
@@ -215,13 +215,13 @@ print("  overlay exists after clear:", f ~= nil)
 assert(f == nil, "overlay.json should be deleted after clear")
 assert(not is_complete(overlay_path), "isComplete should be false after clear")
 
--- 5. 清除后再点"翻译本书"（逐章分支）—— 不应提示已翻译，应进入逐章翻译
-plugin.enqueueTranslation = function(self, bp, all_chapters, fragment, silent, span, auto)
-    print("  enqueue called: all_chapters=" .. tostring(all_chapters) .. " span=" .. tostring(span))
-    assert(all_chapters == false, "should enqueue chapter mode")
+-- 5. 清除后再点"翻译当前章"—— 不应提示已翻译，应进入逐章翻译
+plugin.enqueueTranslation = function(self, opts)
+    print("  enqueue called: mode=" .. tostring(opts.mode) .. " span=" .. tostring(opts.span))
+    assert(opts.mode == "span", "should enqueue chapter mode")
 end
 notified = {}
-plugin:translateBook(true)
+plugin:translateCurrentChapter(true)
 assert(#notified == 0, "should NOT say already translated, got " .. tostring(#notified))
 print("PASS: clear then re-translate works (chapter mode enqueued, no false 'done')")
 
@@ -268,11 +268,11 @@ f:write('{"version":2,"complete":true,"book_path":"/books/novel.epub","target_la
 f:close()
 settings["dualtranslate_page_translation"] = true
 notified = {}
-plugin.enqueueTranslation = function(self, bp, all_chapters, fragment, silent, span, auto)
-    print("  enqueue: all_chapters=" .. tostring(all_chapters) .. " span=" .. tostring(span))
-    assert(all_chapters == false, "chapter mode expected")
+plugin.enqueueTranslation = function(self, opts)
+    print("  enqueue: mode=" .. tostring(opts.mode) .. " span=" .. tostring(opts.span))
+    assert(opts.mode == "span", "chapter mode expected")
 end
 plugin.ui.document.file = book2
-plugin:translateBook(true)
+plugin:translateCurrentChapter(true)
 assert(#notified == 0, "stale complete must NOT block chapter translation, got " .. tostring(#notified))
 print("PASS: stale whole-book complete no longer blocks chapter translation")

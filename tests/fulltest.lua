@@ -227,15 +227,16 @@ do
         _translation_progress = nil,
     }
     -- enqueue
-    State.enqueue(plugin, "/books/a.epub", true, nil, true, nil, nil)
+    State.enqueue(plugin, { book_path = "/books/a.epub", mode = "all", silent = true })
     check("enqueue 整书", #plugin._translation_queue == 1
-        and plugin._translation_queue[1].all_chapters == true
+        and plugin._translation_queue[1].mode == "all"
         and plugin._translation_queue[1].status == "queued")
     -- enqueue 同书去重
-    State.enqueue(plugin, "/books/a.epub", true, nil, true, nil, nil)
+    State.enqueue(plugin, { book_path = "/books/a.epub", mode = "all", silent = true })
     check("同书去重", #plugin._translation_queue == 1)
     -- enqueue 章节
-    State.enqueue(plugin, "/books/b.epub", false, "3", true, nil, nil)
+    State.enqueue(plugin, { book_path = "/books/b.epub", mode = "span",
+        fragment = "3", silent = true })
     check("enqueue 章节", #plugin._translation_queue == 2
         and plugin._translation_queue[2].fragment == "3"
         and plugin._translation_queue[2].span == 1)

@@ -208,12 +208,12 @@ do
     p.startNextQueuedTranslation = function() end
     p.saveTranslationQueue = function() end
     p.TranslationUI = { showInfo = function() end }
-    State.enqueue(p, BOOK, true, nil, true)
+    State.enqueue(p, { book_path = BOOK, mode = "all", silent = true })
     check("enqueue stamps provider", p._translation_queue[1]
         and p._translation_queue[1].provider == "system")
     p._translation_queue = {}
     p._translation_migration_failed = true
-    State.enqueue(p, BOOK, true, nil, true)
+    State.enqueue(p, { book_path = BOOK, mode = "all", silent = true })
     check("migration failure blocks enqueue", #p._translation_queue == 0)
     p._translation_migration_failed = nil
 end
@@ -232,7 +232,7 @@ do
     p._page_translation_follow_active = true
     p._translation_progress = nil
     local scheduled
-    p.translateBook = function(_, all, silent, span, auto) scheduled = { all = all, auto = auto } end
+    p.translateCurrentChapter = function(_, silent, auto) scheduled = { silent = silent, auto = auto } end
     local fragment = "1"
     p.getCurrentFragment = function() return fragment end
     local function attempt(mode, frag)
@@ -320,10 +320,17 @@ do
     local lang = "fr"
     local dir = Store.bookDir(BOOK, lang)
     local function run(provider)
-        return Epub:translate_overlay(BOOK, "1", lang, "auto",
-            function(text) return "T:" .. text end, true, ROOT .. "/prog.txt",
-            function(texts) local o = {} for i, t in ipairs(texts) do o[i] = "B:" .. t end return o end,
-            dir, nil, nil, provider)
+        return Epub:translate_overlay({
+            book_path = BOOK, mode = "all", fragment = "1",
+            source_lang = "auto", target_lang = lang, provider = provider,
+            progress_path = ROOT .. "/prog.txt", output_dir = dir,
+            translate = function(text) return "T:" .. text end,
+            translate_batch = function(texts)
+                local o = {}
+                for i, t in ipairs(texts) do o[i] = "B:" .. t end
+                return o
+            end,
+        })
     end
     local r1 = run("system")
     check("first v3 run ok", r1 ~= nil)
@@ -350,10 +357,17 @@ do
         source_lang = "auto", target_lang = "de",
         entries = { { selector = "legacy[1]", source = "s", translation = "lt" } }, chapters = { 1 },
     })
-    local rl = Epub:translate_overlay(BOOK, "1", "de", "auto",
-        function(text) return "T:" .. text end, true, ROOT .. "/prog2.txt",
-        function(texts) local o = {} for i, t in ipairs(texts) do o[i] = "B:" .. t end return o end,
-        ldir, nil, nil, "system")
+    local rl = Epub:translate_overlay({
+        book_path = BOOK, mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "de", provider = "system",
+        progress_path = ROOT .. "/prog2.txt", output_dir = ldir,
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts)
+            local o = {}
+            for i, t in ipairs(texts) do o[i] = "B:" .. t end
+            return o
+        end,
+    })
     check("legacy-absorb run ok", rl ~= nil)
     local lm = Overlay.loadManifest(ldir)
     check("legacy provider preserved", lm and lm.providers.microsoft_free ~= nil)

@@ -93,22 +93,19 @@ local function run(provider, previous)
     local batch_calls = 0
     local output_dir = DATA_DIR .. "/out_" .. tostring(provider) .. "_" .. tostring(previous and previous.provider or "none")
     os.execute('rm -rf "' .. output_dir .. '"')
-    local result, err = Epub:translate_overlay(
-        "/books/test.epub", "1", "zh-Hans", "auto",
-        function(text) return "single:" .. text end,
-        true,
-        "/tmp/dt_overlay_provider_progress.txt",
-        function(texts)
+    local result, err = Epub:translate_overlay({
+        book_path = "/books/test.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = provider,
+        progress_path = "/tmp/dt_overlay_provider_progress.txt",
+        output_dir = output_dir,
+        translate = function(text) return "single:" .. text end,
+        translate_batch = function(texts)
             batch_calls = batch_calls + 1
             local out = {}
             for index, text in ipairs(texts) do out[index] = "batch:" .. text end
             return out
         end,
-        output_dir,
-        nil,
-        nil,
-        provider
-    )
+    })
     assert(result, tostring(err))
     return result, batch_calls
 end
@@ -146,25 +143,25 @@ assert(saved_data.provider == "system", "legacy overlay must be stamped with cur
 -- overlay with an empty checkpoint.
 previous_overlay = first_checkpoint
 saved_data = nil
-local failed_ok, failed_err = Epub:translate_overlay(
-    "/books/test.epub", "1", "zh-Hans", "auto",
-    function() return nil, { message = "offline" } end,
-    true,
-    "/tmp/dt_overlay_provider_failed_progress.txt",
-    function() return { false } end,
-    DATA_DIR .. "/out_failed",
-    nil,
-    nil,
-    "microsoft_free"
-)
+local failed_ok, failed_err = Epub:translate_overlay({
+    book_path = "/books/test.epub", mode = "all", fragment = "1",
+    source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+    progress_path = "/tmp/dt_overlay_provider_failed_progress.txt",
+    output_dir = DATA_DIR .. "/out_failed",
+    translate = function() return nil, { message = "offline" } end,
+    translate_batch = function() return { false } end,
+})
 assert(not failed_ok and failed_err, "all-failed run should return an error")
 assert(saved_data == nil, "all-failed provider switch must not write an empty checkpoint")
 
 -- 6. Missing provider is rejected before doing any work.
-local missing_ok, missing_err = Epub:translate_overlay(
-    "/books/test.epub", "1", "zh-Hans", "auto",
-    function(text) return text end, true, "/tmp/p.txt",
-    function(texts) return texts end, "/tmp/out_missing", nil, nil, nil)
+local missing_ok, missing_err = Epub:translate_overlay({
+    book_path = "/books/test.epub", mode = "all", fragment = "1",
+    source_lang = "auto", target_lang = "zh-Hans",
+    progress_path = "/tmp/p.txt", output_dir = "/tmp/out_missing",
+    translate = function(text) return text end,
+    translate_batch = function(texts) return texts end,
+})
 assert(not missing_ok and missing_err and missing_err:find("翻译服务") ~= nil,
     "missing provider must be rejected")
 
