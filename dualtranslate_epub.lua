@@ -385,11 +385,15 @@ function Epub.translate_overlay(opts, ...)
     end
 
     local chapter_candidates = {}
+    local unreadable = {}
     local total = 0
     local unreadable_chapters = 0
     for _, current in ipairs(chapters) do
         local document = read_file(current.absolute)
-        if not document then unreadable_chapters = unreadable_chapters + 1 end
+        if not document then
+            unreadable[current.index] = true
+            unreadable_chapters = unreadable_chapters + 1
+        end
         local candidates = document and collect_overlay_candidates(document,
             current.relative, current.index, false) or {}
         if #candidates == 0 and document then
@@ -514,7 +518,13 @@ function Epub.translate_overlay(opts, ...)
         end
         for index, st in pairs(chapter_stats) do
             if st.entered then
-                if st.candidates == 0 then
+                if st.unreadable then
+                    -- M2/R2: an unreadable chapter must never be "done".
+                    -- Marking it done (0 candidates looked like an empty
+                    -- chapter) also left complete=true, so page-turn follow
+                    -- skipped the missing chapter forever.
+                    status[index] = "failed"
+                elseif st.candidates == 0 then
                     status[index] = "done"
                 elseif st.cancelled then
                     status[index] = "partial"
@@ -644,7 +654,8 @@ function Epub.translate_overlay(opts, ...)
         chapter_pos = chapter_pos + 1
         local candidates = chapter_candidates[current.index] or {}
         local st = { candidates = #candidates, success = 0, failed = 0,
-            entered = true, cancelled = false }
+            entered = true, cancelled = false,
+            unreadable = unreadable[current.index] == true }
         chapter_stats[current.index] = st
         -- Release the collected source text of this chapter as soon as its
         -- batch loop finishes.  On a several-hundred-chapter book the full

@@ -236,6 +236,7 @@ do
     -- v3 checkpoint（saveEntries + saveManifest）记录到真实文件，
     -- 行格式与 P0 断言保持一致：saved:complete:#entries:#chapters:provider
     local last_entries
+    local last_manifest
     package.preload["dualtranslate_overlay"] = function()
         return {
             saveEntries = function(_, provider, doc)
@@ -243,6 +244,7 @@ do
                 return true
             end,
             saveManifest = function(dir, manifest)
+                last_manifest = manifest
                 local state = manifest.providers[last_entries.provider]
                 local f = io.open(dir .. "/overlay.json", "w")
                 f:write("saved:" .. tostring(state.complete) .. ":" .. tostring(last_entries.count)
@@ -396,6 +398,37 @@ do
     check("纯图片书仍成功", image_result ~= nil, tostring(image_err))
     check("纯图片书 0 段", image_result and image_result.translated == 0
         and image_result.chapters == 1)
+
+    -- R2: 混合可读/不可读章节：可读章节照常翻译，缺失章节必须进
+    -- failed_chapters，且 complete 不能被置为 true（否则逐章模式会永久跳过
+    -- 缺章）。
+    local mixed_dir = "/tmp/dualtranslate_epub_mixed"
+    os.execute("rm -rf " .. mixed_dir)
+    os.execute("mkdir -p " .. mixed_dir .. "/META-INF " .. mixed_dir .. "/OEBPS/Text")
+    write_file(mixed_dir .. "/META-INF/container.xml",
+        [[<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>]])
+    write_file(mixed_dir .. "/OEBPS/content.opf",
+        [[<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><manifest><item id="c1" href="Text/ok.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="Text/missing.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>]])
+    write_file(mixed_dir .. "/OEBPS/Text/ok.xhtml",
+        [[<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Only readable paragraph.</p></body></html>]])
+    unpack_source = mixed_dir
+    os.execute("rm -rf /tmp/dt_mixed_out")
+    last_manifest = nil
+    local mixed_result, mixed_err = Epub2:translate_overlay({
+        book_path = "/books/mixed.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "system",
+        progress_path = "/tmp/dt_mixed_prog.txt", output_dir = "/tmp/dt_mixed_out",
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts) return texts end,
+    })
+    check("混合书完成可读章节", mixed_result ~= nil, tostring(mixed_err))
+    local mixed_state = last_manifest and last_manifest.providers.system
+    check("缺失章节进 failed_chapters", mixed_state
+        and #mixed_state.failed_chapters == 1 and mixed_state.failed_chapters[1] == 2,
+        mixed_state and table.concat(mixed_state.failed_chapters or {}, ","))
+    check("缺失章节不算 done", mixed_state and #mixed_state.chapters == 1
+        and mixed_state.chapters[1] == 1)
+    check("缺章时 complete=false", mixed_state and mixed_state.complete == false)
     unpack_source = TEST_DIR
 end
 
