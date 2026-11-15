@@ -49,7 +49,10 @@ function Providers.translate_system(text, source_lang, target_lang)
         normalizeLangForSystem(target_lang), normalizeLangForSystem(source_lang))
     if not ok or not translated or translated == "" then
         logger.warn("dualtranslate: system translator failed:", translated)
-        return nil, { message = _("KOReader 内置翻译失败，请检查 KOReader 翻译设置与网络") }
+        -- The built-in engine has no mirror: if Google is unreachable every
+        -- paragraph fails.  Name that cause so the user knows the fix is a
+        -- different engine, not a retry.
+        return nil, { message = _("KOReader 内置翻译失败（需能访问 Google），请检查网络与 KOReader 翻译设置，或改用「翻译引擎 → Microsoft Edge（免费）」") }
     end
     return { translated_text = translated, source_lang = source_lang,
         target_lang = target_lang, provider = "system" }
