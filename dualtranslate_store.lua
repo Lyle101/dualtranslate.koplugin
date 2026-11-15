@@ -396,8 +396,11 @@ end
 -- ---------------------------------------------------------------------------
 
 local function valid_provider_id(provider_id)
+    -- 6.1: "legacy" only labels pre-P0 overlay data during migration; a new
+    -- write must never mint it, or the fallback order would treat an unknown
+    -- owner as a real provider.
     if provider_id == "system" or provider_id == "microsoft_free"
-        or provider_id == "google_free" or provider_id == "legacy" then
+        or provider_id == "google_free" then
         return true
     end
     local slug = type(provider_id) == "string" and provider_id:match("^mcp:(.+)$")
@@ -572,7 +575,10 @@ function Store.importResult(job, result, opts)
         -- 1) SQLite rows.  provider metadata is written first so later menu
         -- reads already have a display name.
         local db_ok, db_err = run_transaction(cache, function()
-            cache:upsertProvider({
+            -- _execute reports failure by returning false instead of raising,
+            -- so an ignored return value would commit a half-written result
+            -- and break the all-or-nothing promise of the transaction (10.6).
+            local meta_ok = cache:upsertProvider({
                 provider_id = provider_id,
                 kind = provider.kind or "mcp",
                 display_name = provider.display_name,
@@ -580,14 +586,16 @@ function Store.importResult(job, result, opts)
                 confirmed = provider.confirmed ~= false,
                 metadata_json = provider.metadata_json,
             })
+            if meta_ok == false then error("无法写入服务信息") end
             for _, parent in ipairs(complete) do
-                cache:storeForBook(book_path, source_lang, target_lang,
+                local stored = cache:storeForBook(book_path, source_lang, target_lang,
                     parent.source, parent.translation, provider_id, {
                         model_name = model_name,
                         selector = parent.selector,
                         xpointer = parent.xpointer,
                         chapter_index = parent.chapter_index,
                     })
+                if stored == false then error("无法写入译文行") end
             end
         end)
         if not db_ok then
@@ -749,9 +757,11 @@ function Store.importResult(job, result, opts)
         end
         Overlay.clearCssCache()
 
-        -- 4) Signal last: its seq is the manifest revision (10.7).
-        Overlay.saveSignal(dir, {
-            seq = tonumber(manifest.revision) or 0,
+        -- 4) Signal last.  bumpSignal keeps seq monotonic even when a previous
+        -- delete removed the manifest and revision restarted at 1; copying the
+        -- revision would leave a running reader on an older seq and it would
+        -- skip the refresh (10.7).
+        Overlay.bumpSignal(dir, {
             op = "import",
             provider = provider_id,
             count = count_unique_selectors(entries),
@@ -841,6 +851,48 @@ local function read_entries_file(path)
     return doc
 end
 
+-- design 10.6 step 2: entries are derived data.  When the entries write failed
+-- (or the file was lost), the SQLite rows are still authoritative, so rebuild
+-- the file instead of dropping the provider.
+local function rebuild_entries_from_db(cache, dir, book_path, target_lang, provider_id)
+    local rows = cache:listRowsForBook(book_path, target_lang, provider_id)
+    local entries, seen = {}, {}
+    for _, row in ipairs(rows) do
+        if row.selector and row.selector ~= "" and not seen[row.selector] then
+            seen[row.selector] = true
+            entries[#entries + 1] = {
+                selector = row.selector,
+                xpointer = row.xpointer,
+                chapter_index = row.chapter_index,
+                source = row.source,
+                translation = row.translation,
+                created_at = row.created_at or os.time(),
+            }
+        end
+    end
+    if #entries == 0 then return nil end
+    if not Overlay.saveEntries(dir, provider_id, {
+        target_lang = target_lang, entries = entries,
+    }) then
+        return nil
+    end
+    return { count = #entries, entries = entries }
+end
+
+-- Public wrapper for the menu's "repair this book" action and for callers that
+-- only need one provider rebuilt.
+function Store.rebuildEntriesFromDb(book_path, target_lang, cache, provider_id)
+    if not book_path or not target_lang or not provider_id then
+        return nil, "book_path, target_lang and provider_id are required"
+    end
+    cache = cache or default_cache()
+    if not cache:open() then return nil, "cache db unavailable" end
+    local dir = Store.bookDir(book_path, target_lang)
+    local rebuilt = rebuild_entries_from_db(cache, dir, book_path, target_lang, provider_id)
+    if not rebuilt then return nil, "没有可用于重建的数据库行" end
+    return rebuilt
+end
+
 -- Crash recovery (design 9.3/14.3): finish or roll back delete intents, heal
 -- orphan entries and missing files, catch the manifest revision up.  Never
 -- resurrects a provider the user deleted.  opts.light is the book-open path
@@ -855,7 +907,7 @@ function Store.reconcile(book_path, target_lang, cache, opts)
     local dir = Store.bookDir(book_path, target_lang)
     return Lock.withBookLock(dir, function()
         if not cache:open() then return nil, "cache db unavailable" end
-        local summary = { patched = {}, removed = {} }
+        local summary = { patched = {}, removed = {}, rebuilt = {} }
         local manifest = Overlay.loadManifest(dir)
         local dirty = false
         local clear_intent_after_save = false
@@ -964,10 +1016,43 @@ function Store.reconcile(book_path, target_lang, cache, opts)
         if manifest then
             for pid in pairs(manifest.providers) do
                 if not Overlay.exists(Overlay.entriesPath(dir, pid)) then
-                    summary.removed[#summary.removed + 1] = pid
-                    manifest = detach_provider(manifest, pid)
-                    dirty = true
-                    if not manifest then break end
+                    -- The rows survived a failed entries write; rebuilding is
+                    -- strictly better than forgetting the provider.
+                    local rebuilt = rebuild_entries_from_db(
+                        cache, dir, book_path, target_lang, pid)
+                    if rebuilt then
+                        manifest.providers[pid].translated_count = rebuilt.count
+                        manifest.providers[pid].updated_at = os.time()
+                        summary.rebuilt[#summary.rebuilt + 1] = pid
+                        dirty = true
+                    else
+                        summary.removed[#summary.removed + 1] = pid
+                        manifest = detach_provider(manifest, pid)
+                        dirty = true
+                        if not manifest then break end
+                    end
+                end
+            end
+        end
+
+        -- Full repair also adopts providers that exist only in SQLite: an
+        -- import can die between the DB commit and the entries write, and
+        -- nothing else would ever bring that provider back (10.6).
+        if not light then
+            for _, item in ipairs(cache:listProvidersForBook(book_path, target_lang)) do
+                local pid = item.provider_id
+                if pid and pid ~= "" and not (manifest and manifest.providers[pid]) then
+                    local rebuilt = rebuild_entries_from_db(
+                        cache, dir, book_path, target_lang, pid)
+                    local doc = Overlay.loadEntries(dir, pid)
+                    if doc then
+                        patch_manifest(pid, doc,
+                            lfs.attributes(Overlay.entriesPath(dir, pid), "modification")
+                                or os.time())
+                    end
+                    if rebuilt then
+                        summary.rebuilt[#summary.rebuilt + 1] = pid
+                    end
                 end
             end
         end

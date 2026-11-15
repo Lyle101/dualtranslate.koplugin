@@ -234,7 +234,10 @@ local function validate_target(code)
     return nil, "unknown target language: " .. code
 end
 
-local function validate_provider(provider_id)
+-- new writes may not mint "legacy" (6.1), but deleting the migrated layer is
+-- the user's right.
+local function validate_provider(provider_id, allow_legacy)
+    if allow_legacy and provider_id == "legacy" then return provider_id end
     if not Store.validProviderId(provider_id) then
         return nil, "invalid provider id"
     end
@@ -292,23 +295,19 @@ local function book_dir_for(book_path, target_lang)
     return Store.bookDir(book_path, target_lang)
 end
 
--- The seq must grow monotonically, including after a delete that removed the
--- manifest (revision 0): a running plugin only refreshes on a larger seq.
+-- srcOverlay.bumpSignal owns the monotonic rule (max(revision, previous seq)
+-- + 1); a delete leaves no manifest, so copying the revision would go backwards
+-- and a running reader would ignore the change.
 local function write_signal(book_path, target_lang, op, provider)
     local dir = book_dir_for(book_path, target_lang)
     local manifest = Overlay.loadManifest(dir)
-    local previous = Overlay.loadSignal(dir)
-    local current = manifest and tonumber(manifest.revision) or 0
-    local last = previous and tonumber(previous.seq) or 0
-    local seq = math.max(current, last) + 1
-    Overlay.saveSignal(dir, {
-        seq = seq, op = op, provider = provider,
+    return Overlay.bumpSignal(dir, {
+        op = op,
+        provider = provider,
         count = provider and manifest and manifest.providers
             and manifest.providers[provider]
             and manifest.providers[provider].translated_count or nil,
-        at = os.time(),
     })
-    return seq
 end
 
 -- ---------------------------------------------------------------------------
@@ -443,7 +442,7 @@ handlers["delete-provider"] = function(opts)
     if not book then return nil, err end
     local target, target_err = validate_target(opts.target)
     if not target then return nil, target_err end
-    local provider, provider_err = validate_provider(opts.provider)
+    local provider, provider_err = validate_provider(opts.provider, true)
     if not provider then return nil, provider_err end
     local result, delete_err = Store.deleteProvider(book, target, provider)
     if not result then return nil, delete_err end

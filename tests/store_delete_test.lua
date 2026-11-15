@@ -456,9 +456,29 @@ do
     os.remove(Overlay.entriesPath(dir, "mcp:gpt-5"))
     local summary = Store.reconcile(BOOK, LANG, cache)
     local manifest = Overlay.loadManifest(dir)
-    check("缺失 entries 的 provider 被摘除", manifest
-        and manifest.providers["mcp:gpt-5"] == nil and manifest.providers.system)
-    check("显示修复", manifest and manifest.display_provider == "system")
+    -- The rows survive an entries write failure, so reconcile rebuilds the
+    -- file instead of forgetting the provider (design 10.6).
+    check("缺失 entries 从 DB 重建", manifest
+        and manifest.providers["mcp:gpt-5"] ~= nil
+        and Overlay.exists(Overlay.entriesPath(dir, "mcp:gpt-5")))
+    check("rebuilt 记录", summary and #(summary.rebuilt or {}) == 1
+        and summary.rebuilt[1] == "mcp:gpt-5")
+    check("重建条目", Overlay.loadEntries(dir, "mcp:gpt-5")
+        and #Overlay.loadEntries(dir, "mcp:gpt-5").entries == 1)
+end
+
+do
+    newCase("missing_entries_no_rows")
+    local dir = seedV3Book(BOOK, LANG, {
+        { id = "system", count = 1, kind = "builtin" },
+        { id = "mcp:ghost", count = 1 },
+    })
+    os.remove(Overlay.entriesPath(dir, "mcp:ghost"))
+    cache:deleteProviderForBook(BOOK, LANG, "mcp:ghost")
+    Store.reconcile(BOOK, LANG, cache)
+    local manifest = Overlay.loadManifest(dir)
+    check("无 DB 行的 provider 被摘除", manifest
+        and manifest.providers["mcp:ghost"] == nil and manifest.providers.system)
 end
 
 do

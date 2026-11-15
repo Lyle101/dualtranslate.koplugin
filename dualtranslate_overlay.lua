@@ -260,6 +260,24 @@ function Overlay.loadSignal(dir)
     return data
 end
 
+-- A running reader only refreshes when seq grows, and "delete every
+-- translation" removes the manifest so the next import starts again at
+-- revision 1.  Bumping against max(revision, previous seq) keeps the signal
+-- monotonic across delete + re-import; every external writer (Store.importResult,
+-- dtctl) must go through here instead of copying the revision (design 10.7).
+function Overlay.bumpSignal(dir, payload)
+    if type(payload) ~= "table" then return nil end
+    local manifest = Overlay.loadManifest(dir)
+    local previous = Overlay.loadSignal(dir)
+    local revision = manifest and tonumber(manifest.revision) or 0
+    local last = previous and tonumber(previous.seq) or 0
+    local seq = math.max(revision, last) + 1
+    payload.seq = seq
+    payload.at = payload.at or os.time()
+    if not Overlay.saveSignal(dir, payload) then return nil end
+    return seq
+end
+
 -- Same-shaped book index for v3 manifests and legacy v2 overlays, so display
 -- and page-translation code can ask one API before/after migration.
 -- Top-level complete/chapters mirror the resolved display provider.

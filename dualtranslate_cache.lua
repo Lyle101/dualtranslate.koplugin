@@ -586,6 +586,35 @@ function Cache:listProvidersForBook(book_path, target_lang)
     return out
 end
 
+-- Locator rows for one provider, used to rebuild entries/<provider>.json from
+-- SQLite after a failed or lost entries write (10.6).  Rows without a selector
+-- cannot be placed in the document and are skipped.
+function Cache:listRowsForBook(book_path, target_lang, provider)
+    if not book_path or not target_lang or not provider or provider == "" then
+        return {}
+    end
+    local rows = self:_queryAll([[
+        SELECT source_text, translated_text, selector, xpointer, chapter_index,
+               created_at
+        FROM book_translations
+        WHERE book_path = ? AND target_lang = ? AND provider = ?
+          AND selector IS NOT NULL AND selector <> ''
+        ORDER BY CAST(chapter_index AS INTEGER), rowid
+    ]], book_path, target_lang, provider)
+    local out = {}
+    for _, row in ipairs(rows or {}) do
+        out[#out + 1] = {
+            source = row[1],
+            translation = row[2],
+            selector = row[3],
+            xpointer = row[4],
+            chapter_index = tonumber(row[5]),
+            created_at = tonumber(row[6]),
+        }
+    end
+    return out
+end
+
 -- ljsqlite3 reports either the numeric code or its lowercase name
 -- ("ljsqlite3[5] ..." / "ljsqlite3[busy] ..."), depending on the call site.
 function Cache:_transactionError(err)

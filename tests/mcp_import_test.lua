@@ -194,7 +194,9 @@ do
         and manifest.display_provider == "mcp:gpt-5")
 
     local signal = Overlay.loadSignal(Store.bookDir(BOOK, "zh-Hans"))
-    check("reload.signal seq 与 revision 一致", signal and signal.seq == manifest.revision)
+    -- seq is max(revision, previous)+1 so it stays monotonic across deletes; it
+    -- is never smaller than the manifest revision it describes.
+    check("reload.signal seq ≥ revision", signal and signal.seq >= manifest.revision)
     check("reload.signal op=import", signal and signal.op == "import"
         and signal.provider == "mcp:gpt-5" and signal.count == 2)
 
@@ -221,6 +223,31 @@ do
     local by_source = {}
     for _, row in ipairs(db_rows()) do by_source[row[1]] = row[2] end
     check("译文被更新", by_source["Second chapter"] == "第二章（新）")
+end
+
+-- ============================================================
+print("== 3b. 删除后重新导入，seq 仍单调 ==")
+do
+    local dir = Store.bookDir(BOOK, "zh-Hans")
+    local before = Overlay.loadSignal(dir).seq
+    -- "Delete every translation" removes the manifest, so the next import
+    -- starts a fresh manifest at revision 1.  Reproduce that state without
+    -- touching the entries the later sections rely on.
+    local manifest = load_manifest()
+    manifest.revision = 1
+    local file = io.open(dir .. "/manifest.json", "wb")
+    file:write(JSON.encode(manifest))
+    file:close()
+    local result = make_result({
+        { id = "s000001", text = "第一段上" }, { id = "s000002", text = "第一段下" },
+        { id = "s000003", text = "第二章" },
+    })
+    local summary, err = Store.importResult(job, result)
+    local after = Overlay.loadSignal(dir)
+    check("重新导入成功", summary ~= nil, tostring(err))
+    check("signal 比删除前大", after and after.seq > before,
+        tostring(before) .. " -> " .. tostring(after and after.seq))
+    check("seq 不小于 revision", after and after.seq >= load_manifest().revision)
 end
 
 -- ============================================================
@@ -311,6 +338,26 @@ do
     check("state committed", state and state.status == "committed"
         and state.provider_id == "mcp:gpt-5")
     check("已提交任务不再待导入", #Mcp.pendingResults() == 0)
+end
+
+-- ============================================================
+print("== 7b. entries 丢失后从 SQLite 重建 ==")
+do
+    local dir = Store.bookDir(BOOK, "zh-Hans")
+    local entries_path = Overlay.entriesPath(dir, "mcp:gpt-5")
+    os.remove(entries_path)
+    check("entries 已删除", not Overlay.exists(entries_path))
+    local summary, err = Store.reconcile(BOOK, "zh-Hans", cache)
+    check("reconcile 成功", summary ~= nil, tostring(err))
+    check("rebuilt 记录该 provider", summary and #summary.rebuilt == 1
+        and summary.rebuilt[1] == "mcp:gpt-5", summary and JSON.encode(summary.rebuilt))
+    check("entries 已重建", Overlay.exists(entries_path))
+    local doc = Overlay.loadEntries(dir, "mcp:gpt-5")
+    check("重建条目数", doc and #doc.entries == 2, doc and tostring(#doc.entries))
+    local manifest = load_manifest()
+    check("manifest 未删 provider", manifest and manifest.providers["mcp:gpt-5"] ~= nil)
+    check("translated_count 回填", manifest and manifest.providers["mcp:gpt-5"]
+        and manifest.providers["mcp:gpt-5"].translated_count == 2)
 end
 
 -- ============================================================
