@@ -252,5 +252,55 @@ do
         and unclosed_data.code == "INVALID_ARGUMENT")
 end
 
+-- ============================================================
+print("== 6. rpc 信封与只读模式 ==")
+do
+    local function rpc(argv_table, mode)
+        local path = ROOT .. "/rpc.json"
+        write_file(path, JSON.encode(argv_table))
+        return run(mode and ("--mode=" .. mode .. " rpc") or "rpc", nil, path)
+    end
+
+    local out, code = rpc({ argv = { "list-jobs" } })
+    local data = decode_single_line(out)
+    check("rpc list-jobs", code == 0 and data and #data.jobs >= 1, out)
+
+    local status_out = rpc({ argv = { "job-status", "--job", JOB_PATH } })
+    local status = decode_single_line(status_out)
+    check("rpc job-status", status and status.total == 1
+        and status.segment_ids and status.segment_ids[1] == "s000001", status_out)
+
+    local seg_out = rpc({ argv = { "get-segments", "--job", JOB_PATH,
+        "--offset", "0", "--limit", "5", "--context" } })
+    local seg = decode_single_line(seg_out)
+    check("rpc get-segments", seg and #seg.segments == 1
+        and seg.segments[1].source == "Hello" and seg.next_offset == nil, seg_out)
+
+    local cat_out = rpc({ argv = { "cat", "--job", JOB_PATH, "--name", "state.json" } })
+    local cat = decode_single_line(cat_out)
+    check("rpc cat", cat and cat.exists == true
+        and tostring(cat.content):find("dualtranslate", 1, true) ~= nil, cat_out)
+
+    local forbidden, forbidden_code = rpc({ argv = { "put", "--job", JOB_PATH,
+        "--name", "state.json" }, stdin = "{}" }, "read")
+    local forbidden_data = decode_single_line(forbidden)
+    check("只读模式拒绝写", forbidden_code ~= 0 and forbidden_data
+        and forbidden_data.code == "FORBIDDEN", forbidden)
+
+    local read_ok, read_ok_code = rpc({ argv = { "list-jobs" } }, "read")
+    check("只读模式允许读", read_ok_code == 0)
+
+    local bad_body, bad_body_code = rpc({ argv = { "list-jobs" }, stdin = 123 })
+    local bad_body_data = decode_single_line(bad_body)
+    check("非字符串 body 拒绝", bad_body_code == 2 and bad_body_data
+        and bad_body_data.code == "INVALID_ARGUMENT", bad_body)
+
+    local write_out, write_code = rpc({ argv = { "put", "--job", JOB_PATH,
+        "--name", "state.json" }, stdin = '{"schema":"dualtranslate.state.v1","status":"exported"}' })
+    local write_data = decode_single_line(write_out)
+    check("rpc 携带 body 上传", write_code == 0 and write_data and write_data.ok == true,
+        write_out)
+end
+
 print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))
 os.exit(failed == 0 and 0 or 1)

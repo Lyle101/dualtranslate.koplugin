@@ -93,6 +93,7 @@ local SUBCOMMANDS = {
     extract = true, put = true, import = true, ["list-jobs"] = true,
     ["list-providers"] = true, ["delete-provider"] = true,
     ["set-display"] = true, ["touch-reload"] = true,
+    cat = true, ["job-status"] = true, ["get-segments"] = true,
 }
 
 local ALLOWED_KEYS = {
@@ -104,10 +105,16 @@ local ALLOWED_KEYS = {
     ["delete-provider"] = { book = true, target = true, provider = true },
     ["set-display"] = { book = true, target = true, provider = true },
     ["touch-reload"] = { book = true, target = true, op = true },
+    cat = { job = true, name = true },
+    ["job-status"] = { job = true },
+    ["get-segments"] = { job = true, offset = true, limit = true, context = true },
 }
 
 -- Flags take no value; every other --key needs one.
-local FLAGS = { put = { inbox = true }, import = { ["allow-partial"] = true } }
+local FLAGS = {
+    put = { inbox = true }, import = { ["allow-partial"] = true },
+    ["get-segments"] = { context = true },
+}
 
 local function fail(code, message, detail)
     local payload = { ok = false, code = code, message = message }
@@ -369,10 +376,105 @@ local function as_array(list)
     return list
 end
 
+-- Body of an rpc call (put/import): the envelope travels on stdin, so the
+-- actual file content is a field inside it.
+local rpc_stdin = nil
+
 local handlers = {}
 
 handlers["list-jobs"] = function()
     return { ok = true, jobs = as_array(Mcp.listJobs()) }
+end
+
+-- Read the job body for the PC side.  The reader never needs the whole file
+-- (get-segments paginates on the device), but load_job still wants one copy
+-- after a transport change.
+local CAT_NAMES = { ["job.json"] = true, ["state.json"] = true,
+    ["result.json"] = true, ["result.partial.json"] = true }
+
+handlers.cat = function(opts)
+    local job_path, job_id_or_err = validate_job_path(opts.job)
+    if not job_path then return nil, job_id_or_err end
+    local name = opts.name
+    if not CAT_NAMES[name] then
+        return nil, "--name must be job.json, state.json, result.json or result.partial.json"
+    end
+    local path = Mcp.jobDir(job_id_or_err) .. "/" .. name
+    local size = lfs.attributes(path, "size")
+    if not size then return { ok = true, name = name, exists = false } end
+    if size > 16 * 1024 * 1024 then return nil, "file too large to read" end
+    local file = io.open(path, "rb")
+    if not file then return nil, "cannot read " .. name end
+    local content = file:read("*a")
+    file:close()
+    return { ok = true, name = name, exists = true, bytes = #content, content = content }
+end
+
+handlers["job-status"] = function(opts)
+    local job_path, job_id_or_err = validate_job_path(opts.job)
+    if not job_path then return nil, job_id_or_err end
+    local job_id = job_id_or_err
+    local job, job_err = Mcp.loadJob(job_id)
+    if not job then return nil, job_err end
+    local state = Mcp.loadState(job_id) or {}
+    local segment_ids = {}
+    for index, segment in ipairs(job.segments) do segment_ids[index] = segment.id end
+    return {
+        ok = true, job_id = job_id,
+        book_path = job.book and job.book.device_path,
+        title = job.book and job.book.title,
+        source_lang = job.book and job.book.source_lang,
+        target_lang = job.book and job.book.target_lang,
+        spine_count = job.book and job.book.spine_count,
+        file_size = job.book and job.book.file_size,
+        file_mtime = job.book and job.book.file_mtime,
+        total = #job.segments,
+        chapter_count = #(job.chapters or {}),
+        segment_ids = segment_ids,
+        status = state.status or "exported",
+        provider_id = state.provider_id,
+        model_name = state.model_name,
+        submitted = tonumber(state.submitted) or 0,
+    }
+end
+
+-- Pagination lives on the device: a 646-chapter job is several MB and the PC
+-- would otherwise re-download it for every page.
+handlers["get-segments"] = function(opts)
+    local job_path, job_id_or_err = validate_job_path(opts.job)
+    if not job_path then return nil, job_id_or_err end
+    local job, job_err = Mcp.loadJob(job_id_or_err)
+    if not job then return nil, job_err end
+    local offset = tonumber(opts.offset) or 0
+    local limit = tonumber(opts.limit) or 50
+    if offset < 0 or offset ~= math.floor(offset) then return nil, "invalid --offset" end
+    if limit ~= math.floor(limit) then return nil, "invalid --limit" end
+    limit = math.max(1, math.min(limit, 100))
+    local segments = job.segments
+    local rows = {}
+    local last = math.min(offset + limit, #segments)
+    for index = offset + 1, last do
+        local segment = segments[index]
+        local row = {
+            id = segment.id,
+            parent_id = segment.parent_id or segment.id,
+            part = segment.part or 1,
+            parent_total = segment.parent_total or 1,
+            chapter_index = segment.chapter_index,
+            chapter_title = segment.chapter_title,
+            source = segment.source,
+        }
+        if opts.context then
+            row.prev = index > 1 and segments[index - 1].source:sub(-200) or nil
+            row.next = index < #segments and segments[index + 1].source:sub(1, 200) or nil
+        end
+        rows[#rows + 1] = row
+    end
+    return {
+        ok = true, job_id = job_id_or_err, total = #segments,
+        next_offset = last < #segments and last or nil,
+        segments = rows,
+    }
 end
 
 function handlers.extract(opts)
@@ -414,7 +516,12 @@ function handlers.put(opts)
     if not job_path then return nil, job_id_or_err end
     local job_id = job_id_or_err
     local dir = Mcp.jobDir(job_id)
-    local raw, read_err = read_stdin()
+    local raw, read_err
+    if rpc_stdin ~= nil then
+        raw, read_err = rpc_stdin, nil
+    else
+        raw, read_err = read_stdin()
+    end
     if not raw then return nil, read_err end
     if raw == "" then return nil, "empty stdin" end
     local decoded, document = pcall(JSON.decode, raw)
@@ -530,12 +637,72 @@ end
 -- Entry
 -- ---------------------------------------------------------------------------
 
-local argv = arg
+-- Read-only commands a key may run.  Everything else needs the write key.
+local READ_COMMANDS = {
+    ["list-jobs"] = true, cat = true, ["job-status"] = true,
+    ["get-segments"] = true, ["list-providers"] = true,
+}
+local MODE_ALLOWED = { read = READ_COMMANDS, write = SUBCOMMANDS }
+
+-- JSON over stdin removes the "ssh joins argv into a string, the far side
+-- splits it again" problem: a book path with spaces or quotes is just another
+-- array element.  The payload is small and bounded.
+local function read_rpc_payload()
+    -- Bodies are result.json / state.json uploads; 16 MB covers a ten-thousand
+    -- segment job while staying well under the device's memory budget.
+    local raw, read_err = read_stdin(16 * 1024 * 1024)
+    if not raw then return nil, read_err end
+    if raw == "" then return nil, "empty rpc payload" end
+    local document = JSON.decode(raw)
+    if type(document) ~= "table" or type(document.argv) ~= "table" then
+        return nil, "invalid rpc payload"
+    end
+    local arguments = {}
+    for index, value in ipairs(document.argv) do
+        if type(value) ~= "string" or #value > 4096 then return nil, "invalid rpc argument" end
+        arguments[index] = value
+        if #arguments > 32 then return nil, "too many rpc arguments" end
+    end
+    if #arguments == 0 then return nil, "missing subcommand" end
+    if document.stdin ~= nil and type(document.stdin) ~= "string" then
+        return nil, "invalid rpc body"
+    end
+    return arguments, document.stdin
+end
+
+local argv = {}
+for index = 1, #arg do argv[index] = arg[index] end
+
+-- --mode comes from the forced command in authorized_keys, never from the
+-- client: the client cannot prepend it to SSH_ORIGINAL_COMMAND.
+local mode = "write"
+if argv[1] and argv[1]:match("^%-%-mode=") then
+    mode = argv[1]:match("^%-%-mode=(%a+)$")
+    if mode ~= "read" and mode ~= "write" then fail("INVALID_ARGUMENT", "invalid mode") end
+    table.remove(argv, 1)
+end
+
 local original = os.getenv("SSH_ORIGINAL_COMMAND")
-if original and original ~= "" then
+if argv[1] == "rpc" then
+    local payload, body_or_err = read_rpc_payload()
+    if not payload then fail("INVALID_ARGUMENT", body_or_err) end
+    rpc_stdin = body_or_err
+    argv = payload
+elseif original and original ~= "" then
     local parsed, parse_err = parse_original_command(original)
     if not parsed then fail("INVALID_ARGUMENT", parse_err or "invalid command") end
     argv = parsed
+end
+
+if not argv[1] then fail("INVALID_ARGUMENT", "missing subcommand") end
+-- Unknown commands are a client bug (INVALID_ARGUMENT); a known command that
+-- the key may not run is a permission decision (FORBIDDEN).  Keeping the two
+-- apart makes the PC side's error handling unambiguous.
+if not SUBCOMMANDS[argv[1]] then
+    fail("INVALID_ARGUMENT", "unknown subcommand: " .. argv[1])
+end
+if not MODE_ALLOWED[mode][argv[1]] then
+    fail("FORBIDDEN", "command not allowed in " .. mode .. " mode")
 end
 
 local command, opts_or_err = parse_argv(argv)
