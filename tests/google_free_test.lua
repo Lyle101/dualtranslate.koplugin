@@ -97,6 +97,8 @@ do
         { name = "[译文, 语言] 数组对", body = { { "甲", "en" } }, want = "甲" },
         { name = "[译文] 单元素数组", body = { { "乙" } }, want = "乙" },
         { name = "裸字符串", body = { "丙" }, want = "丙" },
+        -- 单段被压平成 ["译文", "en"]（不再包一层），严格数条会把它判成 2 ≠ 1
+        { name = "压平的 [译文, 语言]", body = { "丁", "en" }, want = "丁" },
     }
     for _, case in ipairs(cases) do
         respond(200, case.body)
@@ -197,6 +199,10 @@ do
     local google = Providers.getProviderById("google_free")
     check("google_free 有菜单提示", google and type(google.hint) == "string" and #google.hint > 0)
     check("菜单名保持简短", google and google.name == "Google（免费）", google and google.name)
+    -- 菜单行放不下就会截断成「需…」，system 那行压到最短可用形式
+    local system = Providers.getProviderById("system")
+    check("system 提示已压短", system and system.hint == "跟随 KOReader 设置 · 需 Google",
+        system and system.hint)
 end
 
 print(string.format("\n==== google_free 结果：%d 通过，%d 失败 ====", passed, failed))

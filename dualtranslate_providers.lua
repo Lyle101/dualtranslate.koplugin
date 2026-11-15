@@ -13,7 +13,7 @@ Providers.list = {
     -- shows after the name: with three keyless engines a reader cannot tell
     -- which one to pick, and picking blind costs a 5 s timeout per paragraph.
     { id = "system", name = "KOReader 内置翻译", requires_api_key = false,
-      hint = "跟随 KOReader 设置 · 逐段 · 需能访问 Google",
+      hint = "跟随 KOReader 设置 · 需 Google",
       description = _("Use KOReader's built-in translator engine (configured in KOReader -> Translation)") },
     { id = "microsoft_free", name = "Microsoft Edge（免费）", requires_api_key = false,
       hint = "无需代理 · 支持批量",
@@ -217,6 +217,13 @@ local function googleFreeRequest(url, body)
 end
 
 local function parseGoogleFree(data, expected)
+    -- A single text sometimes comes back flattened as ["译文", "en"] instead of
+    -- [["译文", "en"]].  The shape depends on the endpoint's mood, so accept it
+    -- before the strict count check — otherwise one paragraph fails, and so does
+    -- the per-paragraph fallback that goes through this same function.
+    if expected == 1 and type(data[1]) == "string" and data[1] ~= "" then
+        return { data[1] }
+    end
     if #data ~= expected then return nil end
     local result = {}
     for index = 1, expected do
