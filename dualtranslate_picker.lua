@@ -285,13 +285,6 @@ function Picker.show(plugin)
         is_popout = false,
     }
 
-    -- Only a list that spans several pages needs the trailing confirm row;
-    -- the page size is only known once Menu has computed its layout.
-    if menu.perpage and #menu.item_table > menu.perpage then
-        state.trailing_confirm = true
-        rebuild()
-    end
-
     -- Every tap is a toggle or an action; the menu must stay open, so bypass
     -- Menu:onMenuSelect's close_callback/onMenuChoice path.  Closing stays
     -- available through the title bar button.
@@ -312,6 +305,15 @@ function Picker.show(plugin)
     end
 
     UIManager:show(menu)
+    -- Only a list that spans several pages needs the trailing confirm row, and
+    -- the page size is known only after Menu laid out.  Do this once the menu
+    -- is on screen: rebuilding before UIManager:show would issue setDirty for
+    -- a widget that is not displayed yet.  The row lives on the last page, so
+    -- the first frame is unaffected.
+    if menu.perpage and #menu.item_table > menu.perpage then
+        state.trailing_confirm = true
+        rebuild()
+    end
     return menu
 end
 
