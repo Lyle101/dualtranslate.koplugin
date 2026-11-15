@@ -122,7 +122,7 @@ class JobService:
                 "target_lang": status.get("target_lang"),
                 "spine_count": status.get("spine_count"),
             },
-            "chapters": [],  # the title list is not needed to translate
+            "chapter_count": status.get("chapter_count", 0),
             "total": status.get("total", 0),
             "status": status.get("status", "exported"),
             "provider_id": status.get("provider_id"),
