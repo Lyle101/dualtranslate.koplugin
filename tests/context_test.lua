@@ -52,6 +52,18 @@ do
             end,
             rmtree = function(p) os.execute('rm -rf "' .. p .. '"') return true end,
             stable_path_hash = function() return "ctxhash" end,
+            -- Reader:splitTranslationText delegates chunking to Tools (P3);
+            -- this module stays loaded for section 2d.
+            split_text = function(text, limit)
+                if #text <= limit then return { text } end
+                local chunks, rest = {}, text
+                while #rest > limit do
+                    chunks[#chunks + 1] = rest:sub(1, limit)
+                    rest = rest:sub(limit + 1)
+                end
+                if rest ~= "" then chunks[#chunks + 1] = rest end
+                return chunks
+            end,
         }
     end
     package.preload["dualtranslate_overlay"] = function()
@@ -157,7 +169,19 @@ do
         ["document/credocument"] = { engineInit = function() return {} end },
         ["fontlist"] = {}, ["ui/translator"] = {},
         ["dualtranslate_tools"] = { stable_path_hash = function() return "x" end,
-            mkdir_p = function() return true end, rmtree = function() return true end },
+            mkdir_p = function() return true end, rmtree = function() return true end,
+            -- The reader delegates chunking to Tools (P3); a simple byte split
+            -- is enough for the "long text" fixture in section 2d.
+            split_text = function(text, limit)
+                if #text <= limit then return { text } end
+                local chunks, rest = {}, text
+                while #rest > limit do
+                    chunks[#chunks + 1] = rest:sub(1, limit)
+                    rest = rest:sub(limit + 1)
+                end
+                if rest ~= "" then chunks[#chunks + 1] = rest end
+                return chunks
+            end },
         ["dualtranslate_providers"] = {
             list = {}, getProviderName = function() return "x" end,
             translate = function(_, text) return { translated_text = "T:" .. text } end,

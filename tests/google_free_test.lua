@@ -194,8 +194,8 @@ print("== 5. 引擎列表 ==")
 do
     local ids = {}
     for _, provider in ipairs(Providers.list) do ids[#ids + 1] = provider.id end
-    check("列表含三个引擎", #ids == 3 and ids[1] == "system" and ids[2] == "microsoft_free"
-        and ids[3] == "google_free", table.concat(ids, ","))
+    check("列表含四个引擎", #ids == 4 and ids[1] == "system" and ids[2] == "microsoft_free"
+        and ids[3] == "google_free" and ids[4] == "mcp_external", table.concat(ids, ","))
     local google = Providers.getProviderById("google_free")
     check("google_free 有菜单提示", google and type(google.hint) == "string" and #google.hint > 0)
     check("菜单名保持简短", google and google.name == "Google（免费）", google and google.name)
