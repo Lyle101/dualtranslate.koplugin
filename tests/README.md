@@ -15,14 +15,18 @@
     lua tests/overlay_v3_test.lua # P1-b：manifest/entries 读写 / buildCss v3 / 迁移分支
     lua tests/overlay_revision_test.lua # P1-b：revision 缓存键 / 命中与失效 / 8MB LRU
     lua tests/store_delete_test.lua # P1-b：真实 SQLite 的按 provider 删除 / intent 收尾 / reconcile
+    lua tests/p1c_switch_test.lua # P1-c：按服务切换主链（State/PageTrans/Reader v3/Epub checkpoint/菜单）
+    lua tests/context_test.lua    # P1-c：context 透传契约（Epub → translate(_batch) / 缓存 meta / 只切分一次）
+    lua tests/queueui_test.lua    # 翻译队列子菜单：进行中行重开进度框、排队/失败行带取消项
     lua tests/clear_path_test.lua      # P0：清除路径必须传书路径
+    lua tests/clear_test.lua      # 清除后重翻：complete 标记与残留译文不能再拦住整书翻译
     lua tests/overlay_provider_test.lua # P0：overlay 续跑按 provider 隔离
     lua tests/langmenu_test.lua # 语言子菜单闭包
     lua tests/callcheck.lua     # 方法调用完整性
 
 注意：
 - 测试读写 /tmp 下临时目录（/tmp/dt_data、/tmp/dt_state_test、/tmp/dualtranslate_epub_test 等）。
-- migration_test.lua / store_delete_test.lua 用真实 SQLite；lock_test.lua /
+- migration_test.lua / store_delete_test.lua / p1c_switch_test.lua 用真实 SQLite；lock_test.lua /
   overlay_v3_test.lua / overlay_revision_test.lua / outline_test.lua 用真实 lfs + json。
   均依赖 KOReader 自带库（默认 /Applications/KOReader.app/Contents/koreader，可用 KO_ROOT 覆盖），
   需用 luajit 运行，缺失时打印 SKIP 并退出 0；
