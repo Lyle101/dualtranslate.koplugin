@@ -199,6 +199,39 @@ do
 end
 
 -- ============================================================
+print("== 2b. 有任务时构建列表项 ==")
+do
+    -- Regression: the row text calls _("段") inside the loop.  Naming the loop
+    -- variable "_" shadowed gettext and crashed the reader on menu open.
+    local job_id = "20261116_000000_0001"
+    local job_dir = Mcp.jobDir(job_id)
+    os.execute('mkdir -p "' .. job_dir .. '"')
+    local job = {
+        schema = "dualtranslate.job.v1", job_id = job_id, created_at = os.time(),
+        book = { device_path = BOOK, title = "T", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 1, file_size = 1234, file_mtime = 0 },
+        chapters = { { index = 1, title = "One" } },
+        segments = { { id = "s000001", parent_id = "s000001", part = 1,
+            parent_total = 1, chapter_index = 1, chapter_title = "One",
+            selector = "p[1]", xpointer = "/body/p[1]", source = "Hello" } },
+        options = { max_chars_per_segment = 4500 },
+    }
+    local file = assert(io.open(job_dir .. "/job.json", "wb"))
+    file:write(JSON.encode(job)); file:close()
+    -- The previous section built the empty list in the same second.
+    dualtranslate._mcp_job_menu_cache = nil
+
+    local ok, items = pcall(function() return dualtranslate:buildMcpJobMenu() end)
+    check("有任务时列表可构建", ok and #items == 1, tostring(items))
+    check("列表项含段数", ok and items[1].text:find("段") ~= nil,
+        ok and items[1].text or "")
+    check("标题计数来自目录名", Mcp.countJobs() == 1)
+
+    os.execute('rm -rf "' .. job_dir .. '"')
+    check("删除后计数归零", Mcp.countJobs() == 0)
+end
+
+-- ============================================================
 print("== 3. reload.signal seq 判定 ==")
 do
     local dir = dualtranslate:getBookCacheDirectory(BOOK)

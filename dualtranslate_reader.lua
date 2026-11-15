@@ -449,6 +449,9 @@ function dualtranslate:exportMcpJob(indexes)
             TranslationUI.showInfo(_("导出失败：") .. tostring(err))
             return
         end
+        -- The task list is cached for a second; a fresh export must not be
+        -- hidden behind a menu the user opened just before it.
+        self._mcp_job_menu_cache = nil
         TranslationUI.showInfo(string.format(
             _("已导出 MCP 任务 %s\n%d 章 · %d 段\n电脑端可读取 cache/dualtranslate/mcp/jobs/"),
             result.job_id, result.chapters, result.segments), 6)
@@ -566,6 +569,7 @@ function dualtranslate:showMcpJob(item)
                     UIManager:close(dialog)
                     Tools.rmtree(Mcp.jobDir(item.job_id))
                     os.remove(Mcp.inboxDir() .. "/" .. item.job_id .. ".json")
+                    self._mcp_job_menu_cache = nil
                     TranslationUI.showInfo(_("已删除任务"))
                 end,
             },
@@ -587,7 +591,9 @@ function dualtranslate:buildMcpJobMenu()
     if #jobs == 0 then
         items = { { text = _("没有任务"), enabled = false } }
     else
-        for _, job in ipairs(jobs) do
+        -- Never name the loop variable "_": it shadows gettext, and _("段")
+        -- inside the body would then be an attempt to call a number.
+        for position, job in ipairs(jobs) do
             local entry = job
             items[#items + 1] = {
                 text = string.format("%s · %s · %d %s", entry.job_id,
