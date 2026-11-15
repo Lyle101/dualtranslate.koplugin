@@ -254,7 +254,7 @@ function dualtranslate:buildMenuTable()
             -- P3: export a job for the PC-side agent, import its result.
             text_func = function()
                 local Mcp = require("dualtranslate_mcp")
-                local count = #Mcp.listJobs()
+                local count = Mcp.countJobs()
                 if count == 0 then return _("MCP 外部翻译") end
                 return string.format("%s（%d）", _("MCP 外部翻译"), count)
             end,
@@ -774,6 +774,7 @@ function dualtranslate:onPageUpdate()
 end
 
 function dualtranslate:onPosUpdate()
+    if self.checkExternalReload then self:checkExternalReload(false) end
     if self.maybeSchedulePageTranslation then
         self:maybeSchedulePageTranslation(false)
     end

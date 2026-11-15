@@ -160,6 +160,18 @@ function Mcp.listJobs()
     return jobs
 end
 
+-- Counting only needs valid directory names; the menu renders on every open
+-- and must not parse every job.json just to show "(N)".
+function Mcp.countJobs()
+    local count = 0
+    local ok, iterator, state = pcall(lfs.dir, Mcp.jobsDir())
+    if not ok or not iterator then return 0 end
+    for name in iterator, state do
+        if Mcp.validJobId(name) then count = count + 1 end
+    end
+    return count
+end
+
 local function book_title_of(book_path)
     local name = book_path:match("([^/]+)$") or book_path
     return (name:gsub("%.[Ee][Pp][Uu][Bb]$", ""))

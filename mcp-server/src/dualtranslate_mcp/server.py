@@ -61,7 +61,7 @@ def build_server(config: Config | None = None, transport: Any = None):
 
     @mcp.tool()
     def dt_get_segments(
-        job_id: str, offset: int = 0, limit: int = 50, include_context: bool = True
+        job_id: str, offset: int = 0, limit: int = 50, include_context: bool = False
     ) -> dict:
         """分页读取待翻译段落。
 
