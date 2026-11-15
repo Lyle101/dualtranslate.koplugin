@@ -1,0 +1,21 @@
+# Copy to ~/.config/dualtranslate-mcp/config.toml (or set DT_CONFIG).
+# Every value can also be provided as an environment variable, which is
+# usually easier for a stdio MCP client.
+
+[device]
+# "ssh" (Kindle with USBNetwork) or "local" (a directory mirror / USB mount).
+transport = "ssh"
+host = "kindle"
+user = "root"
+port = 22
+
+# Two keys, never one (design 10.3):
+#   read_key  -> restrict,command="internal-sftp -R", chrooted to mcp/jobs
+#   write_key -> command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh",no-pty
+read_key = "~/.ssh/kindle_ro"
+write_key = "~/.ssh/kindle_rw"
+
+koreader_root = "/mnt/us/koreader"
+
+# For transport = "local": the local directory that mirrors koreader_root.
+# local_root = "/Volumes/Kindle/koreader"
