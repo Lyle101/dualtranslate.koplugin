@@ -552,7 +552,15 @@ function dualtranslate:repairBookTranslationData()
     end
     self._page_translation_overlay_state = nil
     self:refreshDocumentStyles()
-    TranslationUI.showInfo(_("本书译文数据修复完成"))
+    local rebuilt = #(summary.rebuilt or {})
+    local removed = #(summary.removed or {})
+    if rebuilt > 0 or removed > 0 then
+        TranslationUI.showInfo(string.format(
+            _("本书译文数据修复完成\n重建 %d 个服务，移除 %d 个无法恢复的服务"),
+            rebuilt, removed), 5)
+    else
+        TranslationUI.showInfo(_("本书译文数据修复完成"))
+    end
 end
 
 function dualtranslate:buildProviderSelector()

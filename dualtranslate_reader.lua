@@ -464,8 +464,13 @@ function dualtranslate:importMcpResults()
         return
     end
     if #summary.failed > 0 and summary.count == 0 then
+        local message = summary.failed[1] and summary.failed[1].error or ""
+        if message:find("尚未翻译完成")
+            and self:getSetting("mcp_allow_partial_import", false) ~= true then
+            message = message .. _("\n可在本菜单勾选「允许导入未完成的任务」")
+        end
         TranslationUI.showInfo(string.format(_("导入失败：%d 个结果无法导入\n%s"),
-            #summary.failed, summary.failed[1] and summary.failed[1].error or ""), 6)
+            #summary.failed, message), 6)
         return
     end
     if summary.count == 0 then
@@ -571,19 +576,27 @@ end
 
 function dualtranslate:buildMcpJobMenu()
     local Mcp = require("dualtranslate_mcp")
+    -- listJobs() parses every job.json; a 646-chapter book is several MB, and
+    -- the menu builder runs twice per open (text_func + sub_item_table_func).
+    -- Reuse the result within the same second.
+    local now = os.time()
+    local cached = self._mcp_job_menu_cache
+    if cached and cached.at == now then return cached.items end
     local jobs = Mcp.listJobs()
-    if #jobs == 0 then
-        return { { text = _("没有任务"), enabled = false } }
-    end
     local items = {}
-    for _, job in ipairs(jobs) do
-        local entry = job
-        items[#items + 1] = {
-            text = string.format("%s · %s · %d %s", entry.job_id,
-                tostring(entry.status), entry.total or 0, _("段")),
-            callback = function() self:showMcpJob(entry) end,
-        }
+    if #jobs == 0 then
+        items = { { text = _("没有任务"), enabled = false } }
+    else
+        for _, job in ipairs(jobs) do
+            local entry = job
+            items[#items + 1] = {
+                text = string.format("%s · %s · %d %s", entry.job_id,
+                    tostring(entry.status), entry.total or 0, _("段")),
+                callback = function() self:showMcpJob(entry) end,
+            }
+        end
     end
+    self._mcp_job_menu_cache = { at = now, items = items }
     return items
 end
 
@@ -604,13 +617,36 @@ function dualtranslate:buildMcpMenu()
         },
         {
             text_func = function()
-                return string.format(_("任务列表（%d）"), #Mcp.listJobs())
+                return string.format(_("任务列表（%d）"), Mcp.countJobs())
             end,
             sub_item_table_func = function() return self:buildMcpJobMenu() end,
         },
         {
             text = _("导入结果"),
             callback = function() self:importMcpResults() end,
+        },
+        {
+            -- Partial results are a user decision: the PC may have translated
+            -- 90% and the rest is not worth another round trip.
+            text = _("允许导入未完成的任务"),
+            checked_func = function()
+                return self:getSetting("mcp_allow_partial_import", false) == true
+            end,
+            callback = function()
+                self:saveSetting("mcp_allow_partial_import",
+                    self:getSetting("mcp_allow_partial_import", false) ~= true)
+            end,
+        },
+        {
+            -- Switching the visible layer re-paginates, so it stays opt-in.
+            text = _("导入后自动切换显示"),
+            checked_func = function()
+                return self:getSetting("auto_switch_after_import", false) == true
+            end,
+            callback = function()
+                self:saveSetting("auto_switch_after_import",
+                    self:getSetting("auto_switch_after_import", false) ~= true)
+            end,
         },
         {
             text = _("刷新外部译文"),

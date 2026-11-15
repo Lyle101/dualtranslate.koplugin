@@ -183,13 +183,19 @@ end
 print("== 2. buildMcpMenu ==")
 do
     local items = dualtranslate:buildMcpMenu()
-    check("四个入口", #items == 4)
+    check("六个入口", #items == 6)
     check("导出所选章节", items[1].text == "导出所选章节…")
     check("任务列表带计数", items[2].text_func() == "任务列表（0）")
     check("导入结果", items[3].text == "导入结果")
-    check("刷新外部译文", items[4].text == "刷新外部译文")
+    check("允许部分导入开关", items[4].text == "允许导入未完成的任务"
+        and items[4].checked_func() == false)
+    check("自动切换开关", items[5].text == "导入后自动切换显示"
+        and items[5].checked_func() == false)
+    check("刷新外部译文", items[6].text == "刷新外部译文")
     local job_items = items[2].sub_item_table_func()
     check("空任务列表有占位行", #job_items == 1 and job_items[1].text == "没有任务")
+    -- The menu builder runs twice per open; the second call must hit the cache.
+    check("任务列表同秒复用", items[2].sub_item_table_func() == job_items)
 end
 
 -- ============================================================
