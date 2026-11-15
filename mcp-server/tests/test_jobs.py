@@ -185,9 +185,9 @@ def test_commit_falls_back_to_inbox(service: JobService, tmp_path: Path) -> None
 
 
 def test_build_result_keeps_job_order(service: JobService) -> None:
-    job = service.load_job(JOB_ID)
+    segment_ids = service.status(JOB_ID)["segment_ids"]
     state = service.confirm_model(JOB_ID, "gpt-5")
     translations = {"s000003": "c", "s000001": "a"}
-    result = build_result(job, state, translations)
+    result = build_result(JOB_ID, segment_ids, state, translations)
     assert [row["id"] for row in result["translations"]] == ["s000001", "s000003"]
     assert result["stats"]["rejected"] == 1

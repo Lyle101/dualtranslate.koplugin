@@ -111,3 +111,56 @@ def test_ssh_read_key_is_optional(tmp_path: Path) -> None:
     transport = make_ssh(tmp_path)
     # Without a read key, reads use the write key (still dtctl-locked).
     assert transport.read_key_path == transport.write_key_path
+
+
+def _write_job(device: Path) -> Path:
+    job_dir = device / "cache/dualtranslate/mcp/jobs/2026_2"
+    job_dir.mkdir(parents=True)
+    job = {
+        "schema": "dualtranslate.job.v1", "job_id": "2026_2",
+        "created_at": 1,
+        "book": {"device_path": "/mnt/us/documents/book.epub", "title": "T",
+                 "source_lang": "en", "target_lang": "zh-Hans", "spine_count": 1,
+                 "file_size": 10, "file_mtime": 1},
+        "chapters": [{"index": 1, "title": "One"}],
+        "segments": [
+            {"id": "s000001", "parent_id": "s000001", "part": 1, "parent_total": 1,
+             "chapter_index": 1, "chapter_title": "One", "selector": "p[1]",
+             "xpointer": "/body/p[1]", "source": "Hello"},
+        ],
+        "options": {"max_chars_per_segment": 4500},
+    }
+    (job_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    (job_dir / "state.json").write_text(
+        json.dumps({"schema": "dualtranslate.state.v1", "status": "exported"}),
+        encoding="utf-8",
+    )
+    return job_dir / "job.json"
+
+
+def test_local_rpc_mirrors_device_commands(tmp_path: Path) -> None:
+    device = tmp_path / "device"
+    job_path = _write_job(device)
+    transport = LocalTransport(KO_ROOT, str(device))
+    remote_job = f"{JOBS}/2026_2/job.json"
+
+    jobs = transport.rpc(["list-jobs"])["jobs"]
+    assert len(jobs) == 1 and jobs[0]["job_id"] == "2026_2"
+
+    status = transport.rpc(["job-status", "--job", remote_job])
+    assert status["total"] == 1 and status["segment_ids"] == ["s000001"]
+    assert status["target_lang"] == "zh-Hans"
+
+    segments = transport.rpc(
+        ["get-segments", "--job", remote_job, "--offset", "0", "--limit", "5"]
+    )
+    assert segments["segments"][0]["source"] == "Hello"
+    assert segments["next_offset"] is None
+
+    cat = transport.rpc(["cat", "--job", remote_job, "--name", "state.json"])
+    assert cat["exists"] is True and "exported" in cat["content"]
+    missing = transport.rpc(["cat", "--job", remote_job, "--name", "result.json"])
+    assert missing["exists"] is False
+
+    with pytest.raises(HeadlessUnavailable):
+        transport.rpc(["put", "--job", remote_job, "--name", "state.json"])

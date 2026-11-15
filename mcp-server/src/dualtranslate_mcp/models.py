@@ -86,16 +86,22 @@ def validate_translation_text(text: Any, max_chars: int) -> str:
     return text
 
 
-def build_result(job: dict, state: dict, translations: dict[str, str]) -> dict:
-    """One result row per job segment, in job order, so import is deterministic."""
+def build_result(
+    job_id: str, segment_ids: list[str], state: dict, translations: dict[str, str]
+) -> dict:
+    """One result row per job segment, in job order, so import is deterministic.
+
+    Takes the id list instead of the job document: the PC side never downloads
+    the segments, it only knows their order from job-status.
+    """
     rows = []
-    for segment in job["segments"]:
-        text = translations.get(segment["id"])
+    for segment_id in segment_ids:
+        text = translations.get(segment_id)
         if text:
-            rows.append({"id": segment["id"], "text": text})
+            rows.append({"id": segment_id, "text": text})
     return {
         "schema": RESULT_SCHEMA,
-        "job_id": job["job_id"],
+        "job_id": job_id,
         "provider": {
             "provider_id": state["provider_id"],
             "kind": "mcp",
@@ -107,6 +113,6 @@ def build_result(job: dict, state: dict, translations: dict[str, str]) -> dict:
         "stats": {
             "submitted": len(rows),
             "accepted": len(rows),
-            "rejected": len(job["segments"]) - len(rows),
+            "rejected": len(segment_ids) - len(rows),
         },
     }

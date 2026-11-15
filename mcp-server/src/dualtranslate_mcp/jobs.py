@@ -1,15 +1,19 @@
 """Job orchestration: read jobs, collect translations, commit back (10.2/10.3).
 
-The server keeps the merged translations in a local working copy and only
-ships complete files to the device.  Every write goes through dtctl; when the
-transport cannot execute it (USB mount), commit falls back to writing the
-result into the inbox, which the plugin imports on its next open.
+All device access is a dtctl rpc call.  The server keeps only the merged
+translations (a small working copy) and never downloads the whole job: the
+device paginates segments and reports the id list, so a ten-thousand segment
+book costs kilobytes per page instead of megabytes.
+
+When the transport cannot execute dtctl (a USB mount), commit falls back to
+writing the result into the inbox, which the plugin imports on its next open.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+
 from .config import Config
 from .models import (
     RESULT_SCHEMA,
@@ -17,7 +21,6 @@ from .models import (
     ValidationError,
     build_result,
     provider_id_for,
-    validate_job,
     validate_translation_text,
     valid_job_id,
 )
@@ -36,52 +39,56 @@ class JobService:
     def job_path(self, job_id: str) -> str:
         return f"{self.config.jobs_root}/{job_id}/job.json"
 
-    def _job_cache(self, job_id: str) -> Path:
-        return self.cache_dir / job_id / "job.json"
-
     def _work_dir(self, job_id: str) -> Path:
         path = self.cache_dir / job_id
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    # -- device state --------------------------------------------------------
+    def _partial_path(self, job_id: str) -> Path:
+        return self._work_dir(job_id) / "translations.json"
 
-    def load_job(self, job_id: str) -> dict:
+    def _rpc(self, argv: list[str], stdin: bytes | None = None) -> dict:
+        return self.transport.rpc(argv, stdin)
+
+    # -- read side -----------------------------------------------------------
+
+    def status(self, job_id: str) -> dict:
         if not valid_job_id(job_id):
             raise ValidationError(f"invalid job id: {job_id}")
-        cached = self._job_cache(job_id)
-        if cached.exists():
-            job = json.loads(cached.read_text(encoding="utf-8"))
-            validate_job(job)
-            return job
-        raw = self.transport.read_text(self.job_path(job_id))
-        job = json.loads(raw)
-        validate_job(job)
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        cached.write_text(raw, encoding="utf-8")
-        return job
+        return self._rpc(["job-status", "--job", self.job_path(job_id)])
+
+    def _state_cache(self, job_id: str) -> Path:
+        return self._work_dir(job_id) / "state.json"
 
     def load_state(self, job_id: str) -> dict:
-        local = self.cache_dir / job_id / "state.json"
-        if local.exists():
-            return json.loads(local.read_text(encoding="utf-8"))
-        try:
-            raw = self.transport.read_text(f"{self.config.jobs_root}/{job_id}/state.json")
-        except (TransportError, FileNotFoundError):
+        # The local copy is the newest when dtctl cannot upload (USB mount) and
+        # avoids a device round trip on every submit.
+        cached = self._state_cache(job_id)
+        if cached.exists():
+            try:
+                return json.loads(cached.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pass
+        reply = self._rpc(
+            ["cat", "--job", self.job_path(job_id), "--name", "state.json"]
+        )
+        if not reply.get("exists"):
             return {"schema": STATE_SCHEMA, "status": "exported"}
         try:
-            state = json.loads(raw)
+            state = json.loads(reply.get("content") or "{}")
         except json.JSONDecodeError:
             return {"schema": STATE_SCHEMA, "status": "exported"}
         self._save_state_local(job_id, state)
         return state
 
     def _save_state_local(self, job_id: str, state: dict) -> None:
-        path = self._work_dir(job_id) / "state.json"
-        path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        self._state_cache(job_id).write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8"
+        )
 
-    def _partial_path(self, job_id: str) -> Path:
-        return self._work_dir(job_id) / "translations.json"
+    def _save_state(self, job_id: str, state: dict) -> None:
+        self._save_state_local(job_id, state)
+        self._upload_state(job_id, state)
 
     def _load_partial(self, job_id: str) -> dict[str, str]:
         path = self._partial_path(job_id)
@@ -97,13 +104,49 @@ class JobService:
         path = self._partial_path(job_id)
         path.write_text(json.dumps(translations, ensure_ascii=False), encoding="utf-8")
 
-    # -- uploads -------------------------------------------------------------
+    def list_jobs(self) -> list[dict]:
+        try:
+            reply = self._rpc(["list-jobs"])
+        except TransportError as error:
+            return [{"error": str(error)}]
+        return reply.get("jobs", [])
+
+    def get_job(self, job_id: str) -> dict:
+        status = self.status(job_id)
+        return {
+            "job_id": job_id,
+            "book": {
+                "device_path": status.get("book_path"),
+                "title": status.get("title"),
+                "source_lang": status.get("source_lang"),
+                "target_lang": status.get("target_lang"),
+                "spine_count": status.get("spine_count"),
+            },
+            "chapters": [],  # the title list is not needed to translate
+            "total": status.get("total", 0),
+            "status": status.get("status", "exported"),
+            "provider_id": status.get("provider_id"),
+            "model_name": status.get("model_name"),
+            "submitted": len(self._load_partial(job_id)),
+        }
+
+    def get_segments(
+        self, job_id: str, offset: int = 0, limit: int = 50, include_context: bool = False
+    ) -> dict:
+        argv = [
+            "get-segments", "--job", self.job_path(job_id),
+            "--offset", str(int(offset)), "--limit", str(int(limit)),
+        ]
+        if include_context:
+            argv.append("--context")
+        return self._rpc(argv)
+
+    # -- write side ----------------------------------------------------------
 
     def _upload(self, job_id: str, name: str, payload: dict) -> str:
-        """Uploads through dtctl put; returns "uploaded" or "inbox"."""
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
-            self.transport.dtctl(
+            self._rpc(
                 ["put", "--job", self.job_path(job_id), "--name", name], stdin=data
             )
             return "uploaded"
@@ -113,94 +156,9 @@ class JobService:
     def _upload_state(self, job_id: str, state: dict) -> None:
         self._upload(job_id, "state.json", state)
 
-    # -- read side -----------------------------------------------------------
-
-    def list_jobs(self) -> list[dict]:
-        try:
-            names = self.transport.list_dir(self.config.jobs_root)
-        except TransportError as error:
-            return [{"error": str(error)}]
-        jobs = []
-        for name in names:
-            if not valid_job_id(name):
-                continue
-            try:
-                job = self.load_job(name)
-                state = self.load_state(name)
-            except (TransportError, ValidationError, json.JSONDecodeError):
-                continue
-            jobs.append(
-                {
-                    "job_id": name,
-                    "created_at": job.get("created_at", 0),
-                    "title": job.get("book", {}).get("title"),
-                    "book_path": job.get("book", {}).get("device_path"),
-                    "chapters": len(job.get("chapters", [])),
-                    "total": len(job["segments"]),
-                    "status": state.get("status", "exported"),
-                    "provider_id": state.get("provider_id"),
-                    "model_name": state.get("model_name"),
-                    "submitted": state.get("submitted", 0),
-                }
-            )
-        jobs.sort(key=lambda item: (item["created_at"], item["job_id"]), reverse=True)
-        return jobs
-
-    def get_job(self, job_id: str) -> dict:
-        job = self.load_job(job_id)
-        state = self.load_state(job_id)
-        return {
-            "job_id": job_id,
-            "book": job.get("book"),
-            "chapters": job.get("chapters", []),
-            "total": len(job["segments"]),
-            "options": job.get("options", {}),
-            "status": state.get("status", "exported"),
-            "provider_id": state.get("provider_id"),
-            "model_name": state.get("model_name"),
-            "submitted": len(self._load_partial(job_id)),
-        }
-
-    def get_segments(
-        self, job_id: str, offset: int = 0, limit: int = 50, include_context: bool = False
-    ) -> dict:
-        job = self.load_job(job_id)
-        segments = job["segments"]
-        offset = max(0, int(offset))
-        limit = max(1, min(int(limit), 100))
-        window = segments[offset : offset + limit]
-        rows = []
-        for index, segment in enumerate(window, start=offset):
-            row = {
-                "id": segment["id"],
-                "parent_id": segment.get("parent_id", segment["id"]),
-                "part": segment.get("part", 1),
-                "parent_total": segment.get("parent_total", 1),
-                "chapter_index": segment.get("chapter_index"),
-                "chapter_title": segment.get("chapter_title"),
-                "source": segment["source"],
-            }
-            if include_context:
-                # For part 2+ the "previous" text must be the previous part of
-                # the same paragraph, not the previous paragraph, or the agent
-                # loses the cross-part reference (design 10.2).
-                row["prev"] = segments[index - 1]["source"][-200:] if index > 0 else None
-                row["next"] = (
-                    segments[index + 1]["source"][:200] if index + 1 < len(segments) else None
-                )
-            rows.append(row)
-        return {
-            "job_id": job_id,
-            "total": len(segments),
-            "next_offset": offset + len(rows) if offset + len(rows) < len(segments) else None,
-            "segments": rows,
-        }
-
-    # -- write side ----------------------------------------------------------
-
     def submit(self, job_id: str, segments: list[dict]) -> dict:
-        job = self.load_job(job_id)
-        known = {segment["id"]: segment for segment in job["segments"]}
+        status = self.status(job_id)
+        known = set(status.get("segment_ids") or [])
         if not isinstance(segments, list) or not segments:
             raise ValidationError("segments must be a non-empty list")
         if len(segments) > self.config.max_segments_per_call:
@@ -231,24 +189,23 @@ class JobService:
                 "schema": STATE_SCHEMA,
                 "status": "submitting",
                 "submitted": len(merged),
-                "total": len(job["segments"]),
+                "total": status.get("total", 0),
             }
         )
-        self._save_state_local(job_id, state)
-        self._upload_state(job_id, state)
+        self._save_state(job_id, state)
 
         return {
             "job_id": job_id,
             "accepted": len(accepted),
             "rejected": rejected,
             "submitted": len(merged),
-            "remaining": len(job["segments"]) - len(merged),
+            "remaining": max(0, int(status.get("total", 0)) - len(merged)),
         }
 
     def confirm_model(
         self, job_id: str, model_name: str, display_name: str | None = None
     ) -> dict:
-        job = self.load_job(job_id)
+        status = self.status(job_id)
         state = self.load_state(job_id)
         model_name = (model_name or "").strip()
         if not model_name:
@@ -264,26 +221,25 @@ class JobService:
                 "model_name": model_name,
                 "display_name": (display_name or "").strip() or f"MCP · {model_name}",
                 "confirmed": True,
-                "total": len(job["segments"]),
+                "total": status.get("total", 0),
                 "submitted": len(self._load_partial(job_id)),
             }
         )
-        self._save_state_local(job_id, state)
-        self._upload_state(job_id, state)
+        self._save_state(job_id, state)
         return {"job_id": job_id, **state}
 
     def job_status(self, job_id: str) -> dict:
-        job = self.load_job(job_id)
-        state = self.load_state(job_id)
+        status = self.status(job_id)
         submitted = len(self._load_partial(job_id))
+        total = int(status.get("total", 0))
         return {
             "job_id": job_id,
-            "status": state.get("status", "exported"),
-            "provider_id": state.get("provider_id"),
-            "model_name": state.get("model_name"),
+            "status": status.get("status", "exported"),
+            "provider_id": status.get("provider_id"),
+            "model_name": status.get("model_name"),
             "submitted": submitted,
-            "total": len(job["segments"]),
-            "remaining": len(job["segments"]) - submitted,
+            "total": total,
+            "remaining": max(0, total - submitted),
         }
 
     def commit(
@@ -292,7 +248,7 @@ class JobService:
         set_display: bool = False,
         allow_partial: bool = False,
     ) -> dict:
-        job = self.load_job(job_id)
+        status = self.status(job_id)
         state = self.load_state(job_id)
         if not state.get("provider_id") or not state.get("model_name"):
             return {
@@ -304,9 +260,9 @@ class JobService:
                 "suggested_schema": {"model_name": "string", "display_name": "string"},
             }
         translations = self._load_partial(job_id)
-        missing = [
-            segment["id"] for segment in job["segments"] if segment["id"] not in translations
-        ]
+        segment_ids = status.get("segment_ids") or []
+        missing = [segment_id for segment_id in segment_ids
+                   if segment_id not in translations]
         if missing and not allow_partial:
             return {
                 "ok": False,
@@ -315,7 +271,7 @@ class JobService:
                 "message": "还有段落未提交；如需部分导入请显式允许",
             }
 
-        result = build_result(job, state, translations)
+        result = build_result(job_id, segment_ids, state, translations)
         result_path = self._work_dir(job_id) / "result.json"
         result_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
@@ -326,8 +282,6 @@ class JobService:
             inbox_id = self.transport.write_inbox(
                 job_id, json.dumps(result, ensure_ascii=False).encode("utf-8")
             )
-            state.update({"status": "pending_import", "submitted": len(translations)})
-            self._save_state_local(job_id, state)
             return {
                 "ok": True,
                 "status": "pending_import",
@@ -340,41 +294,42 @@ class JobService:
         if allow_partial:
             argv.append("--allow-partial")
         try:
-            reply = self.transport.dtctl(argv)
+            reply = self._rpc(argv)
         except TransportError as error:
             return {"ok": False, "status": "import_failed", "message": str(error)}
 
         imported = reply.get("imported", {})
-        if set_display and imported.get("confirmed", True):
+        state.update(
+            {
+                "schema": STATE_SCHEMA,
+                "status": "committed",
+                "provider_id": result["provider"]["provider_id"],
+                "model_name": result["provider"]["model_name"],
+                "submitted": len(translations),
+                "total": status.get("total", 0),
+            }
+        )
+        self._save_state_local(job_id, state)
+        if set_display:
             try:
-                self.transport.dtctl(
+                self._rpc(
                     [
                         "set-display",
-                        "--book", job["book"]["device_path"],
-                        "--target", job["book"]["target_lang"],
+                        "--book", status.get("book_path") or "",
+                        "--target", status.get("target_lang") or "",
                         "--provider", result["provider"]["provider_id"],
                     ]
                 )
             except TransportError:
                 # The import succeeded; a failed display switch is not fatal.
                 pass
-        state.update(
-            {
-                "status": "committed",
-                "provider_id": result["provider"]["provider_id"],
-                "model_name": result["provider"]["model_name"],
-                "submitted": len(translations),
-                "total": len(job["segments"]),
-            }
-        )
-        self._save_state_local(job_id, state)
         return {"ok": True, "status": "committed", "job_id": job_id, "imported": imported}
 
     # -- provider / display --------------------------------------------------
 
     def list_providers(self, book_path: str, target_lang: str) -> dict:
         try:
-            reply = self.transport.dtctl(
+            reply = self._rpc(
                 ["list-providers", "--book", book_path, "--target", target_lang]
             )
         except HeadlessUnavailable:
@@ -385,7 +340,7 @@ class JobService:
 
     def delete_provider(self, book_path: str, target_lang: str, provider_id: str) -> dict:
         try:
-            reply = self.transport.dtctl(
+            reply = self._rpc(
                 [
                     "delete-provider", "--book", book_path,
                     "--target", target_lang, "--provider", provider_id,
@@ -399,7 +354,7 @@ class JobService:
 
     def set_display(self, book_path: str, target_lang: str, provider_id: str) -> dict:
         try:
-            reply = self.transport.dtctl(
+            reply = self._rpc(
                 [
                     "set-display", "--book", book_path,
                     "--target", target_lang, "--provider", provider_id,
@@ -413,7 +368,7 @@ class JobService:
 
     def refresh_device(self, book_path: str, target_lang: str) -> dict:
         try:
-            reply = self.transport.dtctl(
+            reply = self._rpc(
                 ["touch-reload", "--book", book_path, "--target", target_lang]
             )
         except HeadlessUnavailable:
@@ -428,4 +383,3 @@ def result_from_file(path: Path) -> dict:
     if data.get("schema") != RESULT_SCHEMA:
         raise ValidationError("not a dualtranslate result file")
     return data
-
