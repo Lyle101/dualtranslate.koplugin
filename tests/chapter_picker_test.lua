@@ -149,6 +149,17 @@ do
     check("解析失败同样关闭提示", #notifications == 3 and notifications[3].closed == true)
     check("无引擎分支不提示（重绘仍为 3 次）", repaints == 3)
 
+    -- 解析抛异常：错误要兜住，提示不能留在屏幕上
+    notifications, repaints = {}, 0
+    plugin.epub = { outline = function(_, before_parse)
+        if before_parse then before_parse() end
+        error("archiver exploded")
+    end }
+    local crashed, crash_err = plugin:getBookOutline("/books/six.epub")
+    check("解析异常被兜住", crashed == nil and type(crash_err) == "string"
+        and crash_err:find("archiver exploded", 1, true) ~= nil, tostring(crash_err))
+    check("异常路径也关闭提示", #notifications == 1 and notifications[1].closed == true)
+
     -- 磁盘缓存命中：Epub.outline 在调用 hook 之前就返回，选择器不应闪提示
     notifications, repaints = {}, 0
     plugin.epub = { outline = function() return outline end }

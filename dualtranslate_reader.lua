@@ -367,13 +367,16 @@ function dualtranslate:getBookOutline(book_path)
     -- tap.  The parse stays synchronous by contract, so paint a message before
     -- blocking; Epub.outline calls the hook only when it really has to parse,
     -- so the memory cache above and a disk-cache hit never flash it.
+    -- pcall so an exception cannot leave the notice stranded on screen behind
+    -- whatever error dialog the caller raises.
     local notice
-    local outline, err = Epub.outline(book_path, function()
+    local ok, outline, err = pcall(Epub.outline, book_path, function()
         notice = Notification:new{ text = _("正在解析目录…"), timeout = 30 }
         UIManager:show(notice)
         UIManager:forceRePaint()
     end)
     if notice then UIManager:close(notice) end
+    if not ok then return nil, tostring(outline) end
     if not outline then return nil, err end
     self._book_outline_cache = { book_path = book_path, outline = outline }
     return outline
