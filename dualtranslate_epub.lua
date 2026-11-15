@@ -1120,7 +1120,12 @@ end
 function Epub.outline(book_path, ...)
     -- Design 7.2 spells this Epub.outline(path); also accept the module's usual
     -- colon style so a caller cannot hand us self as the book path.
-    if type(book_path) == "table" then book_path = ... end
+    local before_parse
+    if type(book_path) == "table" then
+        book_path, before_parse = ...
+    else
+        before_parse = ...
+    end
     if type(book_path) ~= "string" or book_path == "" then return nil, "缺少书路径" end
     if not book_path:lower():match("%.epub$") then
         return nil, "目录解析目前仅支持 EPUB"
@@ -1130,6 +1135,9 @@ function Epub.outline(book_path, ...)
     if not size then return nil, "找不到书文件" end
     local cached = load_outline_cache(book_path, size, mtime)
     if cached then return cached end
+    -- Parsing blocks for seconds; the caller uses this hook to paint a message
+    -- first.  Called after both cache paths, so a cache hit never flashes it.
+    if before_parse then before_parse() end
 
     local nonce = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
     local work_dir = DataStorage:getDataDir() .. "/cache/dualtranslate/outline_" .. nonce

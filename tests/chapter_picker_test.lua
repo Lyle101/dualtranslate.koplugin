@@ -17,18 +17,37 @@ local DATA_DIR = "/tmp/dt_chapter_picker"
 local opened_menus = {}
 local closed_widgets = {}
 local notifications = {}
+local repaints = 0
 local stubs = {
     ["logger"] = { warn = function() end, err = function() end, info = function() end, dbg = function() end },
     ["gettext"] = function(text) return text end,
     ["ui/uimanager"] = {
-        show = function(_, widget) opened_menus[#opened_menus + 1] = widget end,
-        close = function(_, widget) closed_widgets[#closed_widgets + 1] = widget end,
+        show = function(_, widget)
+            -- Notices and menus are counted separately: the chapter list
+            -- assertions below index opened_menus directly.
+            if widget.is_notification then
+                notifications[#notifications + 1] = widget
+            else
+                opened_menus[#opened_menus + 1] = widget
+            end
+        end,
+        close = function(_, widget)
+            if widget.is_notification then
+                widget.closed = true
+            else
+                closed_widgets[#closed_widgets + 1] = widget
+            end
+        end,
+        forceRePaint = function() repaints = repaints + 1 end,
         setDirty = function() end,
         scheduleIn = function() end,
         nextTick = function() end,
     },
     ["ui/widget/notification"] = {
-        new = function(_, opts) return opts end,
+        new = function(_, opts)
+            opts.is_notification = true
+            return opts
+        end,
     },
     ["ui/widget/menu"] = {
         new = function(_, opts)
@@ -89,18 +108,26 @@ do
     }
     plugin.epub = {
         -- Epub.outline accepts both dot and colon calls; the accessor uses dot.
-        outline = function(path)
+        -- The stub also plays the cold-parse hook: the real module calls it only
+        -- once the disk cache is known to be stale.
+        outline = function(path, before_parse)
             calls = calls + 1
             plugin.last_outline_path = path
+            if before_parse then before_parse() end
             return outline
         end,
     }
     local first = plugin:getBookOutline("/books/one.epub")
     check("首次解析返回目录", first == outline and calls == 1)
     check("解析带书路径", plugin.last_outline_path == "/books/one.epub")
+    -- 冷解析约 1.9 s 会阻塞 UI：先落一帧提示，再同步解析
+    check("冷解析先提示并强制重绘", #notifications == 1 and repaints == 1
+        and tostring(notifications[1].text):find("正在解析目录", 1, true) ~= nil)
+    check("解析结束关闭提示", notifications[1].closed == true)
 
     local second = plugin:getBookOutline("/books/one.epub")
     check("同书命中内存缓存", second == outline and calls == 1)
+    check("命中缓存不再提示", #notifications == 1 and repaints == 1)
 
     plugin:getBookOutline("/books/two.epub")
     check("换书重新解析", calls == 2)
@@ -113,9 +140,20 @@ do
     local no_engine, no_engine_err = plugin:getBookOutline("/books/three.epub")
     check("无 EPUB 引擎报错", no_engine == nil and type(no_engine_err) == "string")
 
-    plugin.epub = { outline = function() return nil, "坏的 container.xml" end }
+    plugin.epub = { outline = function(_, before_parse)
+        if before_parse then before_parse() end
+        return nil, "坏的 container.xml"
+    end }
     local parse_failed, parse_err = plugin:getBookOutline("/books/four.epub")
     check("解析失败透传错误", parse_failed == nil and parse_err == "坏的 container.xml")
+    check("解析失败同样关闭提示", #notifications == 3 and notifications[3].closed == true)
+    check("无引擎分支不提示（重绘仍为 3 次）", repaints == 3)
+
+    -- 磁盘缓存命中：Epub.outline 在调用 hook 之前就返回，选择器不应闪提示
+    notifications, repaints = {}, 0
+    plugin.epub = { outline = function() return outline end }
+    local disk_hit = plugin:getBookOutline("/books/five.epub")
+    check("磁盘缓存命中不提示", disk_hit == outline and #notifications == 0 and repaints == 0)
 end
 
 local Picker = require("dualtranslate_picker")
@@ -242,10 +280,10 @@ do
         menu.item_table[1].select_enabled == true and menu.item_table[1].text == "开始翻译（1 章）")
 
     -- 长按显示未截断标题（M4）
-    opened_menus = {}
+    notifications = {}
     menu:onMenuHold(find_item(function(item) return item.chapter_index == 2 end))
-    check("长按显示完整标题", opened_menus[1] ~= nil
-        and tostring(opened_menus[1].text):find("Chapter Two", 1, true) ~= nil)
+    check("长按显示完整标题", notifications[1] ~= nil
+        and tostring(notifications[1].text):find("Chapter Two", 1, true) ~= nil)
 
     menu:onMenuSelect(find_item(function(item) return item.text == "全选本页" end))
     check("全选本页选中全部可见章节", menu.item_table[1].text == "开始翻译（3 章）")
@@ -257,16 +295,16 @@ do
 
     -- 目录解析失败：提示，不打开空菜单
     plugin.getBookOutline = function() return nil, "坏的 container.xml" end
-    opened_menus = {}
+    opened_menus, notifications = {}, {}
     Picker.show(plugin)
-    check("目录失败给出提示", #opened_menus == 1
-        and tostring(opened_menus[1].text):find("目录解析失败", 1, true) ~= nil)
+    check("目录失败给出提示", #opened_menus == 0 and #notifications == 1
+        and tostring(notifications[1].text):find("目录解析失败", 1, true) ~= nil)
 
     plugin.getBookOutline = function() return { spine_count = 0, chapters = {} } end
-    opened_menus = {}
+    opened_menus, notifications = {}, {}
     Picker.show(plugin)
-    check("空目录给出提示", #opened_menus == 1
-        and tostring(opened_menus[1].text):find("没有可选择的章节", 1, true) ~= nil)
+    check("空目录给出提示", #opened_menus == 0 and #notifications == 1
+        and tostring(notifications[1].text):find("没有可选择的章节", 1, true) ~= nil)
 
     -- M5: 超过一页的列表才追加尾部确认行，单页书不重复
     plugin.getBookOutline = function() return { spine_count = 40, chapters = {} } end

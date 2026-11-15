@@ -362,7 +362,18 @@ function dualtranslate:getBookOutline(book_path)
     if cached and cached.book_path == book_path then return cached.outline end
     local Epub = self.epub or (self.loadEpubModule and self:loadEpubModule())
     if not Epub or not Epub.outline then return nil, "EPUB 引擎不可用" end
-    local outline, err = Epub.outline(book_path)
+    -- A cold parse unpacks the archive and walks the spine three times: ~1.9 s
+    -- on a 38 MB / 646-spine book, which reads as a frozen UI right after the
+    -- tap.  The parse stays synchronous by contract, so paint a message before
+    -- blocking; Epub.outline calls the hook only when it really has to parse,
+    -- so the memory cache above and a disk-cache hit never flash it.
+    local notice
+    local outline, err = Epub.outline(book_path, function()
+        notice = Notification:new{ text = _("正在解析目录…"), timeout = 30 }
+        UIManager:show(notice)
+        UIManager:forceRePaint()
+    end)
+    if notice then UIManager:close(notice) end
     if not outline then return nil, err end
     self._book_outline_cache = { book_path = book_path, outline = outline }
     return outline

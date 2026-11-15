@@ -772,8 +772,11 @@ do
     local path = cache_path(book)
     os.remove(path)
     reset_stats()
-    local first = Epub.outline(book)
+    -- before_parse 只在真的要解析时才回调（选择器靠它先画"正在解析目录…"）
+    local before_parse_calls = 0
+    local first = Epub.outline(book, function() before_parse_calls = before_parse_calls + 1 end)
     check("首次解析成功", first ~= nil and first.source == "ncx")
+    check("冷解析调用 before_parse 一次", before_parse_calls == 1, tostring(before_parse_calls))
     check("首次解析走三趟", stats.passes == 3, tostring(stats.passes))
     check("缓存文件落在 outline/<hash>.json", lfs.attributes(path, "mode") == "file", path)
     local doc = JSON.decode(read_real(path))
@@ -786,6 +789,7 @@ do
     local second = Epub.outline(book)
     check("二次打开命中缓存（零解包）", stats.passes == 0 and stats.opened == 0,
         tostring(stats.passes))
+    check("缓存命中不调用 before_parse", before_parse_calls == 1, tostring(before_parse_calls))
     check("缓存结果与首次一致", second and #second.chapters == #first.chapters
         and second.chapters[1].title == "One" and second.chapters[2].title == "Two")
     check("缓存保留 level", second and second.chapters[1].level == 0)
