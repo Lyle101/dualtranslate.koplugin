@@ -98,6 +98,8 @@ package.preload["dualtranslate_providers"] = function()
     return {
         list = { { id = "system", name = "KOReader 内置" }, { id = "microsoft_free", name = "Microsoft Edge" } },
         getProviderName = function(id) return id == "system" and "KOReader 内置" or "Microsoft Edge" end,
+        -- getMode() only lets known engines through, so the stub answers it too.
+        isProviderEnabled = function(id) return id == "system" or id == "microsoft_free" end,
         translate = function(_, text) return { translated_text = "T:" .. text } end,
         translate_microsoft_free_batch = function(texts)
             local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out

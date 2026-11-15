@@ -6,6 +6,8 @@
 --
 --   DT_LIVE=1 luajit tests/smoke_live.lua
 --   DT_LIVE=1 KO_ROOT=/mnt/us/koreader luajit tests/smoke_live.lua   (on device)
+--   DT_PROXY=http://<host>:7890 ...   additionally checks google_free, which
+--                                    needs to reach Google
 --
 -- Needs KOReader's own libraries (luasocket / json / ltn12) via KO_ROOT.
 -- Unset DT_LIVE means "don't run it" -> SKIP, exit 0.  Set DT_LIVE=1 means
@@ -134,7 +136,36 @@ do
             and looks_translated(TEXT2, result[2]))
 end
 
--- 3) KOReader built-in engine (Google by default) through ui/translator.
+-- 3) Google's free endpoint (POST /translate_a/t).  It has no mirror and no
+-- key: without a reachable Google the request just times out, so the check is
+-- opt-in through DT_PROXY (the device reaches Google only via its proxy).
+do
+    local proxy = os.getenv("DT_PROXY")
+    if not proxy then
+        skipped = skipped + 1
+        print("   google_free     single: SKIP（未设 DT_PROXY；该引擎要求能访问 Google）")
+    else
+        require("socket.http").PROXY = proxy
+        local result, err, ms = timed(Providers.translate, "google_free", TEXT, SRC, DST)
+        local text = result and result.translated_text
+        print(string.format("   google_free    single: %.0f ms  %q  %s", ms, tostring(text),
+            result and tostring(result.provider) or tostring(err and err.message)))
+        check("google_free 返回非空译文", looks_translated(TEXT, text), err and err.message)
+        check("google_free provider 字段一致", result and result.provider == "google_free")
+
+        local batch, batch_err, batch_ms = timed(Providers.translate_google_free_batch,
+            { TEXT, TEXT2 }, SRC, DST)
+        print(string.format("   google_free    batch : %.0f ms  %s", batch_ms,
+            batch and table.concat(batch, " | ") or tostring(batch_err and batch_err.message)))
+        check("google_free 批量返回且条数一致", type(batch) == "table" and #batch == 2,
+            batch_err and batch_err.message)
+        check("google_free 批量译文都非空",
+            type(batch) == "table" and looks_translated(TEXT, batch[1])
+                and looks_translated(TEXT2, batch[2]))
+    end
+end
+
+-- 4) KOReader built-in engine (Google by default) through ui/translator.
 -- ui/translator pulls in UIManager/TextViewer, so it only loads inside a real
 -- reader process; headless runs report SKIP instead of a misleading FAIL.
 local ok_translator, translator_err = pcall(require, "ui/translator")
@@ -152,7 +183,7 @@ else
     check("system provider 字段一致", result and result.provider == "system")
 end
 
--- 4) negative path: an unknown provider must not silently hit the network
+-- 5) negative path: an unknown provider must not silently hit the network
 do
     local result, err = Providers.translate("nope_not_a_provider", TEXT, SRC, DST)
     check("未知引擎直接报错", result == nil and type(err) == "table" and err.message ~= nil)

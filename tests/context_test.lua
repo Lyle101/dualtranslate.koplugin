@@ -161,7 +161,22 @@ do
         ["dualtranslate_providers"] = {
             list = {}, getProviderName = function() return "x" end,
             translate = function(_, text) return { translated_text = "T:" .. text } end,
-            translate_microsoft_free_batch = function(texts)
+            -- Batch capability is advertised per engine now, so the stub has to
+            -- answer has_batch/batch_limits/split_groups as the real module does.
+            has_batch = function(id) return id == "microsoft_free" end,
+            batch_limits = function() return { items = 12, bytes = 4000 } end,
+            split_groups = function(texts)
+                local groups, current = {}, {}
+                for index = 1, #texts do
+                    current[#current + 1] = index
+                    if #current >= 12 then
+                        groups[#groups + 1], current = current, {}
+                    end
+                end
+                if #current > 0 then groups[#groups + 1] = current end
+                return groups
+            end,
+            translate_batch = function(_, texts)
                 local out = {}
                 for i, t in ipairs(texts) do out[i] = "B:" .. t end
                 return out

@@ -151,9 +151,10 @@ end
 
 function dualtranslate:getMode()
     local mode = self:getSetting("mode", "microsoft_free")
-    if mode ~= "system" and mode ~= "microsoft_free" then
-        return "microsoft_free"
-    end
+    -- Only engines that still exist may travel through: an id left over from a
+    -- removed engine (or a typo in the settings file) falls back to the default
+    -- instead of failing every translation.
+    if not Providers.isProviderEnabled(mode) then return "microsoft_free" end
     return mode
 end
 
@@ -548,11 +549,15 @@ function dualtranslate:buildProviderSelector()
         -- Lua 5.1: loop variables are shared by every closure created inside
         -- the loop.  Capture the per-iteration values (id and name) so each
         -- row shows its own provider and toggles its own mode.
-        local pid, pname = provider.id, provider.name
+        local pid, pname, phint = provider.id, provider.name, provider.hint
 
         table.insert(items, {
+            -- One line per engine: what it needs and whether it batches.  Three
+            -- keyless engines look interchangeable until one of them times out
+            -- on every paragraph.
             text_func = function()
-                return pname
+                if not phint then return pname end
+                return pname .. " · " .. phint
             end,
             checked_func = function()
                 return self:getMode() == pid

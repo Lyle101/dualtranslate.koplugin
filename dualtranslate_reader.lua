@@ -992,7 +992,9 @@ function dualtranslate:translateTextBatchForEpub(texts, contexts)
     local function context_at(index)
         return contexts and contexts[index] or nil
     end
-    if mode ~= "microsoft_free" then
+    -- Engines that can take several paragraphs per request advertise it; the
+    -- rest fall back to one call per paragraph (system is one of those).
+    if not Providers.has_batch(mode) then
         local results = {}
         local first_error
         for index, text in ipairs(texts) do
@@ -1041,25 +1043,23 @@ function dualtranslate:translateTextBatchForEpub(texts, contexts)
         end
     end
 
-    local batch_start = 1
-    while batch_start <= #pending do
+    local limits = Providers.batch_limits(mode) or { items = 12, bytes = 4000 }
+    local pending_texts = {}
+    for index, item in ipairs(pending) do pending_texts[index] = item.text end
+    for _, group in ipairs(Providers.split_groups(pending_texts, limits)) do
         local batch, batch_texts = {}, {}
-        local total_bytes = 0
-        while batch_start <= #pending and #batch < 12 do
-            local item = pending[batch_start]
-            if #batch > 0 and total_bytes + #item.text > 4000 then break end
+        for _, pending_index in ipairs(group) do
+            local item = pending[pending_index]
             table.insert(batch, item)
             table.insert(batch_texts, item.text)
-            total_bytes = total_bytes + #item.text
-            batch_start = batch_start + 1
         end
         local translated, err
-        translated, err = Providers.translate_microsoft_free_batch(
+        translated, err = Providers.translate_batch(mode,
             batch_texts, self:getSourceLang(), self:getTargetLang())
         if not translated then
             -- One immediate retry handles transient resets without falling
             -- back to a slow request for every paragraph.
-            translated, err = Providers.translate_microsoft_free_batch(
+            translated, err = Providers.translate_batch(mode,
                 batch_texts, self:getSourceLang(), self:getTargetLang())
         end
         if not translated then

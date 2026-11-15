@@ -9,10 +9,18 @@ local _ = require("gettext")
 local Providers = {}
 
 Providers.list = {
-    { id = "system", name = "KOReader 内置翻译（跟随系统设置）", requires_api_key = false,
+    -- `hint` is the one-line "what does this engine need" note the engine menu
+    -- shows after the name: with three keyless engines a reader cannot tell
+    -- which one to pick, and picking blind costs a 5 s timeout per paragraph.
+    { id = "system", name = "KOReader 内置翻译", requires_api_key = false,
+      hint = "跟随 KOReader 设置 · 逐段 · 需能访问 Google",
       description = _("Use KOReader's built-in translator engine (configured in KOReader -> Translation)") },
     { id = "microsoft_free", name = "Microsoft Edge（免费）", requires_api_key = false,
+      hint = "无需代理 · 支持批量",
       description = _("Microsoft Edge web endpoint (no API key)") },
+    { id = "google_free", name = "Google（免费）", requires_api_key = false,
+      hint = "需能访问 Google · 支持批量",
+      description = _("Google's free web endpoint; no API key, batch capable") },
 }
 
 -- ---------------------------------------------------------------------------
@@ -28,10 +36,10 @@ local function getSystemTranslator()
     return nil
 end
 
--- Map DualTranslate's BCP-47 codes onto the codes the built-in translator
--- expects (its SUPPORTED_LANGUAGES table uses "zh"/"zh-TW"; Google accepts
--- the plain forms too).  Anything unknown passes through untouched.
-local function normalizeLangForSystem(lang)
+-- Map DualTranslate's BCP-47 codes onto the ones Google uses (its built-in
+-- SUPPORTED_LANGUAGES and the free web endpoints both prefer "zh" / "zh-TW").
+-- Anything unknown passes through untouched.
+local function normalizeGoogleLang(lang)
     if lang == "zh-Hans" then return "zh" end
     if lang == "zh-Hant" then return "zh-TW" end
     return lang
@@ -46,13 +54,13 @@ function Providers.translate_system(text, source_lang, target_lang)
     -- G_reader_settings.  We still forward explicit langs when provided, so
     -- DualTranslate's per-book settings win when set.
     local ok, translated = pcall(Translator.translate, Translator, text,
-        normalizeLangForSystem(target_lang), normalizeLangForSystem(source_lang))
+        normalizeGoogleLang(target_lang), normalizeGoogleLang(source_lang))
     if not ok or not translated or translated == "" then
         logger.warn("dualtranslate: system translator failed:", translated)
         -- The built-in engine has no mirror: if Google is unreachable every
         -- paragraph fails.  Name that cause so the user knows the fix is a
         -- different engine, not a retry.
-        return nil, { message = _("KOReader 内置翻译失败（需能访问 Google），请检查网络与 KOReader 翻译设置，或改用「翻译引擎 → Microsoft Edge（免费）」") }
+        return nil, { message = _("KOReader 内置翻译失败（需能访问 Google），请检查网络与 KOReader 翻译设置，或改用「翻译引擎 → Microsoft Edge（免费）」/「Google（免费）」") }
     end
     return { translated_text = translated, source_lang = source_lang,
         target_lang = target_lang, provider = "system" }
@@ -152,13 +160,167 @@ function Providers.translate_microsoft_free_batch(texts, source_lang, target_lan
     return result
 end
 
+-- ---------------------------------------------------------------------------
+-- Google, free web endpoint (no API key).
+--
+-- The path KOReader's built-in translator uses
+-- (/translate_a/single?client=gtx&...&q=...) answers Google's "Sorry" 429 page
+-- as soon as the exit IP is busy.  The sibling path /translate_a/t takes the
+-- texts in the POST body and answers one entry per q= parameter, so a whole
+-- group of paragraphs travels in one request — the same trade-off the
+-- Immersive Translate extension makes.  An entry is normally
+-- [translated_text, detected_lang], but the endpoint also answers bare strings,
+-- so the parser accepts both shapes.
+-- ---------------------------------------------------------------------------
+local GOOGLE_FREE_URL = "https://translate.googleapis.com/translate_a/t"
+local GOOGLE_FREE_LIMITS = { items = 12, bytes = 4000 }
+local GOOGLE_FREE_RETRY_DELAY = 1.5
+local GOOGLE_FREE_LIMITED = _("Google 免费接口限流，稍后重试或改用「翻译引擎 → Microsoft Edge（免费）」")
+
+local function sleepSeconds(seconds)
+    local ok, socket = pcall(require, "socket")
+    if ok and socket and socket.sleep then socket.sleep(seconds) end
+end
+
+local function googleFreeRequest(url, body)
+    local response_body = {}
+    socketutil:set_timeout(20, 20)
+    -- luasocket returns (1, http_status, headers, status_line); unlike the JSON
+    -- helper above this keeps the status code, because "429" and "no network"
+    -- deserve different messages and different retry handling.
+    local ok, done, code = pcall(http.request, {
+        url = url,
+        method = "POST",
+        headers = {
+            ["Content-Type"] = "application/x-www-form-urlencoded",
+            ["Accept"] = "application/json",
+        },
+        source = ltn12.source.string(body),
+        sink = ltn12.sink.table(response_body),
+    })
+    socketutil:reset_timeout()
+    if not ok or not done then
+        return nil, { message = _("翻译服务连接失败，请检查网络") }
+    end
+    if code == 429 then
+        return nil, { code = 429, retryable = true, message = GOOGLE_FREE_LIMITED }
+    end
+    if code ~= 200 then
+        return nil, { code = code,
+            message = string.format(_("Google 免费接口返回 HTTP %s"), tostring(code)) }
+    end
+    local decoded_ok, data = pcall(json.decode, table.concat(response_body))
+    if not decoded_ok or type(data) ~= "table" then
+        return nil, { code = code, message = _("Google 免费接口返回了无法解析的数据") }
+    end
+    return data
+end
+
+local function parseGoogleFree(data, expected)
+    if #data ~= expected then return nil end
+    local result = {}
+    for index = 1, expected do
+        local item = data[index]
+        local value
+        if type(item) == "table" then
+            value = item[1]
+        elseif type(item) == "string" then
+            value = item
+        end
+        if type(value) ~= "string" or value == "" then return nil end
+        result[index] = value
+    end
+    return result
+end
+
+function Providers.translate_google_free_batch(texts, source_lang, target_lang, opts)
+    opts = opts or {}
+    if type(texts) ~= "table" or #texts == 0 then return {} end
+    local parts = {}
+    for _, text in ipairs(texts) do
+        parts[#parts + 1] = "q=" .. urlEncode(text)
+    end
+    local url = GOOGLE_FREE_URL .. "?client=gtx&dt=t&sl="
+        .. urlEncode(source_lang == "auto" and "auto" or normalizeGoogleLang(source_lang))
+        .. "&tl=" .. urlEncode(normalizeGoogleLang(target_lang))
+    local body = table.concat(parts, "&")
+
+    local data, err = googleFreeRequest(url, body)
+    if not data and err and err.retryable then
+        -- One backoff plus one retry: the limit is per exit IP and usually
+        -- clears in a second or two, unlike a dead network.
+        local delay = opts.retry_delay
+        if delay == nil then delay = GOOGLE_FREE_RETRY_DELAY end
+        if delay > 0 then sleepSeconds(delay) end
+        data, err = googleFreeRequest(url, body)
+    end
+    if not data then return nil, err end
+    local result = parseGoogleFree(data, #texts)
+    if not result then
+        return nil, { message = _("Google 返回条数与请求不符") }
+    end
+    return result
+end
+
+function Providers.translate_google_free(text, source_lang, target_lang)
+    local result, err = Providers.translate_google_free_batch({ text }, source_lang, target_lang)
+    if not result then return nil, err end
+    return { translated_text = result[1], source_lang = source_lang,
+        target_lang = target_lang, provider = "google_free" }
+end
+
+-- Which engine can take several paragraphs in one request, and how many.
+local BATCH_LIMITS = {
+    microsoft_free = { items = 12, bytes = 4000 },
+    google_free = GOOGLE_FREE_LIMITS,
+}
+
+function Providers.has_batch(provider_id)
+    return BATCH_LIMITS[provider_id] ~= nil
+end
+
+function Providers.batch_limits(provider_id)
+    return BATCH_LIMITS[provider_id]
+end
+
+function Providers.translate_batch(provider_id, texts, source_lang, target_lang)
+    if provider_id == "microsoft_free" then
+        return Providers.translate_microsoft_free_batch(texts, source_lang, target_lang)
+    elseif provider_id == "google_free" then
+        return Providers.translate_google_free_batch(texts, source_lang, target_lang)
+    end
+    return nil, { message = _("该引擎不支持批量翻译") }
+end
+
+-- Split texts into request-sized groups.  A single text longer than the byte
+-- budget still gets a group of its own; the callers split long paragraphs
+-- before reaching this point.
+function Providers.split_groups(texts, limits)
+    limits = limits or GOOGLE_FREE_LIMITS
+    local groups, current, total = {}, {}, 0
+    for index, text in ipairs(texts) do
+        local size = #tostring(text)
+        if #current >= limits.items
+            or (#current > 0 and total + size > limits.bytes) then
+            groups[#groups + 1] = current
+            current, total = {}, 0
+        end
+        current[#current + 1] = index
+        total = total + size
+    end
+    if #current > 0 then groups[#groups + 1] = current end
+    return groups
+end
+
 function Providers.translate(provider_id, text, source_lang, target_lang)
     if provider_id == "system" then
         return Providers.translate_system(text, source_lang, target_lang)
     elseif provider_id == "microsoft_free" then
         return Providers.translate_microsoft_free(text, source_lang, target_lang)
+    elseif provider_id == "google_free" then
+        return Providers.translate_google_free(text, source_lang, target_lang)
     end
-    return nil, { message = "未知翻译服务，请选择 KOReader 内置或 Microsoft Edge" }
+    return nil, { message = "未知翻译服务，请选择 KOReader 内置、Microsoft Edge（免费）或 Google（免费）" }
 end
 
 function Providers.getProviderById(id)
