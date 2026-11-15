@@ -386,8 +386,10 @@ function Epub.translate_overlay(opts, ...)
 
     local chapter_candidates = {}
     local total = 0
+    local unreadable_chapters = 0
     for _, current in ipairs(chapters) do
         local document = read_file(current.absolute)
+        if not document then unreadable_chapters = unreadable_chapters + 1 end
         local candidates = document and collect_overlay_candidates(document,
             current.relative, current.index, false) or {}
         if #candidates == 0 and document then
@@ -725,14 +727,24 @@ function Epub.translate_overlay(opts, ...)
         end
         release_chapter()
     end
-    if translated_count == 0 and not cancelled and total > 0 then
-        cleanup()
-        return nil, type(first_error) == "table" and first_error.message
-            or tostring(first_error or "翻译服务没有返回译文")
+    -- total == 0 is a success only when every chapter was readable and really
+    -- had no translatable text (image-only books).  An unreadable chapter
+    -- means the EPUB text could not be parsed at all; reporting "0 段成功"
+    -- would silently mark a broken book as translated.
+    if translated_count == 0 and not cancelled then
+        if total == 0 and unreadable_chapters > 0 then
+            cleanup()
+            return nil, "无法读取本书章节内容（EPUB 文本可能已损坏）"
+        elseif total > 0 then
+            cleanup()
+            return nil, type(first_error) == "table" and first_error.message
+                or tostring(first_error or "翻译服务没有返回译文")
+        end
     end
     -- Only a whole-book run may mark the overlay complete; span/selection
     -- runs leave it incomplete so page-turn scheduling keeps working (7.4).
-    -- An empty book (total == 0) still records its chapters as done.
+    -- An empty book (total == 0, all chapters readable) still records its
+    -- chapters as done.
     local saved = save_checkpoint(not cancelled, total == 0)
     cleanup()
     if not saved then return nil, "无法保存本书翻译缓存" end

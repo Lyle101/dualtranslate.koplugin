@@ -217,14 +217,16 @@ do
     -- translate_overlay 内部用 data_dir .. "/cache/dualtranslate/overlay_<nonce>" 作为 work_dir，
     -- 并调用 Tools.unzip_to(book_path, work_dir)。mock unzip_to 把 TEST_DIR 内容拷过去。
     -- 简单起见：mock unzip_to 直接把 book_path 当 work_dir 源。
-    -- 这里重写 mock：unzip_to 返回 true，并在调用后把 TEST_DIR 拷到 dest
+    -- 这里重写 mock：unzip_to 返回 true，并在调用后把 TEST_DIR 拷到 dest。
+    -- unpack_source 可在用例里改指向，用来模拟坏书 / 纯图片书。
+    local unpack_source = TEST_DIR
     package.preload["dualtranslate_tools"] = function()
         return {
             mkdir_p = function(p) os.execute("mkdir -p " .. p) return true end,
             unzip_to = function(src, dest)
                 os.execute("rm -rf " .. dest)
                 os.execute("mkdir -p " .. dest)
-                os.execute("cp -r " .. TEST_DIR .. "/. " .. dest .. "/")
+                os.execute("cp -r " .. unpack_source .. "/. " .. dest .. "/")
                 return true
             end,
             rmtree = function(p) os.execute("rm -rf " .. p) return true end,
@@ -346,6 +348,55 @@ do
         translate_batch = function(texts) return {} end,
     })
     check("非 EPUB 报错", bad_res == nil and bad_err and bad_err:find("EPUB") ~= nil)
+
+    -- M2: 章节文件读不到（坏书）必须报错，不能当成“0 段成功”
+    local broken_dir = "/tmp/dualtranslate_epub_broken"
+    os.execute("rm -rf " .. broken_dir)
+    os.execute("mkdir -p " .. broken_dir .. "/META-INF " .. broken_dir .. "/OEBPS/Text")
+    local write_file = function(path, content)
+        local handle = io.open(path, "w")
+        handle:write(content)
+        handle:close()
+    end
+    write_file(broken_dir .. "/META-INF/container.xml",
+        [[<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>]])
+    write_file(broken_dir .. "/OEBPS/content.opf",
+        [[<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><manifest><item id="c1" href="Text/missing.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>]])
+    unpack_source = broken_dir
+    os.execute("rm -rf /tmp/dt_broken_out")
+    local broken_result, broken_err = Epub2:translate_overlay({
+        book_path = "/books/broken.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "system",
+        progress_path = "/tmp/dt_broken_prog.txt", output_dir = "/tmp/dt_broken_out",
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts) return texts end,
+    })
+    check("不可读章节报错", broken_result == nil and type(broken_err) == "string"
+        and broken_err:find("无法读取", 1, true) ~= nil, tostring(broken_err))
+
+    -- M2: 纯图片书（章节可读但 0 段）仍然算成功
+    local image_dir = "/tmp/dualtranslate_epub_images"
+    os.execute("rm -rf " .. image_dir)
+    os.execute("mkdir -p " .. image_dir .. "/META-INF " .. image_dir .. "/OEBPS/Text")
+    write_file(image_dir .. "/META-INF/container.xml",
+        [[<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>]])
+    write_file(image_dir .. "/OEBPS/content.opf",
+        [[<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><manifest><item id="c1" href="Text/pic.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>]])
+    write_file(image_dir .. "/OEBPS/Text/pic.xhtml",
+        [[<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="pic.jpg"/></body></html>]])
+    unpack_source = image_dir
+    os.execute("rm -rf /tmp/dt_image_out")
+    local image_result, image_err = Epub2:translate_overlay({
+        book_path = "/books/images.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "system",
+        progress_path = "/tmp/dt_image_prog.txt", output_dir = "/tmp/dt_image_out",
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts) return texts end,
+    })
+    check("纯图片书仍成功", image_result ~= nil, tostring(image_err))
+    check("纯图片书 0 段", image_result and image_result.translated == 0
+        and image_result.chapters == 1)
+    unpack_source = TEST_DIR
 end
 
 print(string.format("\n==== EPUB 结果：%d 通过，%d 失败 ====", passed, failed))
