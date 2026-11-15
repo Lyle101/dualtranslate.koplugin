@@ -152,13 +152,18 @@ function Picker.visible_chapter_indexes(item_table, page, perpage)
     return indexes
 end
 
+-- 7.1: the row carries the spine index as well as the (truncated) title, or
+-- identically named chapters cannot be told apart.  The full title stays on
+-- the item for the long-press detail.
 function Picker.chapter_label(state, chapter)
     local prefix = state.selected[chapter.index] and "[x] " or "[ ] "
-    return prefix .. Picker.truncate_title(chapter.title)
+    return string.format("%s%d. %s", prefix, chapter.index,
+        Picker.truncate_title(chapter.title))
 end
 
-function Picker.build_item_table(state, handlers)
+function Picker.build_item_table(state, handlers, opts)
     handlers = handlers or {}
+    opts = opts or {}
     local selected = Picker.count(state)
     local items = {
         {
@@ -184,20 +189,24 @@ function Picker.build_item_table(state, handlers)
         items[#items + 1] = {
             text = Picker.chapter_label(state, chapter),
             chapter_index = chapter.index,
+            full_title = chapter.title,
             callback = function()
                 if handlers.on_toggle then handlers.on_toggle(chapter.index) end
             end,
         }
     end
-    -- The action block only exists on the list's first page, so the last page
-    -- gets its own confirm row: pick chapters at the end of a long book, tap
-    -- once, done.
-    items[#items + 1] = {
-        text = string.format(_("开始翻译（%d 章）"), selected),
-        bold = true,
-        select_enabled = selected > 0,
-        callback = handlers.on_start,
-    }
+    -- The action block only exists on the list's first page, so a paginated
+    -- list gets a trailing confirm row: pick chapters at the end of a long
+    -- book, tap once, done.  A single-page book skips it, otherwise two
+    -- identical buttons sit on screen at the same time.
+    if opts.trailing then
+        items[#items + 1] = {
+            text = string.format(_("开始翻译（%d 章）"), selected),
+            bold = true,
+            select_enabled = selected > 0,
+            callback = handlers.on_start,
+        }
+    end
     return items
 end
 
@@ -225,8 +234,13 @@ function Picker.show(plugin)
     local UIManager = require("ui/uimanager")
     local menu, handlers
 
+    local function build_items()
+        return Picker.build_item_table(state, handlers,
+            { trailing = state.trailing_confirm == true })
+    end
+
     local function rebuild()
-        local items = Picker.build_item_table(state, handlers)
+        local items = build_items()
         local target = menu.item_table
         for index = #target, 1, -1 do target[index] = nil end
         for index, item in ipairs(items) do target[index] = item end
@@ -271,12 +285,29 @@ function Picker.show(plugin)
         is_popout = false,
     }
 
+    -- Only a list that spans several pages needs the trailing confirm row;
+    -- the page size is only known once Menu has computed its layout.
+    if menu.perpage and #menu.item_table > menu.perpage then
+        state.trailing_confirm = true
+        rebuild()
+    end
+
     -- Every tap is a toggle or an action; the menu must stay open, so bypass
     -- Menu:onMenuSelect's close_callback/onMenuChoice path.  Closing stays
     -- available through the title bar button.
     function menu:onMenuSelect(item)
         if type(item) ~= "table" or item.select_enabled == false then return true end
         if item.callback then item.callback() end
+        return true
+    end
+
+    -- Separator-like rows and long titles: hold shows the untruncated title
+    -- plus the spine index, which is also the job's chapter id (6.5).
+    function menu:onMenuHold(item)
+        if type(item) == "table" and item.chapter_index then
+            TranslationUI.showInfo(string.format(_("第 %d 章：%s"),
+                item.chapter_index, item.full_title or ""), 5)
+        end
         return true
     end
 

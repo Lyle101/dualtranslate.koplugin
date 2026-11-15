@@ -32,6 +32,10 @@ local stubs = {
     },
     ["ui/widget/menu"] = {
         new = function(_, opts)
+            -- Menu:init computes perpage from the reader setting; the fake
+            -- mirrors its default so Picker.show can decide on the trailing
+            -- confirm row.
+            opts.perpage = opts.perpage or 14
             opts.updateItems = function(self) self.updated = (self.updated or 0) + 1 end
             return opts
         end,
@@ -181,14 +185,18 @@ do
         and items[4].text == "全不选" and items[5].text == "反选")
     check("状态行显示章节与已选数",
         items[6].text == "共 3 章 · 已选 0 章" and items[6].select_enabled == false)
-    check("章节行带未选标记与索引",
-        items[7].text:sub(1, 4) == "[ ] " and items[7].chapter_index == 1)
-    check("末行为开始翻译", items[#items].text:find("开始翻译", 1, true) ~= nil)
+    check("章节行带标记、spine index 与标题",
+        items[7].text == "[ ] 1. 第 1 节" and items[7].chapter_index == 1
+        and items[7].full_title == "第 1 节")
+    check("单页列表不加尾部确认行", items[#items].chapter_index ~= nil)
+    local trailing_items = Picker.build_item_table(empty_state, {}, { trailing = true })
+    check("分页列表补尾部确认行",
+        trailing_items[#trailing_items].text:find("开始翻译", 1, true) ~= nil)
 
     Picker.toggle(empty_state, 1)
     local selected_items = Picker.build_item_table(empty_state, {})
     check("勾选后标记与计数同步",
-        selected_items[7].text:sub(1, 4) == "[x] "
+        selected_items[7].text == "[x] 1. 第 1 节"
         and selected_items[1].select_enabled == true
         and selected_items[1].text == "开始翻译（1 章）")
 end
@@ -229,9 +237,15 @@ do
     check("勾选章节不关闭菜单", #closed_widgets == 0)
     check("菜单原地刷新", menu.updated and menu.updated >= 1)
     local row = find_item(function(item) return item.chapter_index == 2 end)
-    check("章节行标记为已选", row.text:sub(1, 4) == "[x] ")
+    check("章节行标记为已选并带 spine index", row.text == "[x] 2. Chapter Two")
     check("开始项计数更新",
         menu.item_table[1].select_enabled == true and menu.item_table[1].text == "开始翻译（1 章）")
+
+    -- 长按显示未截断标题（M4）
+    opened_menus = {}
+    menu:onMenuHold(find_item(function(item) return item.chapter_index == 2 end))
+    check("长按显示完整标题", opened_menus[1] ~= nil
+        and tostring(opened_menus[1].text):find("Chapter Two", 1, true) ~= nil)
 
     menu:onMenuSelect(find_item(function(item) return item.text == "全选本页" end))
     check("全选本页选中全部可见章节", menu.item_table[1].text == "开始翻译（3 章）")
@@ -253,6 +267,15 @@ do
     Picker.show(plugin)
     check("空目录给出提示", #opened_menus == 1
         and tostring(opened_menus[1].text):find("没有可选择的章节", 1, true) ~= nil)
+
+    -- M5: 超过一页的列表才追加尾部确认行，单页书不重复
+    plugin.getBookOutline = function() return { spine_count = 40, chapters = {} } end
+    opened_menus = {}
+    Picker.show(plugin)
+    local long_menu = opened_menus[1]
+    check("长列表追加尾部确认行", long_menu ~= nil
+        and long_menu.item_table[#long_menu.item_table].text:find("开始翻译", 1, true) ~= nil)
+    check("长列表初始化时重建一次", long_menu and long_menu.updated == 1)
 end
 
 print(string.format("\n==== 章节选择器结果：%d 通过，%d 失败 ====", passed, failed))
