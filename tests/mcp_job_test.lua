@@ -1,0 +1,301 @@
+-- ============================================================
+-- P3-a：MCP 任务导出（设计 §10.2）
+-- Tools.split_text 的切分边界 / Epub.collect_segments 的段落与章节抽取 /
+-- Mcp.exportJob 的 job.json + state.json / Mcp.listJobs / job_id 校验
+-- Run: luajit tests/mcp_job_test.lua
+-- 依赖 KOReader 自带 lfs / json（KO_ROOT 可覆盖）；缺失时跳过。
+-- ============================================================
+local KO = os.getenv("KO_ROOT") or "/Applications/KOReader.app/Contents/koreader"
+local ffi = require("ffi")
+if not ffi.loadlib then ffi.loadlib = function(name) return ffi.load(name) end end
+package.path = KO .. "/?.lua;" .. KO .. "/common/?.lua;" .. KO .. "/frontend/?.lua;"
+    .. KO .. "/common/?/init.lua;" .. package.path
+package.cpath = KO .. "/?.so;" .. KO .. "/common/?.so;" .. KO .. "/?.dylib;" .. package.cpath
+local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+local ok_json = pcall(require, "json")
+if not ok_lfs or not ok_json then
+    print("SKIP: libkoreader-lfs / json unavailable"); os.exit(0)
+end
+
+local passed, failed = 0, 0
+local function check(name, cond, detail)
+    if cond then passed = passed + 1; print("  PASS:", name)
+    else failed = failed + 1; print("  FAIL:", name, detail or "") end
+end
+
+local ROOT = "/tmp/dt_mcp_job_test"
+os.execute('rm -rf "' .. ROOT .. '"')
+os.execute('mkdir -p "' .. ROOT .. '"')
+
+local data_dir = ROOT .. "/data"
+package.preload["datastorage"] = function()
+    return { getDataDir = function() return data_dir end }
+end
+package.preload["logger"] = function()
+    return { warn = function() end, err = function() end,
+        info = function() end, dbg = function() end }
+end
+package.preload["util"] = function()
+    return { makePath = function(path)
+        if not path or path == "" then return false end
+        if lfs.attributes(path, "mode") == "directory" then return true end
+        local prefix = path:sub(1, 1) == "/" and "" or "."
+        for component in path:gmatch("[^/]+") do
+            prefix = prefix .. "/" .. component
+            if lfs.attributes(prefix, "mode") ~= "directory" then
+                local ok = lfs.mkdir(prefix)
+                if not ok and lfs.attributes(prefix, "mode") ~= "directory" then
+                    return false
+                end
+            end
+        end
+        return lfs.attributes(path, "mode") == "directory"
+    end, trim = function(value)
+        return (tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+    end }
+end
+package.preload["dualtranslate_overlay"] = function() return {} end
+package.preload["dualtranslate_lock"] = function()
+    return { withBookLock = function(_, fn) return fn() end }
+end
+local ok_url, real_url = pcall(require, "socket.url")
+if ok_url and type(real_url) == "table" and real_url.unescape then
+    package.preload["socket.url"] = function() return real_url end
+else
+    package.preload["socket.url"] = function()
+        return { unescape = function(value) return tostring(value) end }
+    end
+end
+
+-- archiver stub：内存书，与 outline_test 同一套语义（父目录必须存在）
+local stub_books = {}
+package.preload["ffi/archiver"] = function()
+    return { Reader = { new = function()
+        local reader = { err = nil }
+        function reader:open(path)
+            self.book = stub_books[path]
+            self.pos = 0
+            if not self.book then self.err = "cannot open " .. tostring(path); return false end
+            return true
+        end
+        function reader:iterate()
+            self.pos = 0
+            return function()
+                self.pos = self.pos + 1
+                local name = self.book.ordered[self.pos]
+                if not name then return nil end
+                return { path = name, mode = "file", size = #(self.book.files[name] or "") }
+            end
+        end
+        function reader:extractToPath(key, dest)
+            local content = self.book.files[key]
+            if content == nil then self.err = "no such path"; return false end
+            local parent = dest:match("^(.*)/[^/]+$")
+            if parent and lfs.attributes(parent, "mode") ~= "directory" then
+                self.err = "no such directory"; return false
+            end
+            local file = io.open(dest, "wb")
+            if not file then self.err = "cannot write"; return false end
+            file:write(content)
+            file:close()
+            return true
+        end
+        function reader:close() end
+        return reader
+    end } }
+end
+
+package.loaded["ffi/archiver"] = nil
+local Tools = dofile("dualtranslate_tools.lua")
+package.loaded["dualtranslate_tools"] = Tools
+local Epub = dofile("dualtranslate_epub.lua")
+package.loaded["dualtranslate_epub"] = Epub
+local Mcp = dofile("dualtranslate_mcp.lua")
+package.loaded["dualtranslate_mcp"] = Mcp
+
+local function write_real(path, content)
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent then os.execute('mkdir -p "' .. parent .. '"') end
+    local file = io.open(path, "wb")
+    file:write(content)
+    file:close()
+end
+
+local function stub_book(path, entries)
+    local files, ordered = {}, {}
+    for _, entry in ipairs(entries) do
+        files[entry[1]] = entry[2]
+        ordered[#ordered + 1] = entry[1]
+    end
+    stub_books[path] = { files = files, ordered = ordered }
+    write_real(path, "stub-epub:" .. path)
+    return path
+end
+
+local CONTAINER = [[<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>]]
+
+local OPF = [[<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <manifest>
+    <item id="c1" href="chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="chap2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c3" href="chap3.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+    <itemref idref="c2"/>
+    <itemref idref="c3"/>
+  </spine>
+</package>]]
+
+local function xhtml(body)
+    return '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml">'
+        .. '<head><title>t</title></head><body>' .. body .. '</body></html>'
+end
+
+local long_paragraph = {}
+for index = 1, 60 do long_paragraph[#long_paragraph + 1] = "word" .. index end
+long_paragraph = table.concat(long_paragraph, " ")
+
+local BOOK = stub_book(ROOT .. "/books/job.epub", {
+    { "META-INF/container.xml", CONTAINER },
+    { "OEBPS/content.opf", OPF },
+    { "OEBPS/chap1.xhtml", xhtml("<h1>One</h1><p>First paragraph.</p><p>Second paragraph.</p>") },
+    { "OEBPS/chap2.xhtml", xhtml("<p>Chapter two content.</p>") },
+    { "OEBPS/chap3.xhtml", xhtml("<p>" .. long_paragraph .. "</p>") },
+})
+
+-- ============================================================
+print("== 1. Tools.split_text ==")
+do
+    local single = Tools.split_text("hello", 100)
+    check("短文本单块", #single == 1 and single[1] == "hello")
+    local chunks = Tools.split_text(long_paragraph, 120)
+    check("长文本多块", #chunks > 1)
+    check("切分不丢词", table.concat(chunks, " "):find("word1 ", 1, true) ~= nil
+        and table.concat(chunks, " "):find("word60", 1, true) ~= nil)
+    local cjk = string.rep("中文测试段落内容", 30)
+    local cjk_chunks = Tools.split_text(cjk, 60)
+    local boundary_ok = true
+    for _, chunk in ipairs(cjk_chunks) do
+        local first = chunk:byte(1)
+        if first and first >= 128 and first <= 191 then boundary_ok = false end
+    end
+    check("CJK 不切断 UTF-8", boundary_ok and #cjk_chunks > 1)
+    check("空文本", #Tools.split_text("", 10) == 1)
+end
+
+-- ============================================================
+print("== 2. Epub.collect_segments ==")
+do
+    local extracted, err = Epub.collect_segments{
+        book_path = BOOK, chapter_indexes = { 1, 3 }, max_chars = 200,
+        titles = { [1] = "第一章", [3] = "第三章" },
+    }
+    check("collect 成功", extracted ~= nil, tostring(err))
+    check("spine_count", extracted and extracted.spine_count == 3)
+    check("只导出所选章节", extracted and #extracted.chapters == 2)
+    check("章节标题来自 titles", extracted and extracted.chapters[1].title == "第一章")
+    local parents, parts = {}, 0
+    for _, segment in ipairs(extracted and extracted.segments or {}) do
+        check("selector 形状",
+            segment.selector:find('^DocFragment%[Source="OEBPS/chap%d%.xhtml"%] > body > ') ~= nil
+            and segment.selector:find(":nth%-of%-type%(%d+%)$") ~= nil)
+        check("xpointer 形状",
+            segment.xpointer:find("^/body/DocFragment%[?%d*%]?/?body/") ~= nil)
+        parents[segment.parent_id] = (parents[segment.parent_id] or 0) + 1
+        if segment.parent_total > 1 then parts = parts + 1 end
+    end
+    check("第一章三段（h1+p+p）", parents["s000001"] == 1 and parents["s000002"] == 1
+        and parents["s000003"] == 1)
+    check("长段落被切分", parts > 1)
+    -- Every parent's parts must be contiguous and total parent_total.
+    local grouped = {}
+    for _, segment in ipairs(extracted.segments) do
+        grouped[segment.parent_id] = grouped[segment.parent_id] or {}
+        table.insert(grouped[segment.parent_id], segment)
+    end
+    local parts_ok = true
+    for _, group in pairs(grouped) do
+        for position, segment in ipairs(group) do
+            if segment.part ~= position or segment.parent_total ~= #group then
+                parts_ok = false
+            end
+        end
+    end
+    check("part/parent_total 连续", parts_ok)
+    check("第一个 part 的 id 即 parent_id", extracted.segments[1].id == extracted.segments[1].parent_id)
+    -- A selection never leaks chapter 2.
+    local has_two = false
+    for _, chapter in ipairs(extracted.chapters) do
+        if chapter.index == 2 then has_two = true end
+    end
+    check("未选章节不出现", not has_two)
+end
+
+-- ============================================================
+print("== 3. Mcp.exportJob ==")
+do
+    local result, err = Mcp.exportJob{
+        book_path = BOOK, chapter_indexes = { 1, 2 }, source_lang = "en",
+        target_lang = "zh-Hans", titles = { [1] = "第一章", [2] = "第二章" },
+    }
+    check("export 成功", result ~= nil, tostring(err))
+    check("job_id 格式", result and result.job_id:match("^%d%d%d%d%d%d%d%d_%d%d%d%d%d%d_%d%d%d%d$") ~= nil)
+    -- Chapters 1 and 2: h1 + 2 paragraphs + 1 paragraph.
+    check("段数", result and result.segments == #result.job.segments and result.segments == 4)
+    check("job 文件落盘", result and Mcp.readJson(result.dir .. "/job.json") ~= nil)
+    local state = Mcp.loadState(result.job_id)
+    check("state 初始值", state and state.status == "exported"
+        and state.submitted == 0 and state.total == 4)
+    local job = Mcp.loadJob(result.job_id)
+    check("loadJob schema", job and job.schema == Mcp.JOB_SCHEMA)
+    check("book 元数据", job.book.device_path == BOOK and job.book.target_lang == "zh-Hans")
+    check("book 文件指纹", job.book.file_size > 0 and job.book.file_mtime > 0)
+    check("options 上限", job.options.max_chars_per_segment == 4500
+        and job.options.split_long_segments == true)
+    check("章节列表", #job.chapters == 2 and job.chapters[2].title == "第二章")
+
+    local list = Mcp.listJobs()
+    check("listJobs 命中", #list == 1 and list[1].job_id == result.job_id)
+    check("listJobs 字段", list[1].total == 4 and list[1].status == "exported"
+        and list[1].book_path == BOOK)
+
+    -- Second export must not reuse the id.
+    local second = Mcp.exportJob{ book_path = BOOK, chapter_indexes = { 2 } }
+    check("新任务新编号", second and second.job_id ~= result.job_id)
+    local ids = {}
+    for _, item in ipairs(Mcp.listJobs()) do ids[item.job_id] = true end
+    check("listJobs 收全两个任务", #Mcp.listJobs() == 2
+        and ids[result.job_id] and ids[second.job_id])
+end
+
+-- ============================================================
+print("== 4. job_id 校验 ==")
+do
+    check("非法编号拒绝", Mcp.loadJob("../etc") == nil)
+    check("空编号拒绝", Mcp.loadJob("") == nil)
+    check("合法编号通过校验", Mcp.validJobId("20261115_120000_0001"))
+    check("斜杠拒绝", not Mcp.validJobId("2026/11"))
+end
+
+-- ============================================================
+print("== 5. 临时目录清理 ==")
+do
+    local leftovers = {}
+    local dir = data_dir .. "/cache/dualtranslate"
+    if lfs.attributes(dir, "mode") == "directory" then
+        for name in lfs.dir(dir) do
+            if name:match("^job_") then leftovers[#leftovers + 1] = name end
+        end
+    end
+    check("无 job 临时目录残留", #leftovers == 0, table.concat(leftovers, ","))
+end
+
+print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))
+os.exit(failed == 0 and 0 or 1)
