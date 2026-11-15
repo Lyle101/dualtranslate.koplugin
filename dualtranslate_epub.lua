@@ -1170,4 +1170,115 @@ function Epub.outline(book_path, ...)
     return result
 end
 
+-- ---------------------------------------------------------------------------
+-- MCP job extraction (design 10.2)
+--
+-- The device exports the job because selectors must match CREngine's own
+-- DocFragment tree: a PC-side EPUB parser would drift and paste translations
+-- onto the wrong paragraphs.  Candidates therefore come from
+-- collect_overlay_candidates, the exact parser the overlay uses.
+--
+-- Long paragraphs are split at max_chars so no agent receives a 10k-character
+-- segment; every part keeps the parent's selector/xpointer and carries
+-- part/parent_total so the importer can stitch them back in order (10.2).
+-- ---------------------------------------------------------------------------
+function Epub.collect_segments(opts)
+    opts = opts or {}
+    local book_path = opts.book_path
+    if type(book_path) ~= "string" or book_path == "" then return nil, "缺少书路径" end
+    if not book_path:lower():match("%.epub$") then
+        return nil, "MCP 任务导出目前仅支持 EPUB"
+    end
+    local max_chars = math.max(200, tonumber(opts.max_chars) or 4500)
+    local nonce = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
+    local work_dir = DataStorage:getDataDir() .. "/cache/dualtranslate/job_" .. nonce
+    if not Tools.mkdir_p(work_dir) then return nil, "无法创建临时目录" end
+    local function cleanup() Tools.rmtree(work_dir) end
+
+    local first = Tools.extract_entries(book_path, work_dir,
+        { ["META-INF/container.xml"] = true })
+    local container_path = first and first["META-INF/container.xml"]
+    local container = container_path and read_file(container_path)
+    if not container then
+        cleanup()
+        return nil, "无法解包 EPUB（可能受 DRM 保护）"
+    end
+    local opf_path = container_opf_path(container)
+    if not opf_path then cleanup(); return nil, "找不到 OPF 路径" end
+    local second = Tools.extract_entries(book_path, work_dir, { [opf_path] = true })
+    local opf_file = second and second[opf_path]
+    local opf = opf_file and read_file(opf_file)
+    if not opf then cleanup(); return nil, "找不到 OPF 文件" end
+    local package = parse_package(opf, opf_path)
+    local spine = package.spine
+    if #spine == 0 then cleanup(); return nil, "找不到可读取的 spine 项" end
+
+    local chapter_indexes
+    if type(opts.chapter_indexes) == "table" and #opts.chapter_indexes > 0 then
+        chapter_indexes = normalize_indexes(opts.chapter_indexes, #spine)
+    else
+        chapter_indexes = {}
+        for index = 1, #spine do chapter_indexes[#chapter_indexes + 1] = index end
+    end
+    if #chapter_indexes == 0 then cleanup(); return nil, "没有可导出的章节" end
+
+    local wanted = {}
+    for _, index in ipairs(chapter_indexes) do
+        if spine[index] then wanted[spine[index]] = true end
+    end
+    local third = Tools.extract_entries(book_path, work_dir, wanted)
+    if not third then cleanup(); return nil, "无法读取章节文件" end
+
+    local chapters, segments = {}, {}
+    local unreadable = 0
+    for _, index in ipairs(chapter_indexes) do
+        local relative = spine[index]
+        local document = relative and third[relative] and read_file(third[relative])
+        if not document then
+            unreadable = unreadable + 1
+        else
+            local candidates = collect_overlay_candidates(document, relative, index, false)
+            if #candidates == 0 then
+                candidates = collect_overlay_candidates(document, relative, index, true)
+            end
+            local title = (type(opts.titles) == "table" and opts.titles[index])
+                or string.format("第 %d 章", index)
+            chapters[#chapters + 1] = { index = index, title = title }
+            for _, candidate in ipairs(candidates) do
+                local parts = Tools.split_text(candidate.source, max_chars)
+                if #parts == 0 then parts = { candidate.source } end
+                local parent_id = string.format("s%06d", #segments + 1)
+                for part_index, part_text in ipairs(parts) do
+                    segments[#segments + 1] = {
+                        id = string.format("s%06d", #segments + 1),
+                        parent_id = parent_id,
+                        part = part_index,
+                        parent_total = #parts,
+                        chapter_index = index,
+                        chapter_title = title,
+                        selector = candidate.selector,
+                        xpointer = candidate.xpointer,
+                        source = part_text,
+                    }
+                end
+            end
+        end
+    end
+    cleanup()
+    if #segments == 0 then
+        if unreadable > 0 then
+            return nil, "无法读取所选章节内容（EPUB 文本可能已损坏）"
+        end
+        return nil, "所选章节没有可导出的段落"
+    end
+    return {
+        book_path = book_path,
+        spine_count = #spine,
+        chapters = chapters,
+        segments = segments,
+        unreadable = unreadable,
+        max_chars_per_segment = max_chars,
+    }
+end
+
 return Epub

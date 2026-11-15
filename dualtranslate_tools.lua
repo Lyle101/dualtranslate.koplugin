@@ -56,6 +56,52 @@ function Tools.rmtree(path)
     return lfs.attributes(path, "mode") == nil
 end
 
+-- Split a paragraph into request-sized chunks.  Two callers need exactly the
+-- same boundary rules: the reader (keeping a request below the engine limit)
+-- and the MCP job exporter (design 10.2 max_chars_per_segment), because the
+-- parts of one paragraph are stitched back together on import.  Cuts prefer
+-- whitespace or sentence punctuation near the limit, then rewind to a UTF-8
+-- character boundary so no chunk starts or ends inside a multi-byte rune.
+function Tools.split_text(text, limit)
+    text = tostring(text or "")
+    limit = math.max(1, tonumber(limit) or 1)
+    if #text <= limit then return { text } end
+    local chunks = {}
+    local rest = text
+    local function to_char_boundary(cut)
+        while cut > 1 do
+            local byte = rest:byte(cut)
+            if not byte or byte < 128 or byte > 191 then
+                if byte and byte >= 192 then cut = cut - 1 end
+                break
+            end
+            cut = cut - 1
+        end
+        return cut
+    end
+    while #rest > limit do
+        local cut = limit
+        local search_from = math.max(1, limit - 160)
+        for index = limit, search_from, -1 do
+            local character = rest:sub(index, index)
+            if character:match("[%s%.,;:%?!]") then
+                cut = index
+                break
+            end
+        end
+        cut = to_char_boundary(cut)
+        local part = util.trim(rest:sub(1, cut))
+        if part == "" then
+            cut = to_char_boundary(limit)
+            part = rest:sub(1, cut)
+        end
+        chunks[#chunks + 1] = part
+        rest = util.trim(rest:sub(cut + 1))
+    end
+    if rest ~= "" then chunks[#chunks + 1] = rest end
+    return chunks
+end
+
 -- Normalize a zip member name and reject absolute paths and ".." escapes.
 local function safe_member(entry_path)
     local normalized = tostring(entry_path or ""):gsub("\\", "/")

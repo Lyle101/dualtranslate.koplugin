@@ -21,6 +21,12 @@ Providers.list = {
     { id = "google_free", name = "Google（免费）", requires_api_key = false,
       hint = "需能访问 Google · 支持批量",
       description = _("Google's free web endpoint; no API key, batch capable") },
+    -- Not a translation service: it exports the selected chapters as a job
+    -- for the MCP server on the PC.  It still belongs to the engine list
+    -- because 'translation engine' means 'where the text is translated'.
+    { id = "mcp_external", name = "MCP 外部翻译", requires_api_key = false,
+      hint = "导出任务给电脑端",
+      description = _("Export chapters as a job for an external AI agent") },
 }
 
 -- ---------------------------------------------------------------------------
@@ -326,6 +332,10 @@ function Providers.translate(provider_id, text, source_lang, target_lang)
         return Providers.translate_microsoft_free(text, source_lang, target_lang)
     elseif provider_id == "google_free" then
         return Providers.translate_google_free(text, source_lang, target_lang)
+    elseif provider_id == "mcp_external" then
+        -- No device-side request path exists for this engine: exporting is
+        -- the only entry point (design 10.1.1).
+        return nil, { message = _("MCP 外部翻译需在电脑端完成，请用「MCP 外部翻译 → 导出任务」") }
     end
     return nil, { message = "未知翻译服务，请选择 KOReader 内置、Microsoft Edge（免费）或 Google（免费）" }
 end

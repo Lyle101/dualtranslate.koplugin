@@ -9,7 +9,6 @@ local UIManager = require("ui/uimanager")
 local Event = require("ui/event")
 local logger = require("logger")
 local _ = require("gettext")
-local util = require("util")
 local Trapper = require("ui/trapper")
 local DataStorage = require("datastorage")
 local Cache = require("dualtranslate_cache")
@@ -35,50 +34,11 @@ end
 function Reader.attach(plugin)
     local dualtranslate = plugin
 
+-- Chunk boundaries live in Tools so the MCP job exporter cuts long
+-- paragraphs exactly the way the reader does (design 10.2: parts are stitched
+-- back together on import, so one shared rule is required).
 function dualtranslate:splitTranslationText(text, limit)
-    if #text <= limit then return { text } end
-    local chunks = {}
-    local rest = text
-    -- Rewind a split point to the last byte boundary: when cut lands inside
-    -- a multi-byte UTF-8 character, back up to the character's start byte
-    -- and then one more byte, so neither chunk ends nor the next chunk
-    -- begins with a dangling continuation byte.
-    local function to_char_boundary(cut)
-        while cut > 1 do
-            local byte = rest:byte(cut)
-            if not byte or byte < 128 or byte > 191 then
-                if byte and byte >= 192 then cut = cut - 1 end
-                break
-            end
-            cut = cut - 1
-        end
-        return cut
-    end
-    while #rest > limit do
-        local cut = limit
-        local search_from = math.max(1, limit - 160)
-        -- Prefer whitespace or sentence punctuation near the limit, so that
-        -- English words and sentences are not cut in the middle.
-        for i = limit, search_from, -1 do
-            local character = rest:sub(i, i)
-            if character:match("[%s%.,;:%?!]" ) then
-                cut = i
-                break
-            end
-        end
-        -- If there is no whitespace (for example, a CJK paragraph), avoid
-        -- splitting in the middle of a UTF-8 byte sequence.
-        cut = to_char_boundary(cut)
-        local part = util.trim(rest:sub(1, cut))
-        if part == "" then
-            cut = to_char_boundary(limit)
-            part = rest:sub(1, cut)
-        end
-        table.insert(chunks, part)
-        rest = util.trim(rest:sub(cut + 1))
-    end
-    if rest ~= "" then table.insert(chunks, rest) end
-    return chunks
+    return Tools.split_text(text, limit)
 end
 
 -- Whole-book translation uses DualTranslate's provider registry directly and
