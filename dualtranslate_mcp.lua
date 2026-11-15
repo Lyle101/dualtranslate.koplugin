@@ -142,7 +142,7 @@ function Mcp.listJobs()
                     created_at = tonumber(job.created_at) or 0,
                     book_path = job.book and job.book.device_path,
                     title = job.book and job.book.title,
-                    chapters = #(job.chapters or {}),
+                    chapter_count = #(job.chapters or {}),
                     total = #job.segments,
                     status = job_state.status or "exported",
                     provider_id = job_state.provider_id,

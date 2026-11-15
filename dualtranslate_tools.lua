@@ -11,9 +11,20 @@
 -- plain string and never interpolated into a shell command.
 
 local lfs = require("libs/libkoreader-lfs")
-local Archiver = require("ffi/archiver")
 local util = require("util")
 local logger = require("logger")
+
+-- Archiver is required lazily: the MCP inbox commands (list-jobs / put /
+-- import / list-providers) never touch an EPUB, and on a desktop checkout
+-- libarchive may not be on the loader path.  Only the two extraction paths
+-- need it, and they report a readable error when it is unavailable.
+local function load_archiver()
+    local ok, Archiver = pcall(require, "ffi/archiver")
+    if not ok or type(Archiver) ~= "table" or not Archiver.Reader then
+        return nil, "EPUB 解包库不可用（ffi/archiver）"
+    end
+    return Archiver
+end
 
 local Tools = {}
 
@@ -122,6 +133,8 @@ end
 function Tools.extract_entries(archive_path, dest_dir, wanted)
     if type(wanted) ~= "table" or next(wanted) == nil then return {} end
     if not Tools.mkdir_p(dest_dir) then return nil, "cannot create " .. tostring(dest_dir) end
+    local Archiver, archiver_err = load_archiver()
+    if not Archiver then return nil, archiver_err end
     local arc = Archiver.Reader:new()
     if not arc:open(archive_path) then
         logger.warn("dualtranslate: cannot open archive:", archive_path, tostring(arc.err))
@@ -158,6 +171,8 @@ end
 -- Path-traversal safe (rejects absolute members and ".." components).
 function Tools.unzip_to(archive_path, dest_dir)
     if not Tools.mkdir_p(dest_dir) then return false end
+    local Archiver = load_archiver()
+    if not Archiver then return false end
     local arc = Archiver.Reader:new()
     if not arc:open(archive_path) then
         logger.warn("dualtranslate: cannot open archive:", archive_path, tostring(arc.err))

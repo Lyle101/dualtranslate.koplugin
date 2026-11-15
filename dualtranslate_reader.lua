@@ -548,7 +548,7 @@ function dualtranslate:showMcpJob(item)
     dialog = ButtonDialog:new{
         title = string.format("%s\n%s：%s\n%s：%d  %s：%d\n%s：%s",
             item.job_id, _("状态"), tostring(item.status),
-            _("章节"), item.chapters or 0, _("段落"), item.total or 0,
+            _("章节"), item.chapter_count or 0, _("段落"), item.total or 0,
             _("模型"), tostring(item.model_name or "-")),
         buttons = {{
             {

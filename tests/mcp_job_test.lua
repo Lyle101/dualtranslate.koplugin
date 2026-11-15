@@ -264,7 +264,7 @@ do
     local list = Mcp.listJobs()
     check("listJobs 命中", #list == 1 and list[1].job_id == result.job_id)
     check("listJobs 字段", list[1].total == 4 and list[1].status == "exported"
-        and list[1].book_path == BOOK)
+        and list[1].book_path == BOOK and list[1].chapter_count == 2)
 
     -- Second export must not reuse the id.
     local second = Mcp.exportJob{ book_path = BOOK, chapter_indexes = { 2 } }
