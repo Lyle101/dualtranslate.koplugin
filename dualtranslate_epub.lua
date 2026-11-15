@@ -50,6 +50,11 @@ local function dirname(path)
 end
 
 local function html_to_text(html)
+    -- CDATA is text, not markup.  InDesign and several Chinese EPUB
+    -- converters wrap TOC labels as <![CDATA[Chapter One]]>; stripping tags
+    -- first would delete the whole label and the outline would fall back to
+    -- "第 N 节".
+    html = html:gsub("<!%[CDATA%[(.-)%]%]>", "%1")
     -- Ruby readings are metadata for the base Japanese text, not additional
     -- words to send to the translator.  Keeping <rt> content used to turn e.g.
     -- 素人 into "素人 しろうと", which confused sentence translation and
@@ -860,9 +865,12 @@ local function nav_toc(tree)
             end
         end
     end
-    for _, child in ipairs(chosen.children) do
-        if child.name == "ol" then walk_list(child, 0) end
-    end
+    -- The TOC list is normally a direct child of <nav>, but real-world EPUB3
+    -- files wrap it (<nav epub:type="toc"><div><ol>); only looking at direct
+    -- children turned those books into a spine-only outline ("第 N 节").
+    -- collect_elements walks depth-first, so [1] is the outer list.
+    local list = collect_elements(chosen, "ol", {})[1]
+    if list then walk_list(list, 0) end
     return entries
 end
 

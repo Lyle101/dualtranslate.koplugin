@@ -494,6 +494,56 @@ do
 end
 
 -- ============================================================
+print("== 3b. 目录解析回归：CDATA 标题 / div 包裹的 nav ==")
+do
+    -- <![CDATA[...]]> 里的标题不能被当成标签删除（InDesign、部分中文
+    -- EPUB 转换器会这样包裹目录标题）。这里必须用 [=[ ]=] 长括号，
+    -- 因为 CDATA 结尾的 "]]>" 会提前终止 [[ ]] 字符串。
+    local cdata = stub_book(ROOT .. "/books/ncx_cdata.epub", {
+        { "META-INF/container.xml", CONTAINER },
+        { "OEBPS/content.opf", opf({
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+            '<item id="c1" href="Text/ch01.xhtml" media-type="application/xhtml+xml"/>',
+            '<item id="c2" href="Text/ch02.xhtml" media-type="application/xhtml+xml"/>',
+        }, { "c1", "c2" }, "ncx") },
+        { "OEBPS/toc.ncx", [=[<ncx><navMap>
+            <navPoint id="a"><navLabel><text><![CDATA[Chapter One]]></text></navLabel>
+              <content src="Text/ch01.xhtml"/></navPoint>
+            <navPoint id="b"><navLabel><text>Chapter Two</text></navLabel>
+              <content src="Text/ch02.xhtml"/></navPoint>
+        </navMap></ncx>]=] },
+    })
+    local cdata_outline = Epub.outline(cdata)
+    local cdata_title = cdata_outline and cdata_outline.chapters[1]
+        and cdata_outline.chapters[1].title
+    check("CDATA 标题保留", cdata_title == "Chapter One", tostring(cdata_title))
+
+    -- <nav epub:type="toc"><div><ol> 结构（不规范但真实存在）不能退回
+    -- spine 目录，否则整本书的章节标题全变成「第 N 节」。
+    local wrapped = stub_book(ROOT .. "/books/nav_wrapped.epub", {
+        { "META-INF/container.xml", CONTAINER },
+        { "OEBPS/content.opf", opf({
+            '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+            '<item id="c1" href="Text/ch01.xhtml" media-type="application/xhtml+xml"/>',
+            '<item id="c2" href="Text/ch02.xhtml" media-type="application/xhtml+xml"/>',
+        }, { "c1", "c2" }) },
+        { "OEBPS/nav.xhtml", [[<html xmlns="http://www.w3.org/1999/xhtml"
+            xmlns:epub="http://www.idpf.org/2007/ops"><body>
+          <nav epub:type="toc"><h2>Contents</h2><div class="toc"><ol>
+            <li><a href="Text/ch01.xhtml">Wrapped One</a></li>
+            <li><a href="Text/ch02.xhtml">Wrapped Two</a></li>
+          </ol></div></nav></body></html>]] },
+    })
+    local wrapped_outline, wrapped_err = Epub.outline(wrapped)
+    check("div 包裹的 nav ol 仍可解析", wrapped_outline ~= nil
+        and wrapped_outline.source == "nav" and #wrapped_outline.chapters == 2,
+        tostring(wrapped_err))
+    local wrapped_title = wrapped_outline and wrapped_outline.chapters[1]
+        and wrapped_outline.chapters[1].title
+    check("div 包裹的 nav 标题正确", wrapped_title == "Wrapped One", tostring(wrapped_title))
+end
+
+-- ============================================================
 print("== 4. 无目录：spine 回退 ==")
 do
     local book = stub_book(ROOT .. "/books/no_toc.epub", {

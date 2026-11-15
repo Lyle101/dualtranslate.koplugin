@@ -55,30 +55,33 @@ KOReader 的插件目录是安装根目录下的 `plugins/` 文件夹，目录�
 
 ### 验证安装
 
-重启后打开任意 EPUB，菜单栏出现 **DualTranslate** 菜单即安装成功；菜单项显示「翻译服务：Microsoft Edge（免费）」为默认状态。
+重启后打开任意 EPUB，菜单栏出现 **DualTranslate** 菜单即安装成功；菜单项显示「翻译引擎：Microsoft Edge（免费）」为默认状态。
 
 ### 升级注意事项
 
 - 升级只替换 `plugins/dualtranslate.koplugin/` 目录即可；译文、缓存、队列与设置保存在 KOReader 数据目录，**不会丢失**。
 - 若从旧版 KoTranslate 升级：旧配置 `dualtranslate_configuration.lua` 会自动迁移；旧译文数据不会被读取，需重新翻译（overlay 方案与旧版不兼容）。
-- 本版 P0 修复后，缓存查询与 overlay 续跑会记录 `provider`。升级前已存在的 overlay 没有 `provider` 字段，会按当前「翻译服务」认领一次；如果希望按新服务强制重译，请先执行「清除本书译文」。
-- 当前 overlay 仍是单文件：切换服务后，新服务只要成功写入 checkpoint，旧服务的 overlay 条目就会被替换；想保留旧服务译文，请先备份 `overlay.json` 或等后续按服务分文件的版本。新服务请求全部失败时不会写空 checkpoint 覆盖旧数据。
+- 本版 P0 修复后，缓存查询与 overlay 续跑会记录 `provider`。升级前已存在的 overlay 没有 `provider` 字段，会按当前「翻译引擎」认领一次；如果希望按新服务强制重译，请先执行「清除本书译文」。
+- 译文按服务分文件保存（`manifest.json` + `entries/<provider>.json`）：切换「翻译引擎」不再覆盖其他服务已有的译文，可以同时保留多个服务的译本，并在「显示译文」里选择显示哪一个。
+- 旧版单文件 `overlay.json` 会在打开书时自动迁移为 v3 格式（原文件备份为 `overlay.v2.bak`）；某个服务的请求全部失败时不会写入空 checkpoint 覆盖已有数据。
 
 ## 使用
 
 打开 EPUB 后，菜单栏出现 **DualTranslate** 菜单：
 
 - 第一项为插件开关（复选框）；停用不会删除译文、缓存、队列或设置。
-- 选择「翻译服务」「源语言」「目标语言」。
+- 选择「翻译引擎」「源语言」「目标语言」。
 - 「翻译本书」子菜单包含三种范围：「翻译整本」「翻译当前章节」「选择章节…」（多选章节后一次性翻译，不影响后续翻页）。
 - 勾选「逐章模式」后，「翻译当前章节」会随翻页自动续译后续章节；整书翻译不受该开关影响。
 - 「翻译队列」查看进度与取消任务。
-- 「显示译文」切换译文可见性；「译文字号/字体/颜色」调整译文样式。
-- 「清除本书译文」彻底删除本书翻译数据。
+- 「显示译文」切换译文可见性；子菜单可按服务选择显示哪一个译本，并控制缺失段落是否回退到其他服务。
+- 「管理译文」按服务查看段数、删除某个服务的译文，或对本书译文数据执行修复。
+- 「译文字号/字体/颜色」调整译文样式。
+- 「清除本书译文」彻底删除本书（所有服务）的翻译数据。
 
 ## 数据位置
 
-- 译文覆盖层：KOReader 数据目录 `cache/dualtranslate/books/<hash>/overlay.json`
+- 译文数据：KOReader 数据目录 `cache/dualtranslate/books/<hash>/` 下的 `manifest.json`（服务列表、完成度、显示选择）与 `entries/<provider>.json`（各服务的译文条目）；旧版 `overlay.json` 迁移后保留为 `overlay.v2.bak`
 - 译文数据库：KOReader 数据目录 `dualtranslate_cache.sqlite3`（WAL 模式）
 - 进度文件：`cache/dualtranslate/progress_*.txt`
 - 配置：KOReader 原生 `settings/dualtranslate.lua`（`dualtranslate_` 前缀键），旧版 `dualtranslate_configuration.lua` 自动迁移
