@@ -64,6 +64,7 @@ KOReader 的插件目录是安装根目录下的 `plugins/` 文件夹，目录�
 - 升级只替换 `plugins/dualtranslate.koplugin/` 目录即可；译文、缓存、队列与设置保存在 KOReader 数据目录，**不会丢失**。
 - 若从旧版 KoTranslate 升级：旧配置 `dualtranslate_configuration.lua` 会自动迁移；旧译文数据不会被读取，需重新翻译（overlay 方案与旧版不兼容）。
 - 本版 P0 修复后，缓存查询与 overlay 续跑会记录 `provider`。升级前已存在的 overlay 没有 `provider` 字段：打开书时先看它自己有没有记录，没有再看这本书在缓存库里是否只有一个服务——唯一才认领给该服务，否则记到 `legacy`（不猜）；如果希望按新服务强制重译，请先执行「管理译文 → 删除本书全部译文」。
+  例外：如果翻译任务在书被打开之前就消费了这份旧 overlay（队列续跑），`Epub.translate_overlay` 会按**当前引擎**认领并在写入时固化进 v3 entries——这条老路径只在「书没打开过但要续跑」时出现。
 - 译文按服务分文件保存（`manifest.json` + `entries/<provider>.json`）：切换「翻译引擎」不再覆盖其他服务已有的译文，可以同时保留多个服务的译本，并在「显示译文」里选择显示哪一个。
 - 旧版单文件 `overlay.json` 会在打开书时自动迁移为 v3 格式（原文件备份为 `overlay.v2.bak`）；某个服务的请求全部失败时不会写入空 checkpoint 覆盖已有数据。
 

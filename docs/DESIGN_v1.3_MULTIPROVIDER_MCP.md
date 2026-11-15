@@ -4,7 +4,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.5（表头对齐已落地阶段） |
+| 文档版本 | 0.6（checkpoint 节流） |
 | 日期 | 2026-11-15 |
 | 适用代码 | DualTranslate `v3.0.1`（P0 / P1 / P2 已合入；P3 未开工） |
 | 目标版本 | `v3.0.1` 已发布多服务 + 章节选择；MCP 外部翻译仍按 `v1.3.0` 规划 |
@@ -20,6 +20,7 @@
 | 0.3 | 2026-11-14 | 第二轮评审：缓存命中补定位行（A1）、SSH 双 key 拆分（A2）、`reconcile` 不再仅凭「DB 无行」删 entries（A3）、`storeForBook` 统一 upsert（A4）、`reload.signal` 改用单调序号（A5）、`complete` 增加 `spine_count=0` 边界（A6）、迁移备份强制 checkpoint（A7）；统一 `book_size`/`book_mtime` 口径；清理与非目标重复的开放问题；性能指标补测量口径 |
 | 0.4 | 2026-11-14 | 第三轮评审：补全 SSH 写入链路（forced command 经 `SSH_ORIGINAL_COMMAND` 传参、新增 `dtctl put` 上传通道）；§11.1 diff 与 §11.4 测试断言对齐实际提交；§2.3/§2.6 现状更新到 P0 后；`dtctl.sh` 导出 `KO_ROOT`；logger 重定向不再吞首参；只读 key chroot 路径/`dt_list_providers` 路由/SCP 回退措辞修正；`reload.signal` 增加 `op` 字段区分导入/删除/显示切换 |
 | 0.5 | 2026-11-15 | P0/P1/P2 全部落地（`v3.0.1`）后对齐表头：适用代码、状态、代码状态三行改为「P0/P1/P2 已实施，P3 未开工」；正文设计与剩余 P3 章节不变 |
+| 0.6 | 2026-11-15 | 真机实测 checkpoint 成本（5,000 段写 ~938 ms / 读 ~632 ms）后落地节流：`translate_overlay` 改为每 5 批或 60 s 写一次，§2.2 数据流与 §6.3 性能硬化同步；ndjson 仍留 P4 |
 
 **阅读约定**
 
@@ -106,7 +107,7 @@
       → 解包 EPUB、抽取候选段落
       → Providers.translate / translate_batch
       → Cache.lookupForBook / storeForBook
-      → 每批写入 overlay.json
+      → 每 5 批（或 60 s）写一次 checkpoint（6.3）
   → Overlay.buildCss() → document:setStyleSheet()
 ```
 
@@ -739,9 +740,10 @@ local slug = provider_id:gsub("[^%w._-]", "_")  -- mcp:gpt-5 -> mcp_gpt-5
 **性能硬化（可选，P4）：**
 
 - 触发条件：单 provider entries 文件 > 5 MB，或 checkpoint 写入耗时 > 500 ms。
-- 方案：翻译过程中改用 `entries/<provider>.ndjson` 追加日志，每行一个 entry；加载时逐行解析，忽略最后一行截断；任务完成后压缩回 `.json`。
-- 删除/导入需同时处理 `.json` 与 `.ndjson`；以 `.json` 优先。
-- 这样避免每个 batch 重写整个大文件，同时保留断点续跑能力。
+- 实测（PW2，`Overlay.saveEntries` + `loadEntries` 各 3 次）：1,000 段 ≈ 0.4 MB → 写 181/188/183 ms、读 132/130/121 ms；5,000 段 ≈ 2.2 MB → 写 ~938 ms、读 ~632 ms。**2.2 MB 就已越过 500 ms 触发线。**
+- 已落地（`v3.0.1` 之后，`translate_overlay`）：checkpoint 从「每批」改为「每 5 批或 60 秒」一次，`batch_size = 48`。崩溃代价只是 overlay 增量——这些段落已写进 SQLite（`storeForBook`），续跑时全部命中缓存、不发网络请求。5,000 段由 ~105 次降到 ~21 次，1 万段由 ~208 次降到 ~42 次。
+- 剩余（P4）：翻译过程中改用 `entries/<provider>.ndjson` 追加日志，每行一个 entry；加载时逐行解析，忽略最后一行截断；任务完成后压缩回 `.json`。删除/导入需同时处理 `.json` 与 `.ndjson`；以 `.json` 优先。
+- ndjson 与「降低频率」不冲突：前者把单次成本从 O(全书) 降到 O(本批)，后者把次数降一个量级；已落地的频率调整不放宽本节的触发条件。
 
 ### 6.4 设置与显示选择
 
