@@ -234,6 +234,22 @@ do
     local ok_out, ok_code = run("", "SSH_ORIGINAL_COMMAND='list-jobs'")
     local ok_data = decode_single_line(ok_out)
     check("合法 forced command 通过", ok_code == 0 and ok_data and ok_data.ok == true)
+
+    -- B2: a book path containing spaces must survive the command string.
+    local spaced_book = ROOT .. "/book with space.epub"
+    write_file(spaced_book, string.rep("x", 64))
+    local spaced_out, spaced_code = run("",
+        "SSH_ORIGINAL_COMMAND='list-providers --book \"" .. spaced_book
+        .. "\" --target zh-Hans'")
+    local spaced_data = decode_single_line(spaced_out)
+    check("引号内空格路径可用", spaced_code == 0 and spaced_data and spaced_data.ok == true,
+        spaced_out)
+
+    local unclosed, unclosed_code = run("",
+        "SSH_ORIGINAL_COMMAND='list-providers --book \"/tmp/x --target zh-Hans'")
+    local unclosed_data = decode_single_line(unclosed)
+    check("未闭合引号拒绝", unclosed_code == 2 and unclosed_data
+        and unclosed_data.code == "INVALID_ARGUMENT")
 end
 
 print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))

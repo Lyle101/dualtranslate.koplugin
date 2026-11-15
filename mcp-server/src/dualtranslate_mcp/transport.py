@@ -79,40 +79,77 @@ class LocalTransport:
         return device_path
 
 
+def parse_sftp_ls(output: str) -> list[str]:
+    """Parse the stdout of `sftp -b -`.
+
+    The batch is echoed with a "sftp> " prompt and `ls -1 <absolute>` prints
+    absolute paths, so both the echo and the directory part must be stripped.
+    """
+    names = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith("sftp>"):
+            continue
+        name = line.rstrip("/").rsplit("/", 1)[-1]
+        if name and name not in (".", ".."):
+            names.append(name)
+    return sorted(set(names))
+
+
 class SshTransport:
     """OpenSSH based transport: SFTP for reads, dtctl for writes.
 
-    Uses the system ssh/sftp binaries so keys, known_hosts and agent
-    configuration stay under the user's control.  Host key checking is always
-    on (design 10.3 forbids StrictHostKeyChecking=no).
+    A key is mandatory.  Falling back to the default identity would silently
+    use the unrestricted login key and defeat the read/write split (10.3).
+    The read key is optional: without it, read commands go through the write
+    key, which is still locked to dtctl by the forced command.
     """
 
     def __init__(self, config: Config):
         self.config = config
         if not shutil.which("ssh") or not shutil.which("sftp"):
             raise TransportError("ssh/sftp binaries not found")
+        if not config.write_key:
+            raise TransportError("device.write_key is not configured")
+        self.write_key_path = Path(config.write_key).expanduser()
+        if not self.write_key_path.exists():
+            raise TransportError(f"write key not found: {self.write_key_path}")
+        if config.read_key:
+            self.read_key_path = Path(config.read_key).expanduser()
+            if not self.read_key_path.exists():
+                raise TransportError(f"read key not found: {self.read_key_path}")
+        else:
+            self.read_key_path = self.write_key_path
 
-    def _read_key(self) -> list[str]:
-        if not self.config.read_key:
-            return []
-        return ["-i", str(Path(self.config.read_key).expanduser())]
+    def _key_args(self, read: bool) -> list[str]:
+        return ["-i", str(self.read_key_path if read else self.write_key_path)]
 
-    def _write_key(self) -> list[str]:
-        if not self.config.write_key:
-            return []
-        return ["-i", str(Path(self.config.write_key).expanduser())]
+    def _run(self, command: list[str], input_bytes: bytes | None = None):
+        try:
+            return subprocess.run(
+                command, input=input_bytes, capture_output=True,
+                timeout=self.config.timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise TransportError(
+                f"ssh command timed out after {self.config.timeout}s"
+            ) from error
 
     def _chroot_path(self, remote_path: str) -> str:
-        # The read key is chrooted to mcp/jobs (10.3): device-absolute paths
-        # must be made relative before sftp can see them.  Anything outside the
-        # chroot is a bug, not something to silently rewrite.
+        # The read key is not chrooted on the device (the filesystem is a
+        # world-writable FUSE mount, so ChrootDirectory is impossible), but the
+        # server still only ever asks for paths below mcp/jobs.
+        if not remote_path.startswith(self.config.ko_root):
+            raise TransportError(
+                f"path outside the koreader root: {remote_path}"
+            )
         root = self.config.jobs_root.rstrip("/")
         if remote_path == root:
             return "."
         if remote_path.startswith(root + "/"):
             return remote_path[len(root) + 1:]
         raise TransportError(
-            f"path outside the read-only chroot ({root}): {remote_path}"
+            f"path outside the job directory ({root}): {remote_path}"
         )
 
     # sftp -b is not a shell: quoting rules differ and a newline starts a new
@@ -127,54 +164,49 @@ class SshTransport:
             )
         return relative
 
+    def _sftp(self, batch: str) -> str:
+        command = ["sftp", "-q", "-b", "-"] + self._key_args(read=True)
+        command += ["-P", str(self.config.port),
+                    f"{self.config.user}@{self.config.host}"]
+        result = self._run(command, batch.encode())
+        if result.returncode != 0:
+            raise TransportError(
+                f"sftp failed: {result.stderr.decode(errors='replace').strip()}"
+            )
+        return result.stdout.decode(errors="replace")
+
     def read_text(self, remote_path: str) -> str:
         remote_path = self._sftp_path(remote_path)
         with tempfile.NamedTemporaryFile(delete=False) as handle:
             local = handle.name
         try:
-            batch = f"get {remote_path} {local}\n"
-            command = ["sftp", "-q", "-b", "-"] + self._read_key()
-            command += ["-P", str(self.config.port), f"{self.config.user}@{self.config.host}"]
-            result = subprocess.run(command, input=batch.encode(), capture_output=True)
-            if result.returncode != 0:
-                raise TransportError(
-                    f"sftp read failed: {result.stderr.decode(errors='replace').strip()}"
-                )
+            self._sftp(f"get {remote_path} {local}\n")
             return Path(local).read_text(encoding="utf-8")
         finally:
             Path(local).unlink(missing_ok=True)
 
     def list_dir(self, remote_path: str) -> list[str]:
-        command = ["sftp", "-q", "-b", "-"] + self._read_key()
-        command += ["-P", str(self.config.port), f"{self.config.user}@{self.config.host}"]
-        batch = f"ls -1 {self._sftp_path(remote_path)}\n"
-        result = subprocess.run(command, input=batch.encode(), capture_output=True)
-        if result.returncode != 0:
-            raise TransportError(
-                f"sftp list failed: {result.stderr.decode(errors='replace').strip()}"
-            )
-        names = []
-        for line in result.stdout.decode(errors="replace").splitlines():
-            name = line.strip()
-            if name and name not in (".", ".."):
-                names.append(name)
-        return sorted(names)
+        output = self._sftp(f"ls -1 {self._sftp_path(remote_path)}\n")
+        return parse_sftp_ls(output)
 
     def write_inbox(self, job_id: str, payload: bytes) -> str:
         device_path = f"{self.config.inbox_root}/{job_id}.json"
-        self.dtctl(
+        reply = self.dtctl(
             ["put", "--job", f"{self.config.jobs_root}/{job_id}/job.json", "--inbox"],
             stdin=payload,
         )
-        return device_path
+        # dtctl answers with the path it actually wrote; fall back only when an
+        # older device build omits it.
+        return reply.get("path") or device_path
 
     def dtctl(self, argv: list[str], stdin: bytes | None = None) -> dict:
         command = [
-            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            "ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            "-o", f"ConnectTimeout={self.config.timeout}",
             "-p", str(self.config.port),
-        ] + self._write_key()
+        ] + self._key_args(read=False)
         command += [f"{self.config.user}@{self.config.host}"] + list(argv)
-        result = subprocess.run(command, input=stdin, capture_output=True)
+        result = self._run(command, stdin)
         return _parse_dtctl_reply(result)
 
 

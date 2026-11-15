@@ -48,6 +48,7 @@ class Config:
     work_dir: Path = field(default_factory=_default_work_dir)
     max_segments_per_call: int = 100
     max_chars_per_segment: int = 20_000
+    timeout: int = 30
 
     def __post_init__(self) -> None:
         self.work_dir = Path(self.work_dir)
@@ -78,6 +79,7 @@ class Config:
             config.write_key = device.get("write_key", config.write_key)
             config.ko_root = device.get("koreader_root", config.ko_root)
             config.local_root = device.get("local_root", config.local_root)
+            config.timeout = int(device.get("timeout", config.timeout))
             if device.get("work_dir"):
                 config.work_dir = Path(device["work_dir"]).expanduser()
 
@@ -93,5 +95,7 @@ class Config:
         config.local_root = env.get("DT_LOCAL_ROOT", config.local_root)
         if env.get("DT_WORK_DIR"):
             config.work_dir = Path(env["DT_WORK_DIR"]).expanduser()
+        if env.get("DT_TIMEOUT"):
+            config.timeout = int(env["DT_TIMEOUT"])
         config.work_dir.mkdir(parents=True, exist_ok=True)
         return config

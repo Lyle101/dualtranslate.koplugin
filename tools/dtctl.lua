@@ -132,12 +132,57 @@ local function normalize_path(path)
     return "/" .. table.concat(parts, "/")
 end
 
+-- Split a command string honouring single/double quotes, so
+-- --book "/mnt/us/documents/novel/Pride and Prejudice.epub" stays one
+-- argument.  This is not a shell: metacharacters are still rejected outright.
+local function split_command(raw)
+    if raw:find("[;|&$`<>\n\r]") then return nil, "illegal character" end
+    local tokens, index, length = {}, 1, #raw
+    while index <= length do
+        local char = raw:sub(index, index)
+        if char:match("%s") then
+            index = index + 1
+        elseif char == "'" or char == '"' then
+            local quote = char
+            local buffer, closed = {}, false
+            index = index + 1
+            while index <= length do
+                local current = raw:sub(index, index)
+                if current == quote then
+                    closed = true
+                    index = index + 1
+                    break
+                end
+                if quote == '"' and current == "\\" then
+                    local escaped = raw:sub(index + 1, index + 1)
+                    if escaped == '"' or escaped == "\\" then
+                        buffer[#buffer + 1] = escaped
+                        index = index + 2
+                    else
+                        buffer[#buffer + 1] = current
+                        index = index + 1
+                    end
+                else
+                    buffer[#buffer + 1] = current
+                    index = index + 1
+                end
+            end
+            if not closed then return nil, "unterminated quote" end
+            tokens[#tokens + 1] = table.concat(buffer)
+        else
+            local start = index
+            while index <= length and not raw:sub(index, index):match("%s") do
+                index = index + 1
+            end
+            tokens[#tokens + 1] = raw:sub(start, index - 1)
+        end
+    end
+    return tokens
+end
+
 local function parse_original_command(raw)
-    -- The shell never tokenizes untrusted input: reject metacharacters here and
-    -- let the Lua whitelist do the rest (10.5).
-    if raw:find("[;|&$`<>\"'\n\r]") then return nil, "illegal character" end
-    local tokens = {}
-    for token in raw:gmatch("%S+") do tokens[#tokens + 1] = token end
+    local tokens, token_err = split_command(raw)
+    if not tokens then return nil, token_err end
     if #tokens == 0 then return nil, "missing subcommand" end
     local command = tokens[1]
     if not SUBCOMMANDS[command] then
