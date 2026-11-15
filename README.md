@@ -92,8 +92,11 @@ KOReader 的插件目录是安装根目录下的 `plugins/` 文件夹，目录�
 ## 从源码构建 / 测试
 
 ```sh
-# 语法检查
-luac -p *.lua
+# 语法检查：用 LuaJIT（与 KOReader 运行时一致）。
+# 不要用 luac -p：Lua 5.4 起 for 循环变量是 const，会在
+# dualtranslate_overlay.lua 的 `part = part:gsub(...)` 上误报
+# "attempt to assign to const variable"，而 LuaJIT 5.1 没有这个限制。
+for f in *.lua; do luajit -b "$f" /dev/null || echo "SYNTAX FAIL: $f"; done
 
 # 单元测试（无需 KOReader 环境，纯 Lua 5.1/5.3 均可）
 lua tests/loadtest.lua
