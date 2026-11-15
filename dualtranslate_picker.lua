@@ -44,6 +44,12 @@ end
 -- 7.2: TOC entries map onto spine indexes, but a TOC rarely covers every
 -- spine item (cover, title page, colophon).  The picker must still offer every
 -- chapter, so gaps fall back to "第 N 节" instead of disappearing from the list.
+--
+-- `toc_entries` is how many TOC labels landed on this spine item (1 = just the
+-- title, >1 = the file holds several chapters).  Scanned/PDF-derived EPUBs put
+-- dozens of chapters in one XHTML and anchor every NCX navPoint inside it, so
+-- the list legitimately shows fewer rows than the reader's own TOC; the status
+-- line uses this sum to say so instead of looking truncated.
 function Picker.chapters(outline)
     if type(outline) ~= "table" then return {} end
     local by_index = {}
@@ -58,17 +64,22 @@ function Picker.chapters(outline)
     local chapters = {}
     for index = 1, count do
         local chapter = by_index[index]
+        local aliases = chapter and chapter.aliases
         chapters[#chapters + 1] = {
             index = index,
             title = chapter and chapter.title or string.format(_("第 %d 节"), index),
             level = chapter and chapter.level or 0,
+            toc_entries = chapter and (1 + (type(aliases) == "table" and #aliases or 0)) or 0,
         }
     end
     return chapters
 end
 
 function Picker.new_state(outline)
-    return { chapters = Picker.chapters(outline), selected = {} }
+    local chapters = Picker.chapters(outline)
+    local toc_total = 0
+    for _, chapter in ipairs(chapters) do toc_total = toc_total + (chapter.toc_entries or 0) end
+    return { chapters = chapters, selected = {}, toc_total = toc_total }
 end
 
 function Picker.count(state)
@@ -167,6 +178,15 @@ function Picker.build_item_table(state, handlers, opts)
     handlers = handlers or {}
     opts = opts or {}
     local selected = Picker.count(state)
+    -- When several TOC labels share one spine item the list is shorter than the
+    -- TOC the reader shows, which reads as missing chapters.  Say both numbers
+    -- instead of silently listing fewer rows.
+    local status_text = string.format(_("共 %d 章 · 已选 %d 章"), #state.chapters, selected)
+    local toc_total = state.toc_total or 0
+    if toc_total > #state.chapters then
+        status_text = string.format(_("共 %d 段 · 目录 %d 条 · 已选 %d 章"),
+            #state.chapters, toc_total, selected)
+    end
     local items = {
         {
             text = string.format(_("开始翻译（%d 章）"), selected),
@@ -183,7 +203,7 @@ function Picker.build_item_table(state, handlers, opts)
         },
         { text = _("反选"), callback = handlers.on_invert },
         {
-            text = string.format(_("共 %d 章 · 已选 %d 章"), #state.chapters, selected),
+            text = status_text,
             select_enabled = false,
         },
     }
@@ -192,6 +212,7 @@ function Picker.build_item_table(state, handlers, opts)
             text = Picker.chapter_label(state, chapter),
             chapter_index = chapter.index,
             full_title = chapter.title,
+            toc_entries = chapter.toc_entries,
             callback = function()
                 if handlers.on_toggle then handlers.on_toggle(chapter.index) end
             end,
@@ -297,11 +318,18 @@ function Picker.show(plugin)
     end
 
     -- Separator-like rows and long titles: hold shows the untruncated title
-    -- plus the spine index, which is also the job's chapter id (6.5).
+    -- plus the spine index, which is also the job's chapter id (6.5).  For a
+    -- file that holds several chapters, say how many TOC labels were merged
+    -- into this row, so a short list is explainable rather than suspicious.
     function menu:onMenuHold(item)
         if type(item) == "table" and item.chapter_index then
-            TranslationUI.showInfo(string.format(_("第 %d 章：%s"),
-                item.chapter_index, item.full_title or ""), 5)
+            local text = string.format(_("第 %d 章：%s"),
+                item.chapter_index, item.full_title or "")
+            if (item.toc_entries or 0) > 1 then
+                text = text .. string.format(
+                    _("\n目录在此文件内有 %d 条，合并为一个可翻译单元"), item.toc_entries)
+            end
+            TranslationUI.showInfo(text, 5)
         end
         return true
     end

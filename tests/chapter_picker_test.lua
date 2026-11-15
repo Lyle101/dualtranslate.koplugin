@@ -238,6 +238,33 @@ do
         items[7].text == "▢ 1. 第 1 节" and items[7].chapter_index == 1
         and items[7].full_title == "第 1 节")
     check("单页列表不加尾部确认行", items[#items].chapter_index ~= nil)
+
+    -- 一个 spine 文件里有多个目录条目（扫描/PDF 转换书）：行数少于目录条数，
+    -- 状态行必须同时给出两个数字，长按要说明合并了多少条。
+    local merged_outline = {
+        spine_count = 2,
+        chapters = {
+            { index = 1, title = "第一部分", level = 0,
+              aliases = { "第一章", "第二章", "第三章" } },
+            { index = 2, title = "第二部分", level = 0, aliases = { "第四章" } },
+        },
+    }
+    local merged = Picker.new_state(merged_outline)
+    check("toc_entries 计入别名", merged.chapters[1].toc_entries == 4
+        and merged.chapters[2].toc_entries == 2)
+    check("toc_total 为目录条数总和", merged.toc_total == 6)
+    local merged_items = Picker.build_item_table(merged, {})
+    check("合并时状态行同时给段数与目录条数",
+        merged_items[6].text == "共 2 段 · 目录 6 条 · 已选 0 章",
+        merged_items[6].text)
+    check("章节行带 toc_entries 供长按使用", merged_items[7].toc_entries == 4)
+
+    local gap_outline = Picker.new_state({
+        spine_count = 3,
+        chapters = { { index = 2, title = "正文" } },
+    })
+    check("目录未覆盖的 spine 不计入 toc_total",
+        gap_outline.toc_total == 1 and gap_outline.chapters[1].toc_entries == 0)
     local trailing_items = Picker.build_item_table(empty_state, {}, { trailing = true })
     check("分页列表补尾部确认行",
         trailing_items[#trailing_items].text:find("开始翻译", 1, true) ~= nil)
@@ -295,6 +322,19 @@ do
     menu:onMenuHold(find_item(function(item) return item.chapter_index == 2 end))
     check("长按显示完整标题", notifications[1] ~= nil
         and tostring(notifications[1].text):find("Chapter Two", 1, true) ~= nil)
+
+    -- 多目录条目合并到一个 spine 文件时，长按要说清合并了几条
+    notifications = {}
+    menu:onMenuHold({ chapter_index = 2, full_title = "第一部分", toc_entries = 4 })
+    check("长按说明合并的目录条数", notifications[1] ~= nil
+        and tostring(notifications[1].text):find("有 4 条", 1, true) ~= nil,
+        notifications[1] and notifications[1].text)
+    check("单标题行不加合并说明", (function()
+        notifications = {}
+        menu:onMenuHold({ chapter_index = 3, full_title = "独章", toc_entries = 1 })
+        return notifications[1] ~= nil
+            and tostring(notifications[1].text):find("合并为一个可翻译单元", 1, true) == nil
+    end)())
 
     menu:onMenuSelect(find_item(function(item) return item.text == "全选本页" end))
     check("全选本页选中全部可见章节", menu.item_table[1].text == "开始翻译（3 章）")
