@@ -178,8 +178,11 @@ function dualtranslate:hasTranslationOverlay(book_path)
     if Overlay.exists(dir .. "/manifest.json") then return true end
     if Overlay.exists(dir .. "/overlay.json") then
         -- Lazy v2 -> v3 migration so the display/delete menus stay enabled
-        -- right after an upgrade (13.1).
-        pcall(Store.migrateBookIfNeeded, book_path, self:getTargetLang(), self.cache)
+        -- right after an upgrade (13.1).  Same short lock wait as
+        -- onReadSettings: this runs on the UI thread and must not wait out a
+        -- worker's checkpoint lock (M3); the next open retries.
+        pcall(Store.migrateBookIfNeeded, book_path, self:getTargetLang(), self.cache,
+            { lock_timeout = 0.5 })
         return true
     end
     return false
