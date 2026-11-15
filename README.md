@@ -14,8 +14,11 @@
 | microsoft_free（Microsoft Edge 免费） | `edge.microsoft.com/translate/translatetext`，批量 ≤12 条 / ≤4000 字节，批量失败自动降级逐条重试 | 国内可直连 | ✓ 默认 |
 | google_free（Google 免费） | `translate.googleapis.com/translate_a/t`（POST，`q=` 走 body），批量 ≤12 条 / ≤4000 字节，429 退避 1.5 s 重试一次 | 需能访问 Google，通常要代理 | |
 | system（系统翻译） | 调用 KOReader 内置 `ui/translator`，逐段请求 | 需能访问 Google | |
+| mcp_external（MCP 外部翻译） | 不在设备端翻译：把所选章节导出为任务，由电脑端 AI 代理翻译后回传 | 需要 PC 端 `mcp-server/` | |
 
 `google_free` 与 `system` 是同一家的两条通道：内置引擎走 `translate_a/single?client=gtx` 的 GET，出口 IP 繁忙时直接返回 429「Sorry」页；`google_free` 走 `translate_a/t` 的 POST，且一次请求可带多段。两者都需要能访问 Google——设备靠代理上网时，先在 KOReader 里配好代理再用这两个引擎。
+
+`mcp_external` 是「生成引擎」而非在线服务：选中它后，「翻译本书」的三个入口都会改为导出任务，不会发出任何设备端请求。
 
 目标语言归一化：`zh-Hans → zh`、`zh-Hant → zh-TW`（内置引擎与 `google_free` 共用）。
 
@@ -31,6 +34,7 @@
 - **译文样式**：字号（原生 SpinWidget 增减控件 8–40）、字体、颜色独立设置，不受全局排版影响。
 - **按书缓存**：译文存 SQLite（WAL），`book_translations` 表按书隔离；覆盖层按「书 + 目标语言」独立目录。
 - **删除本书全部译文**（管理译文字菜单）：同时删除所有服务的覆盖层、缓存与遗留翻译任务，原书不受影响。
+- **MCP 外部翻译**：设备端导出待翻译任务（含段落 selector），电脑端 AI 代理读取、翻译、回传；导入后写回 SQLite 与覆盖层，运行中的插件翻页即刷新。
 
 ## 安装
 
@@ -85,10 +89,22 @@ KOReader 的插件目录是安装根目录下的 `plugins/` 文件夹，目录�
 - 「译文字号/字体/颜色」调整译文样式。
 - 「管理译文 → 删除本书全部译文」彻底删除本书（所有服务）的翻译数据；对话框标题仍显示为“清除本书译文”。
 
+### MCP 外部翻译（可选）
+
+设备端只负责导出与导入，翻译由电脑端完成：
+
+1. **导出**：「MCP 外部翻译 → 导出所选章节…」，确认隐私提示后任务写入 `cache/dualtranslate/mcp/jobs/<job_id>/job.json`（含原文，供电脑端读取）。
+2. **电脑端**：安装 `mcp-server/`（`pip install -e mcp-server`），按 `mcp-server/config.example.toml` 配置 SSH 双 key，在 MCP 客户端里使用 `dt_list_jobs` / `dt_get_segments` / `dt_confirm_model` / `dt_submit_translations` / `dt_commit_job`。模型名称必须由用户确认。
+3. **回传**：`dt_commit_job` 经 `tools/dtctl.sh` 写入设备；设备上没有 SSH 时把 `result.json` 放进 `cache/dualtranslate/mcp/inbox/<job_id>.json`，再用「MCP 外部翻译 → 导入结果」。
+4. **显示**：导入后书页可选是否切换显示；翻页会自动读取 `reload.signal` 刷新。
+
+没有 PC 端时，原有三个在线引擎不受影响。
+
 ## 数据位置
 
 - 译文数据：KOReader 数据目录 `cache/dualtranslate/books/<hash>/` 下的 `manifest.json`（服务列表、完成度、显示选择）与 `entries/<provider>.json`（各服务的译文条目）；旧版 `overlay.json` 迁移后保留为 `overlay.v2.bak`
 - 译文数据库：KOReader 数据目录 `dualtranslate_cache.sqlite3`（WAL 模式）
+- MCP 任务：`cache/dualtranslate/mcp/jobs/<job_id>/`（`job.json` 含原文、`state.json`、`result.json`）与 `cache/dualtranslate/mcp/inbox/`
 - 进度文件：`cache/dualtranslate/progress_*.txt`
 - 配置：KOReader 原生 `settings/dualtranslate.lua`（`dualtranslate_` 前缀键），旧版 `dualtranslate_configuration.lua` 自动迁移
 
@@ -114,10 +130,18 @@ lua tests/langmenu_test.lua
 lua tests/callcheck.lua
 lua tests/queueui_test.lua
 lua tests/clear_test.lua
+lua tests/mcp_job_test.lua      # MCP 任务导出（需 KO_ROOT）
+lua tests/mcp_import_test.lua   # MCP 收件箱导入（需真实 SQLite）
+lua tests/mcp_menu_test.lua     # MCP 菜单与 reload seq
+lua tests/dtctl_test.lua        # headless CLI（真实子进程）
 
-# 打包（排除 tests 与迁移配置）
+# PC 端 MCP Server 测试
+cd mcp-server && pip install -e ".[dev]" && pytest
+
+# 打包（排除 tests、mcp-server 与迁移配置）
 zip -q -r ../dualtranslate.koplugin.zip . -x "./.*" -x "./tests/*" \
-    -x "./dualtranslate_configuration.lua" -x "./dualtranslate_configuration_sample.lua"
+    -x "./mcp-server/*" -x "./dualtranslate_configuration.lua" \
+    -x "./dualtranslate_configuration_sample.lua"
 ```
 
 ## 许可

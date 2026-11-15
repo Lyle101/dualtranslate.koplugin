@@ -4,12 +4,12 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.6（checkpoint 节流） |
+| 文档版本 | 0.7（P3 收件箱 MVP） |
 | 日期 | 2026-11-15 |
-| 适用代码 | DualTranslate `v3.0.1`（P0 / P1 / P2 已合入；P3 未开工） |
+| 适用代码 | DualTranslate `v3.0.1` 之后（P0 / P1 / P2 已合入；P3 收件箱 MVP 已合入） |
 | 目标版本 | `v3.0.1` 已发布多服务 + 章节选择；MCP 外部翻译仍按 `v1.3.0` 规划 |
-| 状态 | P0/P1/P2 已实施；P3（MCP 外部翻译）未开工，数据模型决策已定稿（见 5.4） |
-| 代码状态 | P0/P1/P2 已提交并有回归测试；P3 及之后未实现，第 11 节改为「已实施记录」 |
+| 状态 | P0/P1/P2 已实施；P3 收件箱 MVP 已实施（导出 → 导入 → 刷新、dtctl、MCP Server）；SSH 双 key 部署与 elicitation 仍待真机验证 |
+| 代码状态 | P0/P1/P2/P3-MVP 已提交并有回归测试；P4（reconcile 硬化、ndjson、打包文档）未实现 |
 
 **修订记录**
 
@@ -21,6 +21,7 @@
 | 0.4 | 2026-11-14 | 第三轮评审：补全 SSH 写入链路（forced command 经 `SSH_ORIGINAL_COMMAND` 传参、新增 `dtctl put` 上传通道）；§11.1 diff 与 §11.4 测试断言对齐实际提交；§2.3/§2.6 现状更新到 P0 后；`dtctl.sh` 导出 `KO_ROOT`；logger 重定向不再吞首参；只读 key chroot 路径/`dt_list_providers` 路由/SCP 回退措辞修正；`reload.signal` 增加 `op` 字段区分导入/删除/显示切换 |
 | 0.5 | 2026-11-15 | P0/P1/P2 全部落地（`v3.0.1`）后对齐表头：适用代码、状态、代码状态三行改为「P0/P1/P2 已实施，P3 未开工」；正文设计与剩余 P3 章节不变 |
 | 0.6 | 2026-11-15 | 真机实测 checkpoint 成本（5,000 段写 ~938 ms / 读 ~632 ms）后落地节流：`translate_overlay` 改为每 5 批或 60 s 写一次，§2.2 数据流与 §6.3 性能硬化同步；ndjson 仍留 P4 |
+| 0.7 | 2026-11-15 | P3 收件箱 MVP 落地：`dualtranslate_mcp.lua`（导出/收件箱/导入信号）、`Store.importResult`、`tools/dtctl`、`mcp-server/`；设计 10.2/10.5/10.6/10.7 的收件箱路径已实现，SSH 自动导入与 elicitation 留待真机验证 |
 
 **阅读约定**
 

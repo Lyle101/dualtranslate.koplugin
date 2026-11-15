@@ -23,6 +23,10 @@
     lua tests/overlay_provider_test.lua # P0：overlay 续跑按 provider 隔离
     lua tests/langmenu_test.lua # 语言子菜单闭包
     lua tests/google_free_test.lua # google_free：请求形状 / 响应三态 / 429 退避 / 切组边界
+    lua tests/mcp_job_test.lua  # P3-a：Tools.split_text 边界 / Epub.collect_segments / job.json
+    lua tests/mcp_import_test.lua # P3-b：导入校验 / part 拼回 / DB+entries+manifest / reload.seq
+    lua tests/mcp_menu_test.lua # P3-c：mcp_external 分流 / 隐私确认 / reload seq / 空收件箱
+    lua tests/dtctl_test.lua    # P3-d：headless CLI 的 stdout / 白名单 / forced command
     lua tests/callcheck.lua     # 方法调用完整性
 
 默认全部离线。唯一联网的是可选冒烟（默认 SKIP 并退出 0）：
