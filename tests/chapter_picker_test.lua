@@ -224,7 +224,7 @@ do
     check("状态行显示章节与已选数",
         items[6].text == "共 3 章 · 已选 0 章" and items[6].select_enabled == false)
     check("章节行带标记、spine index 与标题",
-        items[7].text == "[ ] 1. 第 1 节" and items[7].chapter_index == 1
+        items[7].text == "▢ 1. 第 1 节" and items[7].chapter_index == 1
         and items[7].full_title == "第 1 节")
     check("单页列表不加尾部确认行", items[#items].chapter_index ~= nil)
     local trailing_items = Picker.build_item_table(empty_state, {}, { trailing = true })
@@ -234,7 +234,7 @@ do
     Picker.toggle(empty_state, 1)
     local selected_items = Picker.build_item_table(empty_state, {})
     check("勾选后标记与计数同步",
-        selected_items[7].text == "[x] 1. 第 1 节"
+        selected_items[7].text == "▣ 1. 第 1 节"
         and selected_items[1].select_enabled == true
         and selected_items[1].text == "开始翻译（1 章）")
 end
@@ -275,7 +275,7 @@ do
     check("勾选章节不关闭菜单", #closed_widgets == 0)
     check("菜单原地刷新", menu.updated and menu.updated >= 1)
     local row = find_item(function(item) return item.chapter_index == 2 end)
-    check("章节行标记为已选并带 spine index", row.text == "[x] 2. Chapter Two")
+    check("章节行标记为已选并带 spine index", row.text == "▣ 2. Chapter Two")
     check("开始项计数更新",
         menu.item_table[1].select_enabled == true and menu.item_table[1].text == "开始翻译（1 章）")
 

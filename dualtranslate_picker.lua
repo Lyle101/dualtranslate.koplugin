@@ -154,9 +154,11 @@ end
 
 -- 7.1: the row carries the spine index as well as the (truncated) title, or
 -- identically named chapters cannot be told apart.  The full title stays on
--- the item for the long-press detail.
+-- the item for the long-press detail.  The checkbox is a geometric-shape
+-- glyph rather than "[x]"/"[ ]": on a 758 px screen the ASCII pair collapses
+-- into "[]", and an empty box stops reading as a box.
 function Picker.chapter_label(state, chapter)
-    local prefix = state.selected[chapter.index] and "[x] " or "[ ] "
+    local prefix = state.selected[chapter.index] and "▣ " or "▢ "
     return string.format("%s%d. %s", prefix, chapter.index,
         Picker.truncate_title(chapter.title))
 end
