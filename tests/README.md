@@ -24,6 +24,15 @@
     lua tests/langmenu_test.lua # 语言子菜单闭包
     lua tests/callcheck.lua     # 方法调用完整性
 
+默认全部离线。唯一联网的是可选冒烟（默认 SKIP 并退出 0）：
+
+    DT_LIVE=1 lua tests/smoke_live.lua                          # 本机
+    DT_LIVE=1 KO_ROOT=/mnt/us/koreader ./luajit tests/smoke_live.lua   # 设备
+
+它给每个服务翻一句真实文本，断言译文非空、`provider` 字段与引擎一致，并打印耗时。
+内置引擎（`system`）在 headless 下报 SKIP：`ui/translator` 需要完整 reader 进程；
+macOS 的 SDL 版同样加载不了（`socketutil → device → SDL window`），要在设备上跑。
+
 注意：
 - 测试读写 /tmp 下临时目录（/tmp/dt_data、/tmp/dt_state_test、/tmp/dualtranslate_epub_test 等）。
 - migration_test.lua / store_delete_test.lua / p1c_switch_test.lua 用真实 SQLite；lock_test.lua /
