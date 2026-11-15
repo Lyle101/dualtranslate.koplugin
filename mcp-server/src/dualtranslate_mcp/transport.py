@@ -9,6 +9,7 @@ HeadlessUnavailable, and the job layer falls back to the inbox.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -103,16 +104,31 @@ class SshTransport:
 
     def _chroot_path(self, remote_path: str) -> str:
         # The read key is chrooted to mcp/jobs (10.3): device-absolute paths
-        # must be made relative before sftp can see them.
+        # must be made relative before sftp can see them.  Anything outside the
+        # chroot is a bug, not something to silently rewrite.
         root = self.config.jobs_root.rstrip("/")
         if remote_path == root:
             return "."
         if remote_path.startswith(root + "/"):
             return remote_path[len(root) + 1:]
-        return remote_path.lstrip("/")
+        raise TransportError(
+            f"path outside the read-only chroot ({root}): {remote_path}"
+        )
+
+    # sftp -b is not a shell: quoting rules differ and a newline starts a new
+    # command.  Only paths the server itself constructed may go into a batch.
+    SFTP_UNSAFE = re.compile(r"""[\s"'\\]""")
+
+    def _sftp_path(self, remote_path: str) -> str:
+        relative = self._chroot_path(remote_path)
+        if self.SFTP_UNSAFE.search(relative):
+            raise TransportError(
+                f"path is not safe for an sftp batch command: {relative}"
+            )
+        return relative
 
     def read_text(self, remote_path: str) -> str:
-        remote_path = self._chroot_path(remote_path)
+        remote_path = self._sftp_path(remote_path)
         with tempfile.NamedTemporaryFile(delete=False) as handle:
             local = handle.name
         try:
@@ -131,7 +147,7 @@ class SshTransport:
     def list_dir(self, remote_path: str) -> list[str]:
         command = ["sftp", "-q", "-b", "-"] + self._read_key()
         command += ["-P", str(self.config.port), f"{self.config.user}@{self.config.host}"]
-        batch = f"ls -1 {self._chroot_path(remote_path)}\n"
+        batch = f"ls -1 {self._sftp_path(remote_path)}\n"
         result = subprocess.run(command, input=batch.encode(), capture_output=True)
         if result.returncode != 0:
             raise TransportError(
