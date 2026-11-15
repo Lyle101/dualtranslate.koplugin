@@ -251,6 +251,18 @@ function dualtranslate:buildMenuTable()
             sub_item_table = self:buildProviderSelector(),
         },
         {
+            -- P3: export a job for the PC-side agent, import its result.
+            text_func = function()
+                local Mcp = require("dualtranslate_mcp")
+                local count = #Mcp.listJobs()
+                if count == 0 then return _("MCP 外部翻译") end
+                return string.format("%s（%d）", _("MCP 外部翻译"), count)
+            end,
+            sub_item_table_func = function()
+                return self:buildMcpMenu()
+            end,
+        },
+        {
             -- Queue as a native sub-menu: items expand inline instead of
             -- popping a separate window.
             text_func = function()
@@ -655,6 +667,12 @@ function dualtranslate:confirmClearCache()
                             return
                         end
                         local removed = self:clearBookTranslationData(book_path)
+                        -- 10.2: job.json carries the book's source text, so
+                        -- "delete every translation" must take the job and
+                        -- its inbox copy too.
+                        pcall(function()
+                            require("dualtranslate_mcp").cleanupBookJobs(book_path)
+                        end)
                         self:saveSetting("translation_visible", false)
                         -- Stop follow-mode after a clear: the page-turn
                         -- scheduler must not immediately re-translate the
@@ -691,6 +709,8 @@ function dualtranslate:onCloseDocument()
     self._book_outline_cache = nil
     self._style_refresh_scheduled = nil
     self._translation_stale = nil
+    -- 10.7: the reload seq is per book; the next book must not inherit it.
+    self._last_reload_signal_seq = nil
     self.cache:close()
 end
 
@@ -735,9 +755,16 @@ function dualtranslate:onReadSettings()
         and self:getSetting("translation_visible", true) == true then
         self:refreshDocumentStyles(true)
     end
+    -- 10.7: remember which signal this session already rendered, so the first
+    -- page turn does not repaint the same import.
+    local signal = Overlay.loadSignal(dir)
+    self._last_reload_signal_seq = signal and signal.seq or nil
 end
 
 function dualtranslate:onPageUpdate()
+    -- 10.7: an import may land while the reader is open; the signal is a
+    -- ~100-byte read per page turn, far cheaper than re-reading the overlay.
+    if self.checkExternalReload then self:checkExternalReload(false) end
     if self.maybeSchedulePageTranslation then
         -- Auto-continue for chapter-by-chapter translation shows the same
         -- progress dialog as a manual start, so the user can watch the

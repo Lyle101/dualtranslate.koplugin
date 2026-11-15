@@ -16,6 +16,7 @@ local Providers = require("dualtranslate_providers")
 local Overlay = require("dualtranslate_overlay")
 local Store = require("dualtranslate_store")
 local Tools = require("dualtranslate_tools")
+local TranslationUI = require("dualtranslate_ui")
 
 local Reader = {}
 
@@ -347,6 +348,12 @@ end
 -- only governs whether the current-chapter entry arms page-turn follow.
 function dualtranslate:translateWholeBook(silent, auto)
     if not self:isEpub() then return end
+    -- 7.4: with the MCP engine there is no device-side request path; the
+    -- equivalent action is exporting the whole book as a job.
+    if self:getMode() == "mcp_external" then
+        self:confirmMcpExport(nil)
+        return
+    end
     local book_path = self.ui.document.file
     self:enqueueTranslation({ book_path = book_path, mode = "all",
         silent = silent, auto = auto })
@@ -354,6 +361,11 @@ end
 
 function dualtranslate:translateCurrentChapter(silent, auto)
     if not self:isEpub() then return end
+    if self:getMode() == "mcp_external" then
+        local index = self:currentChapterIndex()
+        self:confirmMcpExport(index and { index } or nil)
+        return
+    end
     local book_path = self.ui.document.file
     local fragment = self:getCurrentFragment()
     if fragment then self._page_translation_last_fragment = fragment end
@@ -372,9 +384,244 @@ end
 -- One-shot selection from the chapter picker; never arms follow mode.
 function dualtranslate:translateSelectedChapters(indexes, silent, auto)
     if not self:isEpub() then return end
+    if self:getMode() == "mcp_external" then
+        self:confirmMcpExport(indexes)
+        return
+    end
     local book_path = self.ui.document.file
     self:enqueueTranslation({ book_path = book_path, mode = "selection",
         chapter_indexes = indexes, silent = silent, auto = auto })
+end
+
+------------------------------------------------------------------------
+-- MCP external translation (P3)
+--
+-- Export -> PC translates -> import.  The device never talks to the model:
+-- it only writes the job and consumes the result (design 10.1).
+------------------------------------------------------------------------
+
+-- privacy notice required before the book text leaves the device (10.10).
+function dualtranslate:confirmMcpExport(indexes)
+    local scope = indexes and string.format(_("所选 %d 章"), #indexes) or _("整本书")
+    local dialog
+    dialog = ButtonDialog:new{
+        title = string.format(
+            _("将导出%s的原文到设备缓存，供电脑端读取，并可能发送给 AI 模型。"), scope),
+        buttons = {{
+            {
+                text = _("Cancel"),
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("导出"),
+                callback = function()
+                    UIManager:close(dialog)
+                    self:exportMcpJob(indexes)
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+end
+
+function dualtranslate:exportMcpJob(indexes)
+    local book_path = self:currentBookPath()
+    if not book_path then return end
+    local outline = self:getBookOutline(book_path)
+    local titles = {}
+    for _, chapter in ipairs(outline and outline.chapters or {}) do
+        titles[chapter.index] = chapter.title
+    end
+    local Mcp = require("dualtranslate_mcp")
+    UIManager:show(Notification:new{ text = _("正在导出 MCP 任务…"), timeout = 30 })
+    -- Paint the notice first: extraction parses every selected XHTML file and
+    -- would otherwise freeze the screen with no feedback.
+    UIManager:scheduleIn(0.2, function()
+        local result, err = Mcp.exportJob{
+            book_path = book_path,
+            chapter_indexes = indexes,
+            titles = titles,
+            source_lang = self:getSourceLang(),
+            target_lang = self:getTargetLang(),
+            epub = self.epub,
+        }
+        if not result then
+            TranslationUI.showInfo(_("导出失败：") .. tostring(err))
+            return
+        end
+        TranslationUI.showInfo(string.format(
+            _("已导出 MCP 任务 %s\n%d 章 · %d 段\n电脑端可读取 cache/dualtranslate/mcp/jobs/"),
+            result.job_id, result.chapters, result.segments), 6)
+    end)
+end
+
+function dualtranslate:importMcpResults()
+    local Mcp = require("dualtranslate_mcp")
+    local ok, summary = pcall(Mcp.importPending, { cache = self.cache,
+        allow_partial = self:getSetting("mcp_allow_partial_import", false) })
+    if not ok or type(summary) ~= "table" then
+        TranslationUI.showInfo(_("导入失败：") .. tostring(summary))
+        return
+    end
+    if #summary.failed > 0 and summary.count == 0 then
+        TranslationUI.showInfo(string.format(_("导入失败：%d 个结果无法导入\n%s"),
+            #summary.failed, summary.failed[1] and summary.failed[1].error or ""), 6)
+        return
+    end
+    if summary.count == 0 then
+        TranslationUI.showInfo(_("收件箱里没有待导入的结果"))
+        return
+    end
+    self._page_translation_overlay_state = nil
+    self:refreshDocumentStyles()
+    local segments, last = 0, nil
+    for _, item in ipairs(summary.imported) do
+        segments = segments + (item.accepted or 0)
+        last = item
+    end
+    TranslationUI.showInfo(string.format(_("已导入 %d 个任务，共 %d 段"),
+        summary.count, segments))
+    if #summary.failed > 0 then
+        TranslationUI.showInfo(string.format(_("%d 个结果导入失败（详见日志）"), #summary.failed), 5)
+    end
+    self:offerMcpDisplaySwitch(last)
+end
+
+-- Auto-switching the visible layer forces a re-pagination, so it is only done
+-- when the user asked for it; otherwise ask once (design 10.7).
+function dualtranslate:offerMcpDisplaySwitch(summary)
+    if not summary or not summary.provider_id then return end
+    local book_path = self:currentBookPath()
+    local target_lang = self:getTargetLang()
+    local manifest = self:currentManifest()
+    local provider = manifest and manifest.providers[summary.provider_id]
+    if not provider or not provider.confirmed then return end
+    if manifest.display_provider == summary.provider_id then return end
+    if self:getSetting("auto_switch_after_import", false) == true then
+        Store.setDisplayProvider(book_path, target_lang, summary.provider_id)
+        self:refreshDocumentStyles()
+        return
+    end
+    local name = provider.display_name or summary.provider_id
+    local dialog
+    dialog = ButtonDialog:new{
+        title = string.format(_("已导入 %s 的译文，是否切换显示？"), name),
+        buttons = {{
+            {
+                text = _("稍后"),
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("切换"),
+                callback = function()
+                    UIManager:close(dialog)
+                    local ok, result = pcall(Store.setDisplayProvider,
+                        book_path, target_lang, summary.provider_id)
+                    if ok and result then self:refreshDocumentStyles() end
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+end
+
+-- Poll the reload signal on page turns (10.7).  The comparison uses the
+-- monotonic seq, never the mtime: FAT32 timestamps are ~2 s coarse.
+function dualtranslate:checkExternalReload(force)
+    local book_path = self:currentBookPath()
+    if not book_path then return nil end
+    local signal = Overlay.loadSignal(self:getBookCacheDirectory(book_path))
+    if not signal then return nil end
+    if not force and self._last_reload_signal_seq
+        and signal.seq <= self._last_reload_signal_seq then
+        return nil
+    end
+    self._last_reload_signal_seq = signal.seq
+    self._page_translation_overlay_state = nil
+    self:refreshDocumentStyles()
+    return signal
+end
+
+function dualtranslate:showMcpJob(item)
+    local Mcp = require("dualtranslate_mcp")
+    local dialog
+    dialog = ButtonDialog:new{
+        title = string.format("%s\n%s：%s\n%s：%d  %s：%d\n%s：%s",
+            item.job_id, _("状态"), tostring(item.status),
+            _("章节"), item.chapters or 0, _("段落"), item.total or 0,
+            _("模型"), tostring(item.model_name or "-")),
+        buttons = {{
+            {
+                text = _("关闭"),
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("删除任务"),
+                callback = function()
+                    UIManager:close(dialog)
+                    Tools.rmtree(Mcp.jobDir(item.job_id))
+                    os.remove(Mcp.inboxDir() .. "/" .. item.job_id .. ".json")
+                    TranslationUI.showInfo(_("已删除任务"))
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+end
+
+function dualtranslate:buildMcpJobMenu()
+    local Mcp = require("dualtranslate_mcp")
+    local jobs = Mcp.listJobs()
+    if #jobs == 0 then
+        return { { text = _("没有任务"), enabled = false } }
+    end
+    local items = {}
+    for _, job in ipairs(jobs) do
+        local entry = job
+        items[#items + 1] = {
+            text = string.format("%s · %s · %d %s", entry.job_id,
+                tostring(entry.status), entry.total or 0, _("段")),
+            callback = function() self:showMcpJob(entry) end,
+        }
+    end
+    return items
+end
+
+-- 12.1: the MCP submenu.  Export reuses the chapter picker so the chapter
+-- identity rules are shared with normal translation.
+function dualtranslate:buildMcpMenu()
+    local Mcp = require("dualtranslate_mcp")
+    return {
+        {
+            text = _("导出所选章节…"),
+            enabled_func = function() return self:isEpub() end,
+            callback = function()
+                self:showChapterPicker({
+                    start_text = _("导出任务（%d 章）"),
+                    on_start = function(indexes) self:confirmMcpExport(indexes) end,
+                })
+            end,
+        },
+        {
+            text_func = function()
+                return string.format(_("任务列表（%d）"), #Mcp.listJobs())
+            end,
+            sub_item_table_func = function() return self:buildMcpJobMenu() end,
+        },
+        {
+            text = _("导入结果"),
+            callback = function() self:importMcpResults() end,
+        },
+        {
+            text = _("刷新外部译文"),
+            enabled_func = function() return self:isEpub() end,
+            callback = function()
+                local signal = self:checkExternalReload(true)
+                TranslationUI.showInfo(signal and _("已刷新外部译文")
+                    or _("没有新的外部译文"))
+            end,
+        },
+    }
 end
 
 function dualtranslate:_runTranslation(item)

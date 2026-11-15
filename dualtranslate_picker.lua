@@ -187,9 +187,12 @@ function Picker.build_item_table(state, handlers, opts)
         status_text = string.format(_("共 %d 段 · 目录 %d 条 · 已选 %d 章"),
             #state.chapters, toc_total, selected)
     end
+    -- P3: the same picker exports an MCP job, so the confirm row's wording
+    -- comes from the caller; the default stays the translation one.
+    local start_label = opts.start_text or _("开始翻译（%d 章）")
     local items = {
         {
-            text = string.format(_("开始翻译（%d 章）"), selected),
+            text = string.format(start_label, selected),
             bold = true,
             select_enabled = selected > 0,
             callback = handlers.on_start,
@@ -224,7 +227,7 @@ function Picker.build_item_table(state, handlers, opts)
     -- identical buttons sit on screen at the same time.
     if opts.trailing then
         items[#items + 1] = {
-            text = string.format(_("开始翻译（%d 章）"), selected),
+            text = string.format(start_label, selected),
             bold = true,
             select_enabled = selected > 0,
             callback = handlers.on_start,
@@ -238,7 +241,11 @@ local function book_display_name(book_path)
     return (name:gsub("%.[Ee][Pp][Uu][Bb]$", ""))
 end
 
-function Picker.show(plugin)
+-- opts.on_start(indexes) overrides the default translate action; opts.start_text
+-- changes the confirm row (e.g. "导出任务（%d 章）").  MCP export reuses the
+-- picker unchanged so chapter identity is chosen by exactly one implementation.
+function Picker.show(plugin, opts)
+    opts = opts or {}
     local book_path = plugin.currentBookPath and plugin:currentBookPath()
         or (plugin.ui and plugin.ui.document and plugin.ui.document.file)
     if not book_path then return end
@@ -258,8 +265,10 @@ function Picker.show(plugin)
     local menu, handlers
 
     local function build_items()
-        return Picker.build_item_table(state, handlers,
-            { trailing = state.trailing_confirm == true })
+        return Picker.build_item_table(state, handlers, {
+            trailing = state.trailing_confirm == true,
+            start_text = opts.start_text,
+        })
     end
 
     local function rebuild()
@@ -296,14 +305,19 @@ function Picker.show(plugin)
             local indexes = Picker.selected_indexes(state)
             if #indexes == 0 then return end
             UIManager:close(menu)
-            plugin:translateSelectedChapters(indexes)
+            if opts.on_start then
+                opts.on_start(indexes)
+            else
+                plugin:translateSelectedChapters(indexes)
+            end
         end,
     }
 
     menu = Menu:new{
         title = _("选择章节"),
         subtitle = book_display_name(book_path),
-        item_table = Picker.build_item_table(state, handlers),
+        item_table = Picker.build_item_table(state, handlers,
+            { start_text = opts.start_text }),
         is_borderless = true,
         is_popout = false,
     }
@@ -348,8 +362,8 @@ function Picker.show(plugin)
 end
 
 function Picker.attach(plugin)
-    plugin.showChapterPicker = function(self)
-        return Picker.show(self)
+    plugin.showChapterPicker = function(self, opts)
+        return Picker.show(self, opts)
     end
 end
 

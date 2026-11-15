@@ -172,8 +172,10 @@ function Mcp.exportJob(opts)
     local book_path = opts.book_path
     if not book_path then return nil, "缺少书路径" end
     -- Required lazily: Epub is also required by the reader, and the MCP
-    -- module must stay loadable from dtctl without UI modules.
-    local Epub = require("dualtranslate_epub")
+    -- module must stay loadable from dtctl without UI modules.  The reader
+    -- passes its own instance so the plugin never ends up with two engines.
+    local Epub = opts.epub or require("dualtranslate_epub")
+    if type(Epub) ~= "table" then return nil, "EPUB 模块未加载" end
     local extracted, err = Epub.collect_segments{
         book_path = book_path,
         chapter_indexes = opts.chapter_indexes,
