@@ -386,6 +386,399 @@ function Store.listProviders(book_path, target_lang)
     return out
 end
 
+-- ---------------------------------------------------------------------------
+-- MCP import (design 10.6)
+--
+-- Order matters: DB transaction -> entries -> manifest -> reload.signal.  A
+-- failed entries/manifest write leaves the rows intact (rebuildEntriesFromDb
+-- can recover), and the signal is last so a running plugin never refreshes
+-- before the data is complete.
+-- ---------------------------------------------------------------------------
+
+local function valid_provider_id(provider_id)
+    if provider_id == "system" or provider_id == "microsoft_free"
+        or provider_id == "google_free" or provider_id == "legacy" then
+        return true
+    end
+    local slug = type(provider_id) == "string" and provider_id:match("^mcp:(.+)$")
+    if not slug or #slug > 40 then return false end
+    return slug:match("^[a-z0-9][a-z0-9._%-]*$") ~= nil
+end
+Store.validProviderId = valid_provider_id
+
+local function sleep_ms(milliseconds)
+    local ok, socket = pcall(require, "socket")
+    if ok and socket and socket.sleep then socket.sleep(milliseconds / 1000) end
+end
+
+-- Only busy/locked are worth retrying; a constraint or IO error must surface
+-- immediately (design 10.6 step 3).
+local function run_transaction(cache, fn)
+    local delays = { 100, 300, 900 }
+    for attempt = 0, #delays do
+        local ok, err = cache:withTransaction(fn)
+        if ok then return true end
+        local code = type(err) == "table" and err.code or nil
+        if (code ~= "SQLITE_BUSY" and code ~= "SQLITE_LOCKED") or attempt == #delays then
+            return nil, err
+        end
+        sleep_ms(delays[attempt + 1])
+    end
+end
+
+local function count_children(list)
+    local seen, out = {}, {}
+    for _, value in ipairs(type(list) == "table" and list or {}) do
+        local index = tonumber(value)
+        if index and not seen[index] then
+            seen[index] = true
+            out[#out + 1] = index
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+-- job: <jobs>/<id>/job.json; result: dualtranslate.result.v1 (design 10.2).
+-- Returns a summary table, or nil + message.  Re-importing the same result is
+-- idempotent: rows upsert and entries merge by selector.
+function Store.importResult(job, result, opts)
+    opts = opts or {}
+    if type(job) ~= "table" or type(result) ~= "table" then
+        return nil, "任务或结果为空"
+    end
+    if job.schema ~= "dualtranslate.job.v1" then return nil, "任务文件格式不正确" end
+    if result.schema ~= "dualtranslate.result.v1" then return nil, "结果文件格式不正确" end
+    if not job.job_id or job.job_id ~= result.job_id then
+        return nil, "任务编号不一致"
+    end
+    local provider = result.provider
+    if type(provider) ~= "table" then return nil, "结果缺少翻译服务信息" end
+    local provider_id = provider.provider_id
+    if not valid_provider_id(provider_id) then
+        return nil, "翻译服务标识不合法"
+    end
+    local model_name = provider.model_name
+    if type(model_name) ~= "string" or model_name == "" then
+        return nil, "缺少已确认的模型名称"
+    end
+    local book = job.book or {}
+    local book_path = book.device_path
+    if type(book_path) ~= "string" or book_path == "" then
+        return nil, "任务缺少书路径"
+    end
+    if opts.book_path and opts.book_path ~= book_path then
+        return nil, "任务与指定书不一致"
+    end
+    local target_lang = book.target_lang or opts.target_lang
+    local source_lang = book.source_lang or opts.source_lang or ""
+    if type(target_lang) ~= "string" or target_lang == "" then
+        return nil, "任务缺少目标语言"
+    end
+    -- Same fingerprint rule as Overlay.isStale (design 6.3): a replaced book
+    -- must never receive translations computed for the old text.
+    local size = lfs.attributes(book_path, "size")
+    if size and tonumber(book.file_size) and tonumber(book.file_size) ~= 0
+        and size ~= tonumber(book.file_size) then
+        return nil, "书文件已变化，请重新导出任务"
+    end
+
+    local by_id = {}
+    for _, segment in ipairs(job.segments) do
+        if segment.id then by_id[segment.id] = segment end
+    end
+    local accepted, rejected, seen = {}, {}, {}
+    for _, item in ipairs(type(result.translations) == "table" and result.translations or {}) do
+        local id = type(item) == "table" and item.id or nil
+        local text = type(item) == "table" and item.text or nil
+        if type(id) ~= "string" or not by_id[id] or seen[id] then
+            rejected[#rejected + 1] = { id = tostring(id), reason = "unknown or duplicate id" }
+        elseif type(text) ~= "string" or text == "" or text:find("%z") then
+            rejected[#rejected + 1] = { id = id, reason = "empty or invalid text" }
+        else
+            seen[id] = true
+            accepted[id] = text
+        end
+    end
+
+    -- Group parts back into their parent paragraph (design 10.2): a parent is
+    -- only usable when EVERY part arrived, otherwise a long paragraph would
+    -- silently lose its tail.
+    local parents, order = {}, {}
+    for _, segment in ipairs(job.segments) do
+        local parent_id = segment.parent_id or segment.id
+        local parent = parents[parent_id]
+        if not parent then
+            parent = {
+                parent_id = parent_id,
+                selector = segment.selector,
+                xpointer = segment.xpointer,
+                chapter_index = segment.chapter_index,
+                total = tonumber(segment.parent_total) or 1,
+                parts = {},
+            }
+            parents[parent_id] = parent
+            order[#order + 1] = parent_id
+        end
+        parent.parts[tonumber(segment.part) or 1] = segment
+    end
+    local complete, incomplete = {}, 0
+    for _, parent_id in ipairs(order) do
+        local parent = parents[parent_id]
+        local sources, translations = {}, {}
+        local usable = true
+        for part = 1, parent.total do
+            local segment = parent.parts[part]
+            if not segment then
+                usable = false
+                break
+            end
+            local text = accepted[segment.id]
+            if not text then
+                usable = false
+                break
+            end
+            sources[part] = segment.source or ""
+            translations[part] = text
+        end
+        if usable then
+            complete[#complete + 1] = {
+                selector = parent.selector,
+                xpointer = parent.xpointer,
+                chapter_index = parent.chapter_index,
+                source = table.concat(sources, " "),
+                translation = table.concat(translations, " "),
+            }
+        else
+            incomplete = incomplete + 1
+        end
+    end
+    local submitted = 0
+    for _ in pairs(accepted) do submitted = submitted + 1 end
+    local missing = #(job.segments or {}) - submitted
+    if missing > 0 and opts.allow_partial ~= true then
+        return nil, string.format("任务尚未翻译完成（还有 %d 段缺失）", missing)
+    end
+    if #complete == 0 then
+        return nil, "结果中没有可导入的完整段落"
+    end
+
+    local dir = Store.bookDir(book_path, target_lang)
+    local cache = opts.cache or default_cache()
+    local lock_opts = { timeout = tonumber(opts.lock_timeout) }
+    return Lock.withBookLock(dir, function()
+        if not cache:open() then return nil, "缓存数据库不可用" end
+
+        -- 1) SQLite rows.  provider metadata is written first so later menu
+        -- reads already have a display name.
+        local db_ok, db_err = run_transaction(cache, function()
+            cache:upsertProvider({
+                provider_id = provider_id,
+                kind = provider.kind or "mcp",
+                display_name = provider.display_name,
+                model_name = model_name,
+                confirmed = provider.confirmed ~= false,
+                metadata_json = provider.metadata_json,
+            })
+            for _, parent in ipairs(complete) do
+                cache:storeForBook(book_path, source_lang, target_lang,
+                    parent.source, parent.translation, provider_id, {
+                        model_name = model_name,
+                        selector = parent.selector,
+                        xpointer = parent.xpointer,
+                        chapter_index = parent.chapter_index,
+                    })
+            end
+        end)
+        if not db_ok then
+            local message = type(db_err) == "table" and db_err.message or tostring(db_err)
+            return nil, "写入数据库失败：" .. tostring(message)
+        end
+
+        -- 2) entries/<provider>.json: merge by selector so unsubmitted
+        -- paragraphs and other providers' files stay untouched.
+        local existing = Overlay.loadEntries(dir, provider_id)
+        local entries, entry_index = {}, {}
+        for _, entry in ipairs(existing and existing.entries or {}) do
+            if entry.selector and entry.selector ~= "" then
+                entries[#entries + 1] = entry
+                entry_index[entry.selector] = #entries
+            end
+        end
+        local now = os.time()
+        for _, parent in ipairs(complete) do
+            local entry = {
+                selector = parent.selector,
+                xpointer = parent.xpointer,
+                chapter_index = parent.chapter_index,
+                source = parent.source,
+                translation = parent.translation,
+                created_at = now,
+            }
+            local at = entry_index[entry.selector]
+            if at then
+                entries[at] = entry
+            else
+                entries[#entries + 1] = entry
+                entry_index[entry.selector] = #entries
+            end
+        end
+        if not Overlay.saveEntries(dir, provider_id, {
+            target_lang = target_lang, entries = entries,
+        }) then
+            return nil, "无法写入译文条目（数据库已更新，可稍后修复）"
+        end
+
+        -- 3) manifest: chapters are classified per parent (not per part);
+        -- chapters with zero candidates count as done (D13).
+        local manifest = Overlay.loadManifest(dir)
+        if not manifest then
+            manifest = {
+                version = 3,
+                revision = 0,
+                book_path = book_path,
+                source_lang = source_lang,
+                target_lang = target_lang,
+                spine_count = tonumber(book.spine_count) or 0,
+                book_size = tonumber(book.file_size) or 0,
+                book_mtime = tonumber(book.file_mtime) or 0,
+                display_mode = "auto",
+                display_fallback = true,
+                last_used_at = {},
+                fallback_order = {},
+                providers = {},
+            }
+        end
+        local previous = manifest.providers[provider_id] or {}
+        local chapter_status = {}
+        local function seed(list, kind)
+            for _, index in ipairs(count_children(list)) do
+                chapter_status[index] = kind
+            end
+        end
+        seed(previous.chapters, "done")
+        seed(previous.partial_chapters, "partial")
+        seed(previous.failed_chapters, "failed")
+        local parent_counts, done_counts = {}, {}
+        for _, parent in ipairs(complete) do
+            local index = tonumber(parent.chapter_index)
+            if index then done_counts[index] = (done_counts[index] or 0) + 1 end
+        end
+        for _, parent_id in ipairs(order) do
+            local index = tonumber(parents[parent_id].chapter_index)
+            if index then parent_counts[index] = (parent_counts[index] or 0) + 1 end
+        end
+        for _, chapter in ipairs(job.chapters or {}) do
+            local index = tonumber(chapter.index)
+            if index then
+                local total = parent_counts[index] or 0
+                local done = done_counts[index] or 0
+                if total == 0 or done == total then
+                    chapter_status[index] = "done"
+                elseif done > 0 then
+                    chapter_status[index] = "partial"
+                else
+                    chapter_status[index] = "failed"
+                end
+            end
+        end
+        local done, partial, failed = {}, {}, {}
+        for index, kind in pairs(chapter_status) do
+            if kind == "done" then done[#done + 1] = index
+            elseif kind == "partial" then partial[#partial + 1] = index
+            elseif kind == "failed" then failed[#failed + 1] = index end
+        end
+        table.sort(done)
+        table.sort(partial)
+        table.sort(failed)
+
+        do
+            local meta = cache.getProvider and cache:getProvider(provider_id) or nil
+            local display_name, kind, confirmed
+            if meta then
+                display_name = meta.display_name
+                kind = meta.kind
+                confirmed = meta.confirmed ~= false
+            else
+                display_name = provider.display_name
+                kind = provider.kind or "mcp"
+                confirmed = provider.confirmed ~= false
+            end
+            local spine_count = tonumber(manifest.spine_count) or 0
+            if spine_count == 0 then spine_count = tonumber(book.spine_count) or 0 end
+            local is_complete = spine_count >= 1 and #partial == 0 and #failed == 0
+                and #done >= spine_count
+            manifest.providers[provider_id] = {
+                display_name = display_name or provider_id,
+                kind = kind or "mcp",
+                model_name = (meta and meta.model_name) or model_name,
+                confirmed = confirmed,
+                chapters = done,
+                partial_chapters = partial,
+                failed_chapters = failed,
+                complete = is_complete,
+                translated_count = count_unique_selectors(entries),
+                updated_at = now,
+            }
+        end
+
+        manifest.last_used_at = manifest.last_used_at or {}
+        manifest.last_used_at[provider_id] = now
+        -- D9: an import may register the provider in fallback_order, but it
+        -- never reorders an existing list.
+        manifest.fallback_order = manifest.fallback_order or {}
+        local listed = false
+        for _, existing_pid in ipairs(manifest.fallback_order) do
+            if existing_pid == provider_id then listed = true break end
+        end
+        if not listed then
+            manifest.fallback_order[#manifest.fallback_order + 1] = provider_id
+        end
+        local display_skipped = false
+        if opts.set_display then
+            -- An unconfirmed model must not become the visible layer (10.8).
+            if manifest.providers[provider_id].confirmed then
+                manifest.display_mode = "manual"
+                manifest.display_provider = provider_id
+            else
+                display_skipped = true
+            end
+        end
+        if not Overlay.saveManifest(dir, manifest) then
+            return nil, "无法写入 manifest（数据库与条目已更新，可稍后修复）"
+        end
+        Overlay.clearCssCache()
+
+        -- 4) Signal last: its seq is the manifest revision (10.7).
+        Overlay.saveSignal(dir, {
+            seq = tonumber(manifest.revision) or 0,
+            op = "import",
+            provider = provider_id,
+            count = count_unique_selectors(entries),
+            at = now,
+        })
+
+        return {
+            job_id = job.job_id,
+            provider_id = provider_id,
+            model_name = model_name,
+            submitted = submitted,
+            accepted = #complete,
+            incomplete = incomplete,
+            rejected = rejected,
+            total = #(job.segments or {}),
+            translated_count = count_unique_selectors(entries),
+            chapters = done,
+            partial_chapters = partial,
+            failed_chapters = failed,
+            display_provider = manifest.display_provider,
+            display_skipped = display_skipped,
+            revision = manifest.revision,
+            partial = missing > 0,
+        }
+    end, lock_opts)
+end
+
 -- D9: switching the display never rewrites fallback_order.
 function Store.setDisplayProvider(book_path, target_lang, provider_id_or_auto)
     if not book_path or not target_lang then

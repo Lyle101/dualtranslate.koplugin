@@ -241,6 +241,25 @@ function Overlay.clearIntent(dir)
     return not Overlay.exists(dir .. "/delete.pending.json")
 end
 
+-- External writers (dtctl, the MCP inbox importer) leave a reload.signal so a
+-- running plugin knows the overlay changed.  The payload carries a monotonic
+-- seq (the manifest revision) instead of relying on mtime: FAT32 timestamps
+-- only have ~2 s granularity, so two imports in the same second would
+-- otherwise be silently skipped (design 10.7).
+function Overlay.saveSignal(dir, payload)
+    if type(payload) ~= "table" then return false end
+    local ok, encoded = pcall(JSON.encode, payload)
+    if not ok or not encoded then return false end
+    if not mkdir_p(dir) then return false end
+    return write_file(dir .. "/reload.signal", encoded)
+end
+
+function Overlay.loadSignal(dir)
+    local data = read_json(dir .. "/reload.signal")
+    if not data or type(data.seq) ~= "number" then return nil end
+    return data
+end
+
 -- Same-shaped book index for v3 manifests and legacy v2 overlays, so display
 -- and page-translation code can ask one API before/after migration.
 -- Top-level complete/chapters mirror the resolved display provider.
