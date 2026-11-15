@@ -118,7 +118,9 @@ local function provider_meta_from_db(cache, provider_id)
 end
 
 -- v2 -> v3 per-book migration (design 6.3, seven steps).  Lazy and idempotent.
-function Store.migrateBookIfNeeded(book_path, target_lang, cache)
+-- opts.lock_timeout keeps the book-open path (13.1) from blocking the UI
+-- thread on the default 10s lock wait while a worker holds the book.
+function Store.migrateBookIfNeeded(book_path, target_lang, cache, opts)
     if not book_path or not target_lang then
         return nil, "book_path and target_lang are required"
     end
@@ -129,6 +131,7 @@ function Store.migrateBookIfNeeded(book_path, target_lang, cache)
     local legacy_path = dir .. "/overlay.json"
     local legacy = Overlay.load(legacy_path)
     if not legacy then return nil end
+    local lock_opts = { timeout = type(opts) == "table" and opts.lock_timeout or nil }
     return Lock.withBookLock(dir, function()
         existing = Overlay.loadManifest(dir)
         if existing then return existing end
@@ -221,7 +224,7 @@ function Store.migrateBookIfNeeded(book_path, target_lang, cache)
         end
         os.rename(legacy_path, dir .. "/overlay.v2.bak")
         return manifest
-    end)
+    end, lock_opts)
 end
 
 -- Next provider with translations, following the stable fallback_order (D9).
@@ -294,7 +297,13 @@ function Store.deleteProvider(book_path, target_lang, provider_id)
             return nil, err or "删除数据库记录失败"
         end
 
-        Overlay.deleteEntries(dir, provider_id)
+        -- M1: a failed unlink must abort the whole delete.  Detaching the
+        -- provider while its entries file survives would let the next light
+        -- reconcile adopt those orphan entries and resurrect the provider the
+        -- user just deleted.  Keep the intent so reconcile retries instead.
+        if not Overlay.deleteEntries(dir, provider_id) then
+            return nil, "无法删除译文条目文件"
+        end
 
         local manifest = Overlay.loadManifest(dir)
         if not manifest then
@@ -448,6 +457,7 @@ function Store.reconcile(book_path, target_lang, cache, opts)
         return nil, "book_path and target_lang are required"
     end
     local light = type(opts) == "table" and opts.light == true
+    local lock_opts = { timeout = type(opts) == "table" and opts.lock_timeout or nil }
     cache = cache or default_cache()
     local dir = Store.bookDir(book_path, target_lang)
     return Lock.withBookLock(dir, function()
@@ -591,7 +601,7 @@ function Store.reconcile(book_path, target_lang, cache, opts)
         end
         if clear_intent_after_save then Overlay.clearIntent(dir) end
         return summary
-    end)
+    end, lock_opts)
 end
 
 return Store

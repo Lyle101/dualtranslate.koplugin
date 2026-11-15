@@ -707,8 +707,13 @@ function dualtranslate:onReadSettings()
         -- 13.1: lazy per-book migration before any read.  14.3: book open
         -- only runs the light reconcile (delete intents + missing entries);
         -- the full orphan scan belongs to import/delete-failure/repair.
-        pcall(Store.migrateBookIfNeeded, path, self:getTargetLang(), self.cache)
-        pcall(Store.reconcile, path, self:getTargetLang(), self.cache, { light = true })
+        -- The open path runs on the UI thread, so it must not wait out the
+        -- default 10s book lock while a worker is checkpointing: a short
+        -- timeout skips the overlay for this open, and the next open retries.
+        pcall(Store.migrateBookIfNeeded, path, self:getTargetLang(), self.cache,
+            { lock_timeout = 0.5 })
+        pcall(Store.reconcile, path, self:getTargetLang(), self.cache,
+            { light = true, lock_timeout = 0.5 })
         local manifest = Overlay.loadManifest(dir)
         if manifest and Overlay.isStale(manifest, path) then
             -- Hide the layer for this session instead of persisting a global

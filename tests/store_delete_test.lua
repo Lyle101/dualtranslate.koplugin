@@ -272,6 +272,38 @@ do
 end
 
 -- ============================================================
+print("== 4c. entries 删除失败：不摘 manifest、保留 intent（M1） ==")
+do
+    newCase("entries_failure")
+    local dir = seedV3Book(BOOK, LANG, {
+        { id = "system", count = 2, kind = "builtin" },
+        { id = "microsoft_free", count = 1, kind = "http" },
+    })
+    local manifest_before = Overlay.loadManifest(dir)
+    local StoreOverlay = assert(package.loaded["dualtranslate_overlay"])
+    local real_delete = StoreOverlay.deleteEntries
+    StoreOverlay.deleteEntries = function() return false end
+    local result, err = Store.deleteProvider(BOOK, LANG, "microsoft_free")
+    StoreOverlay.deleteEntries = real_delete
+    check("返回 nil + 错误", result == nil and type(err) == "string", tostring(err))
+    local manifest = Overlay.loadManifest(dir)
+    check("manifest 未摘除该 provider", manifest and manifest.providers.microsoft_free ~= nil)
+    check("manifest revision 未变", manifest and manifest.revision == manifest_before.revision)
+    check("intent 保留供 reconcile 重试", Overlay.loadIntent(dir) ~= nil)
+    check("entries 仍在", fileExists(Overlay.entriesPath(dir, "microsoft_free")))
+    check("锁已释放", lfs.attributes(dir .. "/.lock", "mode") == nil)
+
+    -- 下一条打开路径的 reconcile 会重试删除，而不是把孤儿条目补回 manifest
+    local summary = Store.reconcile(BOOK, LANG, cache, { light = true })
+    local repaired = Overlay.loadManifest(dir)
+    check("reconcile 完成删除", summary and summary.completed == "microsoft_free")
+    check("reconcile 不复活 provider",
+        repaired and repaired.providers.microsoft_free == nil)
+    check("reconcile 清空 intent", Overlay.loadIntent(dir) == nil)
+    check("entries 已删除", not fileExists(Overlay.entriesPath(dir, "microsoft_free")))
+end
+
+-- ============================================================
 print("== 5. intent 崩溃模拟（reconcile 收尾） ==")
 do
     newCase("intent_rollback")
@@ -540,6 +572,33 @@ do
     check("user_version = 3", tonumber(rows[1][1]) == 3)
     local ok, err = Store.migrateIfNeeded({ initSchema = function() return nil, "boom" end })
     check("错误透传", ok == nil and err == "boom", tostring(err))
+end
+
+-- ============================================================
+print("== 11. 打开书路径：锁等待可配置（M3） ==")
+do
+    newCase("open_lock_timeout")
+    local book = "/books/locked.epub"
+    local dir = Store.bookDir(book, LANG)
+    os.execute('mkdir -p "' .. dir .. '"')
+    local handle = io.open(dir .. "/overlay.json", "w")
+    handle:write('{"version":2,"book_path":"/books/locked.epub",'
+        .. '"target_lang":"zh-Hans","entries":[]}')
+    handle:close()
+    -- 模拟 worker 正在 checkpoint：锁已被占用
+    assert(lfs.mkdir(dir .. "/.lock"))
+    local util = require("ffi/util")
+    local started = util.getTimestamp()
+    local migrated, err = Store.migrateBookIfNeeded(book, LANG, cache,
+        { lock_timeout = 0.2 })
+    local elapsed = util.getTimestamp() - started
+    lfs.rmdir(dir .. "/.lock")
+    check("持锁时返回失败", migrated == nil and type(err) == "string", tostring(err))
+    check("等待受 lock_timeout 限制", elapsed < 2,
+        string.format("%.2fs", elapsed))
+    local retried = Store.migrateBookIfNeeded(book, LANG, cache,
+        { lock_timeout = 0.2 })
+    check("锁释放后迁移成功", retried ~= nil)
 end
 
 print(string.format("\n==== Store 删除测试：%d 通过，%d 失败 ====", passed, failed))
