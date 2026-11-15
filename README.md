@@ -7,14 +7,17 @@
 
 ## 翻译引擎
 
-插件只保留两个无需 API 密钥的在线服务：
+插件提供三个无需 API 密钥的在线服务（引擎子菜单里每个名字后面都标了前提）：
 
-| 引擎 | 说明 | 默认 |
-| --- | --- | --- |
-| microsoft_free（Microsoft Edge 免费） | `edge.microsoft.com/translate/translatetext`，批量 ≤12 条 / ≤4000 字节，批量失败自动降级逐条重试 | ✓ 默认 |
-| system（系统翻译） | 调用 KOReader 内置 `ui/translator`，逐段请求 | |
+| 引擎 | 说明 | 前提 | 默认 |
+| --- | --- | --- | --- |
+| microsoft_free（Microsoft Edge 免费） | `edge.microsoft.com/translate/translatetext`，批量 ≤12 条 / ≤4000 字节，批量失败自动降级逐条重试 | 国内可直连 | ✓ 默认 |
+| google_free（Google 免费） | `translate.googleapis.com/translate_a/t`（POST，`q=` 走 body），批量 ≤12 条 / ≤4000 字节，429 退避 1.5 s 重试一次 | 需能访问 Google，通常要代理 | |
+| system（系统翻译） | 调用 KOReader 内置 `ui/translator`，逐段请求 | 需能访问 Google | |
 
-目标语言归一化：`zh-Hans → zh`、`zh-Hant → zh-TW`，与 KOReader 内置翻译一致。
+`google_free` 与 `system` 是同一家的两条通道：内置引擎走 `translate_a/single?client=gtx` 的 GET，出口 IP 繁忙时直接返回 429「Sorry」页；`google_free` 走 `translate_a/t` 的 POST，且一次请求可带多段。两者都需要能访问 Google——设备靠代理上网时，先在 KOReader 里配好代理再用这两个引擎。
+
+目标语言归一化：`zh-Hans → zh`、`zh-Hant → zh-TW`（内置引擎与 `google_free` 共用）。
 
 ## 功能
 

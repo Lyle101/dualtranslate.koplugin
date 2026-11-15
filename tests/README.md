@@ -22,12 +22,14 @@
     lua tests/clear_test.lua      # 清除后重翻：complete 标记与残留译文不能再拦住整书翻译
     lua tests/overlay_provider_test.lua # P0：overlay 续跑按 provider 隔离
     lua tests/langmenu_test.lua # 语言子菜单闭包
+    lua tests/google_free_test.lua # google_free：请求形状 / 响应三态 / 429 退避 / 切组边界
     lua tests/callcheck.lua     # 方法调用完整性
 
 默认全部离线。唯一联网的是可选冒烟（默认 SKIP 并退出 0）：
 
     DT_LIVE=1 lua tests/smoke_live.lua                          # 本机
     DT_LIVE=1 KO_ROOT=/mnt/us/koreader ./luajit tests/smoke_live.lua   # 设备
+    DT_LIVE=1 DT_PROXY=http://<host>:7890 ...                   # 顺带验 google_free
 
 它给每个服务翻一句真实文本，断言译文非空、`provider` 字段与引擎一致，并打印耗时。
 
