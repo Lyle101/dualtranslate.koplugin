@@ -284,7 +284,6 @@ do
     local real_delete = StoreOverlay.deleteEntries
     StoreOverlay.deleteEntries = function() return false end
     local result, err = Store.deleteProvider(BOOK, LANG, "microsoft_free")
-    StoreOverlay.deleteEntries = real_delete
     check("返回 nil + 错误", result == nil and type(err) == "string", tostring(err))
     local manifest = Overlay.loadManifest(dir)
     check("manifest 未摘除该 provider", manifest and manifest.providers.microsoft_free ~= nil)
@@ -293,7 +292,19 @@ do
     check("entries 仍在", fileExists(Overlay.entriesPath(dir, "microsoft_free")))
     check("锁已释放", lfs.attributes(dir .. "/.lock", "mode") == nil)
 
-    -- 下一条打开路径的 reconcile 会重试删除，而不是把孤儿条目补回 manifest
+    -- R1: unlink 持续失败时，full reconcile 也必须停在 pending，不能在同一趟
+    -- 里先摘 provider、再被孤儿扫描补回（light 路径同样适用）。
+    local pending = Store.reconcile(BOOK, LANG, cache)
+    local still_there = Overlay.loadManifest(dir)
+    check("unlink 失败 → pending", pending and pending.pending == "microsoft_free")
+    check("pending 时 provider 仍在 manifest",
+        still_there and still_there.providers.microsoft_free ~= nil)
+    check("pending 时 intent 保留", Overlay.loadIntent(dir) ~= nil)
+    check("pending 时 entries 保留", fileExists(Overlay.entriesPath(dir, "microsoft_free")))
+    check("pending 时未记 completed", pending and pending.completed == nil)
+
+    -- unlink 恢复后，下一次 reconcile 才真正收尾
+    StoreOverlay.deleteEntries = real_delete
     local summary = Store.reconcile(BOOK, LANG, cache, { light = true })
     local repaired = Overlay.loadManifest(dir)
     check("reconcile 完成删除", summary and summary.completed == "microsoft_free")

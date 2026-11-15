@@ -474,8 +474,12 @@ function Store.reconcile(book_path, target_lang, cache, opts)
                 -- Crash before the DB delete committed: roll the deletion back.
                 Overlay.clearIntent(dir)
                 summary.rolled_back = pid
+            elseif not Overlay.deleteEntries(dir, pid) then
+                -- The unlink failed again: keep the manifest entry and the
+                -- intent, otherwise the orphan scan below patches the
+                -- surviving entries straight back and the provider returns.
+                summary.pending = pid
             else
-                Overlay.deleteEntries(dir, pid)
                 if manifest then
                     manifest = detach_provider(manifest, pid)
                     dirty = true
