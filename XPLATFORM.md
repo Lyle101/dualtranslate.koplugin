@@ -696,8 +696,10 @@ KOReader 的 `plugins/` 目录，重启 KOReader，在阅读菜单中出现
 - 设置类变更（开关/字号/字体/颜色/清除）仍立即刷新；关书时清理节流标记。
 
 ## 3.0.1 — 多翻译服务与章节选择
-- 多翻译服务：`system`（KOReader 内置 Google）与 `microsoft_free`（Microsoft Edge 免费），缓存库、overlay 清单与设置均按 provider 隔离；旧 `system` 数据在打库时迁入 `system` provider，无需重新翻译。
+- 多翻译服务：`system`（KOReader 内置 Google）与 `microsoft_free`（Microsoft Edge 免费）。缓存库与 overlay 清单按 provider 隔离（`book_translations.provider` 进主键与索引，overlay 落到 `entries/<provider>.json`）；设置仍是全局键（引擎 / 语言 / 字号 / 颜色 / 缓存开关 / 逐章模式），只有"显示哪个服务的译文"按书写进 manifest。
+- 缓存 v3 迁移：`book_translations` 的 `provider` 列 P0 起就有值，迁移只补 `providers` 表（内置 seed + 库里现有 provider 各一行）、`selector=''` 定位列与索引，行数不变、不重译；没有 provider 字段的旧 overlay 在打开书时惰性认领一次。
 - 章节选择器：按 EPUB spine 分页列出全书章节，支持全选本书 / 全选本页 / 全不选 / 反选与长按看完整标题；列表跨多页时在末页追加确认行。
+- 按服务显示与删除：显示译文可选"自动（最近使用）"或手动指定某个服务（缺失段落回退）；管理译文可只删某个服务的译文，也可整本清空或修复清单。
 - 目录解析带磁盘缓存（按路径 + 大小 + mtime）与开书期内存缓存；冷解析前先落一帧"正在解析目录…"，避免首开选择器时界面像卡死。
 - 章节勾选标记由 ASCII `[x]` / `[ ]` 改为 `▣` / `▢`：758px 屏上 `[ ]` 会被挤成 `[]`，空框不再像框。
 - `_meta.lua` 去掉 KOReader 已废弃的 `name` 键（每次启动刷一条 WARN），版本号改为 `3.0.1`，描述更新为多服务 + 章节选择口径。
