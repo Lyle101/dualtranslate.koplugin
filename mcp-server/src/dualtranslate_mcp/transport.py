@@ -14,7 +14,6 @@ import json
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Protocol
 
@@ -88,15 +87,6 @@ class LocalTransport:
             raise TransportError(f"path escapes the device root: {remote_path}")
         return candidate
 
-    def read_text(self, remote_path: str) -> str:
-        return self._path(remote_path).read_text(encoding="utf-8")
-
-    def list_dir(self, remote_path: str) -> list[str]:
-        path = self._path(remote_path)
-        if not path.is_dir():
-            return []
-        return sorted(entry.name for entry in path.iterdir())
-
     def rpc(self, argv: list[str], stdin: bytes | None = None) -> dict:
         if not argv:
             raise TransportError("empty rpc command")
@@ -111,9 +101,6 @@ class LocalTransport:
         if command == "cat":
             return self._cat(options)
         raise HeadlessUnavailable(f"local transport cannot run {command}")
-
-    def dtctl(self, argv: list[str], stdin: bytes | None = None) -> dict:
-        raise HeadlessUnavailable("local transport cannot run dtctl")
 
     # -- device-side read commands, mirrored for USB mounts and tests --------
 
@@ -263,7 +250,7 @@ def parse_sftp_ls(output: str) -> list[str]:
 
 
 class SshTransport:
-    """OpenSSH based transport: SFTP for reads, dtctl for writes.
+    """OpenSSH based transport: every device call is a dtctl rpc over ssh.
 
     A key is mandatory.  Falling back to the default identity would silently
     use the unrestricted login key and defeat the read/write split (10.3).
@@ -273,8 +260,8 @@ class SshTransport:
 
     def __init__(self, config: Config):
         self.config = config
-        if not shutil.which("ssh") or not shutil.which("sftp"):
-            raise TransportError("ssh/sftp binaries not found")
+        if not shutil.which("ssh"):
+            raise TransportError("ssh binary not found")
         if not config.write_key:
             raise TransportError("device.write_key is not configured")
         self.write_key_path = Path(config.write_key).expanduser()
@@ -292,8 +279,10 @@ class SshTransport:
 
     def _control_path(self, read: bool) -> str:
         # %C hashes host/port/user only, so the prefix keeps the two key
-        # identities on separate master connections.
-        base = self.config.work_dir / "ssh"
+        # identities on separate master connections.  The path plus ssh's
+        # temporary suffix must fit in a Unix socket path (104 bytes), which
+        # rules out the (longer) work_dir.
+        base = Path.home() / ".dtmcp"
         base.mkdir(parents=True, exist_ok=True)
         return str(base / ("cm-ro-%C" if read else "cm-rw-%C"))
 
@@ -328,79 +317,15 @@ class SshTransport:
                 f"ssh command timed out after {self.config.timeout}s"
             ) from error
 
-    def _chroot_path(self, remote_path: str) -> str:
-        # The read key is not chrooted on the device (the filesystem is a
-        # world-writable FUSE mount, so ChrootDirectory is impossible), but the
-        # server still only ever asks for paths below mcp/jobs.
-        if not remote_path.startswith(self.config.ko_root):
-            raise TransportError(
-                f"path outside the koreader root: {remote_path}"
-            )
-        root = self.config.jobs_root.rstrip("/")
-        if remote_path == root:
-            return "."
-        if remote_path.startswith(root + "/"):
-            return remote_path[len(root) + 1:]
-        raise TransportError(
-            f"path outside the job directory ({root}): {remote_path}"
-        )
-
-    # sftp -b is not a shell: quoting rules differ and a newline starts a new
-    # command.  Only paths the server itself constructed may go into a batch.
-    SFTP_UNSAFE = re.compile(r"""[\s"'\\]""")
-
-    def _sftp_path(self, remote_path: str) -> str:
-        relative = self._chroot_path(remote_path)
-        if self.SFTP_UNSAFE.search(relative):
-            raise TransportError(
-                f"path is not safe for an sftp batch command: {relative}"
-            )
-        return relative
-
-    def _sftp(self, batch: str) -> str:
-        command = ["sftp", "-q", "-b", "-"] + self._key_args(read=True)
-        command += ["-P", str(self.config.port),
-                    f"{self.config.user}@{self.config.host}"]
-        result = self._run(command, batch.encode())
-        if result.returncode != 0:
-            raise TransportError(
-                f"sftp failed: {result.stderr.decode(errors='replace').strip()}"
-            )
-        return result.stdout.decode(errors="replace")
-
-    def read_text(self, remote_path: str) -> str:
-        remote_path = self._sftp_path(remote_path)
-        with tempfile.NamedTemporaryFile(delete=False) as handle:
-            local = handle.name
-        try:
-            self._sftp(f"get {remote_path} {local}\n")
-            return Path(local).read_text(encoding="utf-8")
-        finally:
-            Path(local).unlink(missing_ok=True)
-
-    def list_dir(self, remote_path: str) -> list[str]:
-        output = self._sftp(f"ls -1 {self._sftp_path(remote_path)}\n")
-        return parse_sftp_ls(output)
-
     def write_inbox(self, job_id: str, payload: bytes) -> str:
         device_path = f"{self.config.inbox_root}/{job_id}.json"
-        reply = self.dtctl(
+        reply = self.rpc(
             ["put", "--job", f"{self.config.jobs_root}/{job_id}/job.json", "--inbox"],
             stdin=payload,
         )
         # dtctl answers with the path it actually wrote; fall back only when an
         # older device build omits it.
         return reply.get("path") or device_path
-
-    def dtctl(self, argv: list[str], stdin: bytes | None = None) -> dict:
-        command = [
-            "ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-            "-o", f"ConnectTimeout={self.config.timeout}",
-            "-p", str(self.config.port),
-        ] + self._key_args(read=False)
-        command += [f"{self.config.user}@{self.config.host}"] + list(argv)
-        result = self._run(command, stdin)
-        return _parse_dtctl_reply(result)
 
 
 def _parse_dtctl_reply(result: subprocess.CompletedProcess) -> dict:

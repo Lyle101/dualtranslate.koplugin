@@ -1,4 +1,4 @@
-"""Transport tests: path rebasing, sftp parsing, key policy and timeouts."""
+"""Transport tests: path rebasing, rpc commands, sftp parsing and key policy."""
 
 from __future__ import annotations
 
@@ -39,86 +39,11 @@ def make_ssh(tmp_path: Path, **overrides) -> SshTransport:
     return SshTransport(make_config(tmp_path, **values))
 
 
-def test_local_transport_rebases_device_paths(tmp_path: Path) -> None:
-    device = tmp_path / "device"
-    job_dir = device / "cache/dualtranslate/mcp/jobs/2026_1"
-    job_dir.mkdir(parents=True)
-    (job_dir / "job.json").write_text(json.dumps({"schema": "x"}), encoding="utf-8")
-    transport = LocalTransport(KO_ROOT, str(device))
-    assert json.loads(transport.read_text(f"{JOBS}/2026_1/job.json")) == {"schema": "x"}
-    assert transport.list_dir(JOBS) == ["2026_1"]
-
-
-def test_local_transport_refuses_paths_outside_root(tmp_path: Path) -> None:
-    transport = LocalTransport(KO_ROOT, str(tmp_path / "device"))
-    with pytest.raises(TransportError):
-        transport.read_text("/etc/passwd")
-    with pytest.raises(TransportError):
-        # ".." must not climb out even when the prefix matches.
-        transport.read_text(f"{KO_ROOT}/../../etc/passwd")
-
-
-def test_local_transport_cannot_run_dtctl(tmp_path: Path) -> None:
-    transport = LocalTransport(KO_ROOT, str(tmp_path / "device"))
-    with pytest.raises(HeadlessUnavailable):
-        transport.dtctl(["list-jobs"])
-
-
-def test_parse_sftp_ls_strips_prompt_and_absolute_paths() -> None:
-    # Captured from the device: sftp echoes the batch and `ls -1 <abs>` prints
-    # absolute paths, which used to survive valid_job_id and yield [].
-    output = (
-        "sftp> ls -1 /mnt/us/koreader/cache/dualtranslate/mcp/jobs\n"
-        "/mnt/us/koreader/cache/dualtranslate/mcp/jobs/20261116_031914_6988\n"
-        "\n"
-    )
-    assert parse_sftp_ls(output) == ["20261116_031914_6988"]
-
-
-def test_chroot_path_maps_and_rejects(tmp_path: Path) -> None:
-    transport = make_ssh(tmp_path)
-    assert transport._chroot_path(JOBS) == "."
-    assert transport._chroot_path(f"{JOBS}/abc/job.json") == "abc/job.json"
-    with pytest.raises(TransportError):
-        transport._chroot_path("/etc/passwd")
-    with pytest.raises(TransportError):
-        transport._chroot_path(f"{KO_ROOT}/cache/dualtranslate/books/x/manifest.json")
-
-
-def test_sftp_batch_rejects_unsafe_paths(tmp_path: Path) -> None:
-    transport = make_ssh(tmp_path)
-    assert transport._sftp_path(f"{JOBS}/abc/job.json") == "abc/job.json"
-    for unsafe in ("a b", "a\tb", 'a"b', "a'b", "a\\b"):
-        with pytest.raises(TransportError):
-            transport._sftp_path(f"{JOBS}/{unsafe}/job.json")
-
-
-def test_ssh_read_text_checks_before_spawning_sftp(tmp_path: Path) -> None:
-    transport = make_ssh(tmp_path)
-    with pytest.raises(TransportError):
-        transport.read_text("/etc/passwd")
-
-
-def test_ssh_requires_write_key(tmp_path: Path) -> None:
-    with pytest.raises(TransportError):
-        SshTransport(make_config(tmp_path, transport="ssh"))
-    with pytest.raises(TransportError):
-        SshTransport(make_config(tmp_path, transport="ssh",
-                                 write_key=str(tmp_path / "missing")))
-
-
-def test_ssh_read_key_is_optional(tmp_path: Path) -> None:
-    transport = make_ssh(tmp_path)
-    # Without a read key, reads use the write key (still dtctl-locked).
-    assert transport.read_key_path == transport.write_key_path
-
-
-def _write_job(device: Path) -> Path:
+def _write_job(device: Path) -> str:
     job_dir = device / "cache/dualtranslate/mcp/jobs/2026_2"
     job_dir.mkdir(parents=True)
     job = {
-        "schema": "dualtranslate.job.v1", "job_id": "2026_2",
-        "created_at": 1,
+        "schema": "dualtranslate.job.v1", "job_id": "2026_2", "created_at": 1,
         "book": {"device_path": "/mnt/us/documents/book.epub", "title": "T",
                  "source_lang": "en", "target_lang": "zh-Hans", "spine_count": 1,
                  "file_size": 10, "file_mtime": 1},
@@ -135,14 +60,13 @@ def _write_job(device: Path) -> Path:
         json.dumps({"schema": "dualtranslate.state.v1", "status": "exported"}),
         encoding="utf-8",
     )
-    return job_dir / "job.json"
+    return f"{JOBS}/2026_2/job.json"
 
 
 def test_local_rpc_mirrors_device_commands(tmp_path: Path) -> None:
     device = tmp_path / "device"
-    job_path = _write_job(device)
+    remote_job = _write_job(device)
     transport = LocalTransport(KO_ROOT, str(device))
-    remote_job = f"{JOBS}/2026_2/job.json"
 
     jobs = transport.rpc(["list-jobs"])["jobs"]
     assert len(jobs) == 1 and jobs[0]["job_id"] == "2026_2"
@@ -162,5 +86,48 @@ def test_local_rpc_mirrors_device_commands(tmp_path: Path) -> None:
     missing = transport.rpc(["cat", "--job", remote_job, "--name", "result.json"])
     assert missing["exists"] is False
 
+
+def test_local_rpc_refuses_write_and_escape(tmp_path: Path) -> None:
+    device = tmp_path / "device"
+    remote_job = _write_job(device)
+    transport = LocalTransport(KO_ROOT, str(device))
     with pytest.raises(HeadlessUnavailable):
         transport.rpc(["put", "--job", remote_job, "--name", "state.json"])
+    with pytest.raises(TransportError):
+        transport.rpc(["job-status", "--job", "/etc/passwd"])
+    with pytest.raises(TransportError):
+        # ".." must not climb out even when the prefix matches.
+        transport.rpc(["job-status", "--job", f"{KO_ROOT}/../../etc/passwd"])
+
+
+def test_parse_sftp_ls_strips_prompt_and_absolute_paths() -> None:
+    # Captured from the device: sftp echoes the batch and `ls -1 <abs>` prints
+    # absolute paths, which used to survive valid_job_id and yield [].
+    output = (
+        "sftp> ls -1 /mnt/us/koreader/cache/dualtranslate/mcp/jobs\n"
+        "/mnt/us/koreader/cache/dualtranslate/mcp/jobs/20261116_031914_6988\n"
+        "\n"
+    )
+    assert parse_sftp_ls(output) == ["20261116_031914_6988"]
+
+
+def test_ssh_requires_write_key(tmp_path: Path) -> None:
+    with pytest.raises(TransportError):
+        SshTransport(make_config(tmp_path, transport="ssh"))
+    with pytest.raises(TransportError):
+        SshTransport(make_config(tmp_path, transport="ssh",
+                                 write_key=str(tmp_path / "missing")))
+
+
+def test_ssh_read_key_is_optional(tmp_path: Path) -> None:
+    transport = make_ssh(tmp_path)
+    # Without a read key, reads use the write key (still dtctl-locked).
+    assert transport.read_key_path == transport.write_key_path
+
+
+def test_control_paths_separate_identities(tmp_path: Path) -> None:
+    transport = make_ssh(tmp_path)
+    read_path = transport._control_path(read=True)
+    write_path = transport._control_path(read=False)
+    assert read_path != write_path
+    assert "cm-ro-" in read_path and "cm-rw-" in write_path
