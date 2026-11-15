@@ -647,6 +647,16 @@ function Epub.translate_overlay(opts, ...)
         return false
     end
     write_progress(progress_path, 0, total, 0, 0, 0, #chapters)
+    -- Checkpoint cadence.  A checkpoint re-reads the provider file and rewrites
+    -- it whole under the book lock (PW2: 5,000 entries ≈ 0.63 s load + 0.94 s
+    -- save), so saving after every 48-segment batch costs minutes of pure I/O
+    -- on a large book.  Every 5th batch (or 60 s, whichever comes first) keeps
+    -- the crash loss bounded: those segments are already in SQLite, so a resume
+    -- re-reads them as cache hits and never re-requests them.
+    local checkpoint_every_batches = 5
+    local checkpoint_interval = 60
+    local batches_since_checkpoint = 0
+    local last_checkpoint_at = os.time()
     local chapter_pos = 0
     for _, current in ipairs(chapters) do
         if cancel_requested() then cancelled = true; break end
@@ -732,9 +742,17 @@ function Epub.translate_overlay(opts, ...)
                 write_progress(progress_path, processed, total, translated_count,
                     failed_count, chapter_pos, #chapters)
             end
-            -- Atomic JSON replacement after every network batch provides a
-            -- real restart point even when KOReader or the book closes.
-            save_checkpoint(false)
+            -- Atomic JSON replacement provides a real restart point even when
+            -- KOReader or the book closes, but it is throttled (see the
+            -- cadence constants above) so a large book does not spend minutes
+            -- rewriting the same file.
+            batches_since_checkpoint = batches_since_checkpoint + 1
+            if batches_since_checkpoint >= checkpoint_every_batches
+                or os.time() - last_checkpoint_at >= checkpoint_interval then
+                save_checkpoint(false)
+                batches_since_checkpoint = 0
+                last_checkpoint_at = os.time()
+            end
         end
         release_chapter()
     end

@@ -237,9 +237,12 @@ do
     -- 行格式与 P0 断言保持一致：saved:complete:#entries:#chapters:provider
     local last_entries
     local last_manifest
+    -- checkpoint 节流用例需要数「写了几次 entries」
+    local save_entries_calls = 0
     package.preload["dualtranslate_overlay"] = function()
         return {
             saveEntries = function(_, provider, doc)
+                save_entries_calls = save_entries_calls + 1
                 last_entries = { provider = provider, count = #doc.entries }
                 return true
             end,
@@ -429,6 +432,45 @@ do
     check("缺失章节不算 done", mixed_state and #mixed_state.chapters == 1
         and mixed_state.chapters[1] == 1)
     check("缺章时 complete=false", mixed_state and mixed_state.complete == false)
+
+    -- checkpoint 节流：300 段 = 7 个 batch（48/批），每 5 批写一次，
+    -- 因此只有第 5 批与收尾各写一次 entries（旧行为每批一次 = 7 次）。
+    local big_dir = "/tmp/dualtranslate_epub_big"
+    os.execute("rm -rf " .. big_dir)
+    os.execute("mkdir -p " .. big_dir .. "/META-INF " .. big_dir .. "/OEBPS/Text")
+    write_file(big_dir .. "/META-INF/container.xml",
+        [[<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>]])
+    write_file(big_dir .. "/OEBPS/content.opf",
+        [[<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><manifest><item id="c1" href="Text/big.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>]])
+    local big_paragraphs = {}
+    for i = 1, 300 do
+        big_paragraphs[i] = "<p>Paragraph number " .. i .. " of the big book.</p>"
+    end
+    write_file(big_dir .. "/OEBPS/Text/big.xhtml",
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        .. table.concat(big_paragraphs) .. "</body></html>")
+    unpack_source = big_dir
+    os.execute("rm -rf /tmp/dt_big_out")
+    save_entries_calls = 0
+    last_entries = nil
+    local big_result, big_err = Epub2:translate_overlay({
+        book_path = "/books/big.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dt_big_prog.txt", output_dir = "/tmp/dt_big_out",
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts)
+            local out = {}
+            for i, t in ipairs(texts) do out[i] = "B:" .. t end
+            return out
+        end,
+    })
+    check("大书整书翻译成功", big_result ~= nil, tostring(big_err))
+    check("大书段落数", big_result and big_result.translated == 300,
+        tostring(big_result and big_result.translated))
+    check("checkpoint 按 5 批节流（7 批写 2 次）", save_entries_calls == 2,
+        "got " .. tostring(save_entries_calls))
+    check("末次 checkpoint 含全部段", last_entries and last_entries.count == 300,
+        tostring(last_entries and last_entries.count))
     unpack_source = TEST_DIR
 end
 
