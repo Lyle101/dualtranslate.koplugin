@@ -225,6 +225,8 @@ do
     check("有任务时列表可构建", ok and #items == 1, tostring(items))
     check("列表项含段数", ok and items[1].text:find("段") ~= nil,
         ok and items[1].text or "")
+    check("列表项带序号", ok and items[1].text:find("^1%. ") ~= nil,
+        ok and items[1].text or "")
     check("标题计数来自目录名", Mcp.countJobs() == 1)
 
     os.execute('rm -rf "' .. job_dir .. '"')

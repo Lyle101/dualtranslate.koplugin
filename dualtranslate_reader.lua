@@ -481,6 +481,7 @@ function dualtranslate:importMcpResults()
         return
     end
     self._page_translation_overlay_state = nil
+    self._mcp_job_menu_cache = nil
     self:refreshDocumentStyles()
     local segments, last = 0, nil
     for _, item in ipairs(summary.imported) do
@@ -596,8 +597,8 @@ function dualtranslate:buildMcpJobMenu()
         for position, job in ipairs(jobs) do
             local entry = job
             items[#items + 1] = {
-                text = string.format("%s · %s · %d %s", entry.job_id,
-                    tostring(entry.status), entry.total or 0, _("段")),
+                text = string.format("%d. %s · %s · %d %s", position,
+                    entry.job_id, tostring(entry.status), entry.total or 0, _("段")),
                 callback = function() self:showMcpJob(entry) end,
             }
         end
