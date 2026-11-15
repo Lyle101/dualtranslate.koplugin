@@ -7,8 +7,11 @@
 --   DT_LIVE=1 luajit tests/smoke_live.lua
 --   DT_LIVE=1 KO_ROOT=/mnt/us/koreader luajit tests/smoke_live.lua   (on device)
 --
--- Needs KOReader's own libraries (luasocket / json / ltn12) via KO_ROOT;
--- missing KO_ROOT prints SKIP and exits 0.
+-- Needs KOReader's own libraries (luasocket / json / ltn12) via KO_ROOT.
+-- Unset DT_LIVE means "don't run it" -> SKIP, exit 0.  Set DT_LIVE=1 means
+-- "run it": a KOReader install that cannot be loaded is then a FAILURE, not a
+-- skip, so CI can never report a false green.  The built-in engine still only
+-- reports SKIP where ui/translator cannot load (headless / macOS SDL build).
 -- ============================================================
 local SRC, DST = "en", "zh-Hans"
 local TEXT = "Hello world."
@@ -17,6 +20,13 @@ local TEXT2 = "Good morning."
 if os.getenv("DT_LIVE") ~= "1" then
     print("SKIP: live smoke test makes real HTTP calls, set DT_LIVE=1 to run it")
     os.exit(0)
+end
+
+-- DT_LIVE=1 was explicit, so an unusable environment must fail loudly.
+local function fail_env(message)
+    print("FAIL: " .. message)
+    print("FAIL: DT_LIVE=1 was requested, so a missing environment is a failure, not a skip")
+    os.exit(1)
 end
 
 local KO = os.getenv("KO_ROOT") or "/Applications/KOReader.app/Contents/koreader"
@@ -37,8 +47,7 @@ KO = absolute_dir(KO)
 local ffi = require("ffi")
 ffi.cdef[[int chdir(const char *path);]]
 if ffi.C.chdir(KO) ~= 0 then
-    print("SKIP: KOReader install not found at " .. KO .. " (set KO_ROOT)")
-    os.exit(0)
+    fail_env("KOReader install not found at " .. KO .. " (set KO_ROOT)")
 end
 
 package.path = script_dir .. "/?.lua;" .. script_dir .. "/../?.lua;"
@@ -47,9 +56,8 @@ package.path = script_dir .. "/?.lua;" .. script_dir .. "/../?.lua;"
 
 local ok_setup, setup_err = pcall(require, "setupkoenv")
 if not ok_setup then
-    print("SKIP: KOReader libraries not loadable from " .. KO
+    fail_env("KOReader libraries not loadable from " .. KO
         .. " (" .. tostring(setup_err) .. ")")
-    os.exit(0)
 end
 
 -- Headless run: KOReader's shell normally owns these globals.
@@ -67,8 +75,9 @@ _G.G_reader_settings = _G.G_reader_settings or {
 
 local ok_providers, Providers = pcall(require, "dualtranslate_providers")
 if not ok_providers then
-    print("SKIP: providers module not loadable (" .. tostring(Providers) .. ")")
-    os.exit(0)
+    -- On the macOS desktop build this is where it stops: providers ->
+    -- socketutil -> device -> SDL device without a window.  Run it on a device.
+    fail_env("providers module not loadable (" .. tostring(Providers) .. ")")
 end
 
 local ok_socket, socket = pcall(require, "socket")

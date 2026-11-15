@@ -30,8 +30,12 @@
     DT_LIVE=1 KO_ROOT=/mnt/us/koreader ./luajit tests/smoke_live.lua   # 设备
 
 它给每个服务翻一句真实文本，断言译文非空、`provider` 字段与引擎一致，并打印耗时。
-内置引擎（`system`）在 headless 下报 SKIP：`ui/translator` 需要完整 reader 进程；
-macOS 的 SDL 版同样加载不了（`socketutil → device → SDL window`），要在设备上跑。
+
+退出码约定：**不设 `DT_LIVE` 才 SKIP（退出 0）**；一旦设成 `DT_LIVE=1`，KOReader 库、
+`providers` 模块加载失败都按 FAIL 退出 1 —— 否则 CI 里设了 `DT_LIVE=1` 也只会看到
+一片绿。唯一仍报 SKIP 的是内置引擎（`system`）：headless 缺 `ui/translator` 需要的
+reader 进程，macOS 的 SDL 版连 `socketutil → device` 都过不去（`SDL window` 为 nil），
+所以这个脚本实际只能在设备上跑（macOS 上会以 FAIL 退出 1，这是预期）。
 
 注意：
 - 测试读写 /tmp 下临时目录（/tmp/dt_data、/tmp/dt_state_test、/tmp/dualtranslate_epub_test 等）。
