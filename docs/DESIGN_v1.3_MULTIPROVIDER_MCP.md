@@ -4,11 +4,11 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.7（P3 收件箱 MVP） |
-| 日期 | 2026-11-15 |
-| 适用代码 | DualTranslate `v3.0.1` 之后（P0 / P1 / P2 已合入；P3 收件箱 MVP 已合入） |
+| 文档版本 | 0.8（SSH 双 key 联调） |
+| 日期 | 2026-11-16 |
+| 适用代码 | DualTranslate `v3.0.1` 之后（P0 / P1 / P2 已合入；P3 收件箱 MVP 与 dtctl rpc 已合入） |
 | 目标版本 | `v3.0.1` 已发布多服务 + 章节选择；MCP 外部翻译仍按 `v1.3.0` 规划 |
-| 状态 | P0/P1/P2 已实施；P3 收件箱 MVP 已实施（导出 → 导入 → 刷新、dtctl、MCP Server）；SSH 双 key 部署与 elicitation 仍待真机验证 |
+| 状态 | P0/P1/P2 已实施；P3 收件箱 MVP 与 SSH 双 key 传输已在真机跑通（导出 → 读段 → 提交 → 导入）；elicitation 与 P4 未实现 |
 | 代码状态 | P0/P1/P2/P3-MVP 已提交并有回归测试；P4（reconcile 硬化、ndjson、打包文档）未实现 |
 
 **修订记录**
@@ -22,6 +22,7 @@
 | 0.5 | 2026-11-15 | P0/P1/P2 全部落地（`v3.0.1`）后对齐表头：适用代码、状态、代码状态三行改为「P0/P1/P2 已实施，P3 未开工」；正文设计与剩余 P3 章节不变 |
 | 0.6 | 2026-11-15 | 真机实测 checkpoint 成本（5,000 段写 ~938 ms / 读 ~632 ms）后落地节流：`translate_overlay` 改为每 5 批或 60 s 写一次，§2.2 数据流与 §6.3 性能硬化同步；ndjson 仍留 P4 |
 | 0.7 | 2026-11-15 | P3 收件箱 MVP 落地：`dualtranslate_mcp.lua`（导出/收件箱/导入信号）、`Store.importResult`、`tools/dtctl`、`mcp-server/`；设计 10.2/10.5/10.6/10.7 的收件箱路径已实现，SSH 自动导入与 elicitation 留待真机验证 |
+| 0.8 | 2026-11-16 | SSH 双 key 真机联调：`/mnt/us` 是 world-writable FUSE，chroot 不可能（§10.4 改写）；传输统一为 `dtctl rpc`（argv JSON over stdin + `--mode=read|write` 白名单），新增 `cat` / `job-status` / `get-segments`，分页移到设备端；`ControlMaster` 复用后约 0.5 s/次；B1–B3（sftp 回显、空格路径、超时/缺 key）已修 |
 
 **阅读约定**
 
@@ -1447,7 +1448,7 @@ book_root = "/mnt/us/documents"
 | `dt_refresh_device` | 通知插件刷新外部译文 | 否 |
 | `dt_prepare_job` | （可选）PC 发起抽取 | 否 |
 
-传输归属（双 key 见本节「工具安全约束」与 10.4）：`dt_list_jobs` / `dt_get_job` / `dt_get_segments` / `dt_job_status` 的数据都在 `mcp/jobs/` 内，走**只读 key** 的 SFTP。`dt_list_providers` 语义上只读，但数据源是 DB 与 `books/<hash>/manifest.json`，在只读 key 的 chroot 之外，必须走**写入 key** 的 `dtctl list-providers`。其余写工具（confirm/submit/commit/delete/set-display/refresh/prepare）一律走写入 key 的 dtctl；文件上传（state.json、result*.json）走 `dtctl put`（stdin，见 10.5）。
+传输归属（双 key 见本节「工具安全约束」与 10.4）：全部走 `dtctl rpc`。只读 key 的强制命令带 `--mode=read`，允许 `list-jobs` / `job-status` / `get-segments` / `cat` / `list-providers`；写入 key 允许全部子命令。`get-segments` 在设备端分页，PC 不下载整份 `job.json`；文件上传（`state.json`、`result*.json`）走 rpc 的 `stdin` 字段。
 
 `dt_get_segments` 输入：
 
@@ -1545,9 +1546,9 @@ MCP 规范支持 elicitation；实现两套路径：
 - 删除类工具标记 `destructiveHint`，调用前要求用户确认。
 - 结果 JSON 大小上限（建议 50MB）；段落数上限；译文长度上限。
 - **SSH key 必须拆成两把，不能一把通吃**：
-  - **只读 key**（下载 job/result）：`restrict,command="internal-sftp -R"` + `ChrootDirectory` 限定到 `mcp/jobs/`，只允许 SFTP 读取（`-R` 强制只读；forced command 下 SCP 与 `ssh "cat"` 同样被拦截，不能用作读通道）。不要授予 db 与书籍目录的读权限。注意：sshd 要求 `ChrootDirectory` 及其所有上级目录 root 所有且不可被组/其他用户写，P3 部署前必须真机验证。
-  - **写入 key**（put / import / delete / set-display 等）：`command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh",no-pty,no-agent-forwarding,no-port-forwarding`，**不允许 SFTP**。forced command 下 sshd **不执行**客户端请求的命令行，只把它放进 `SSH_ORIGINAL_COMMAND` 环境变量——`dtctl.sh` 的 `"$@"` 是空的，dtctl.lua 必须解析该环境变量并做白名单校验后再分发（见 10.5），否则所有子命令都收到空参数。
-  - **上传通道**：只读 key 不能写、写入 key 没有 SFTP，因此文件上传（`state.json` / `result.partial.json` / `result.json` / inbox 降级）一律走写入 key 的 `dtctl put`，文件内容经 stdin 传入（见 10.5）。
+  - **只读 key**（读 job / status / segments / provider 列表）：`command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh --mode=read rpc",no-pty,no-port-forwarding`。**不使用 SFTP**：2026-11-16 真机实测 `/mnt/us` 是 world-writable 的 `fuse.fsp` 挂载（`chmod` 被静默忽略），OpenSSH 的 `ChrootDirectory` 拒绝此类目录，dropbear 也没有 chroot 概念；因此「只读」不靠路径隔离，而靠 dtctl 的命令白名单（10.5），SFTP 子系统请求会被强制命令拦下。不要授予 db 与书籍目录的读权限。
+  - **写入 key**（put / import / delete / set-display / extract 等）：`command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh rpc",no-pty,no-agent-forwarding,no-port-forwarding`。forced command 下 sshd 不执行客户端命令行，只把它放进 `SSH_ORIGINAL_COMMAND`；真正的参数以 JSON（`{"argv":[...],"stdin":"..."}`）从 stdin 传入，因此书路径含空格或引号也不需要切词与转义（10.5）。
+  - **上传通道**：文件内容放进 rpc 的 `stdin` 字段（`dtctl put`），不经过命令行；`--inbox` 与 `--name` 白名单不变。
   - 原因：`command=` 的 forced command 会拦截 `sftp` 子系统请求，**同一把 key 不能既走 SFTP 又走 dtctl**。只用一把锁死的 key，10.4 的「SFTP 首选」必然失败；只用一把未锁的 key，「MCP 不暴露 exec」就只是 Python 层的自觉，key 泄漏即可拿到 root shell。
 - 设备侧再做一次校验（见 10.5）：`dtctl` 自己校验 `--job` 的归属、`job.book.device_path` 前缀、`--provider` 文法。两层重复是故意的。
 
@@ -1565,7 +1566,7 @@ class Transport(Protocol):
 
 | 实现 | 场景 | 说明 |
 | --- | --- | --- |
-| `SshTransport` | Kindle 越狱 + USBNetwork | 首选；**读走只读 key 的 SFTP（`internal-sftp -R`），写（含上传）只走写入 key 的 dtctl**（见 10.3 双 key）；`write_text` 实现为 `dtctl put`（stdin）；SCP/`ssh "cat"` 读回退仅适用于未配置 forced command 的设备，双 key 配置下会被 forced command 拦截；不提供任意 `ssh exec` |
+| `SshTransport` | Kindle 越狱 + USBNetwork | 唯一通道是 `dtctl rpc`（JSON over stdin）；读 key 用 `--mode=read` 强制命令，写 key 用全命令；读 key 缺省时回退到写 key；`ControlMaster` 按 key 身份分 socket（`~/.dtmcp/cm-ro-%C` / `cm-rw-%C`），复用后单次调用约 0.5 s；不提供任意 `ssh exec`，也不使用 SFTP |
 | `UsbTransport` | Kindle 挂载为 U 盘 | 直接文件读写；无法执行导入命令，走「收件箱」模式 |
 | `LocalTransport` | 模拟器/测试 | 指向本地目录，CI 用 |
 | `AdbTransport` | Android 设备 | 后续扩展 |

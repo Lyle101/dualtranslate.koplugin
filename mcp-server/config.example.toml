@@ -1,4 +1,4 @@
-# Copy to ~/.config/dualtranslate-mcp/config.toml (or set DT_CONFIG).
+# Copy to $XDG_CONFIG_HOME/dualtranslate-mcp/config.toml (default ~/.config).
 # Every value can also be provided as an environment variable, which is
 # usually easier for a stdio MCP client.
 
@@ -8,14 +8,32 @@ transport = "ssh"
 host = "kindle"
 user = "root"
 port = 22
+timeout = 30
 
-# Two keys, never one (design 10.3):
-#   read_key  -> restrict,command="internal-sftp -R", chrooted to mcp/jobs
-#   write_key -> command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh",no-pty
-read_key = "~/.ssh/kindle_ro"
-write_key = "~/.ssh/kindle_rw"
+# Two keys, never one. The Kindle cannot chroot (the data partition is a
+# world-writable FUSE mount), so the split is enforced by forced commands:
+#
+#   read_key  -> command=".../tools/dtctl.sh --mode=read rpc",no-pty,...
+#                allows list-jobs / job-status / get-segments / cat /
+#                list-providers, and nothing else.
+#   write_key -> command=".../tools/dtctl.sh rpc",no-pty,...
+#                allows the full command set.
+#
+# Both keys may only run dtctl: the SFTP subsystem is not needed and is
+# rejected by the forced command.  read_key is optional — without it reads use
+# write_key (still locked to dtctl).
+read_key = "~/.ssh/kindle_dt_ro"
+write_key = "~/.ssh/kindle_dt_rw"
 
+# Device-absolute path of the KOReader install.  SSH reads and writes are
+# both addressed as <koreader_root>/cache/dualtranslate/mcp/...
 koreader_root = "/mnt/us/koreader"
+
+# Recommended authorized_keys lines (one per key, appended, never replacing
+# the login key):
+#
+# command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh --mode=read rpc",no-pty,no-port-forwarding,no-agent-forwarding ssh-ed25519 AAAA... dualtranslate-ro
+# command="/mnt/us/koreader/plugins/dualtranslate.koplugin/tools/dtctl.sh rpc",no-pty,no-port-forwarding,no-agent-forwarding ssh-ed25519 AAAA... dualtranslate-rw
 
 # For transport = "local": the local directory that mirrors koreader_root.
 # local_root = "/Volumes/Kindle/koreader"

@@ -95,8 +95,19 @@ KOReader 的插件目录是安装根目录下的 `plugins/` 文件夹，目录�
 
 1. **导出**：「MCP 外部翻译 → 导出所选章节…」，确认隐私提示后任务写入 `cache/dualtranslate/mcp/jobs/<job_id>/job.json`（含原文，供电脑端读取）。
 2. **电脑端**：安装 `mcp-server/`（`pip install -e mcp-server`），按 `mcp-server/config.example.toml` 配置 SSH 双 key，在 MCP 客户端里使用 `dt_list_jobs` / `dt_get_segments` / `dt_confirm_model` / `dt_submit_translations` / `dt_commit_job`。模型名称必须由用户确认。
-3. **回传**：`dt_commit_job` 经 `tools/dtctl.sh` 写入设备；设备上没有 SSH 时把 `result.json` 放进 `cache/dualtranslate/mcp/inbox/<job_id>.json`，再用「MCP 外部翻译 → 导入结果」。
+3. **回传**：`dt_commit_job` 经 `tools/dtctl.sh rpc` 写入设备；设备上没有 SSH 时把 `result.json` 放进 `cache/dualtranslate/mcp/inbox/<job_id>.json`，再用「MCP 外部翻译 → 导入结果」。
 4. **显示**：导入后书页可选是否切换显示；翻页会自动读取 `reload.signal` 刷新。
+
+**SSH 双 key 的边界**：Kindle 的 `/mnt/us` 是 world-writable 的 FUSE 挂载，`ChrootDirectory` 不可用，所以「只读」不靠 chroot，而靠 authorized_keys 的强制命令：
+
+```
+command=".../tools/dtctl.sh --mode=read rpc",no-pty,... ssh-ed25519 AAAA... dualtranslate-ro
+command=".../tools/dtctl.sh rpc",no-pty,...            ssh-ed25519 AAAA... dualtranslate-rw
+```
+
+- 两把 key 都只能执行 dtctl（SFTP 子系统被强制命令拦下），读 key 额外被限制在白名单（`list-jobs` / `job-status` / `get-segments` / `cat` / `list-providers`）。
+- 电脑端把 `--mode=read` 写在强制命令里，客户端无法注入；命令参数以 JSON 从 stdin 传来，书路径含空格也不需要引号。
+- 连接复用（`ControlMaster`）后单次调用约 0.5 s；不配双 key 也可以只配写 key，读命令会走它（仍被 dtctl 锁定）。
 
 没有 PC 端时，原有三个在线引擎不受影响。
 
