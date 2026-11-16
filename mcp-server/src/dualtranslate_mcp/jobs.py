@@ -57,6 +57,26 @@ class JobService:
             raise ValidationError(f"invalid job id: {job_id}")
         return self._rpc(["job-status", "--job", self.job_path(job_id)])
 
+    def _meta_path(self, job_id: str) -> Path:
+        return self._work_dir(job_id) / "job-meta.json"
+
+    def job_meta(self, job_id: str, refresh: bool = False) -> dict:
+        """Cached job metadata (book fields, total, segment ids).
+
+        A job's segments never change after export, so a submit/commit only
+        needs this once.  Without the cache every submit would ask the device
+        for ten thousand ids again (about 100 KB per call).
+        """
+        path = self._meta_path(job_id)
+        if not refresh and path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pass
+        meta = self.status(job_id)
+        path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        return meta
+
     def _state_cache(self, job_id: str) -> Path:
         return self._work_dir(job_id) / "state.json"
 
@@ -157,7 +177,7 @@ class JobService:
         self._upload(job_id, "state.json", state)
 
     def submit(self, job_id: str, segments: list[dict]) -> dict:
-        status = self.status(job_id)
+        status = self.job_meta(job_id)
         known = set(status.get("segment_ids") or [])
         if not isinstance(segments, list) or not segments:
             raise ValidationError("segments must be a non-empty list")
@@ -205,7 +225,7 @@ class JobService:
     def confirm_model(
         self, job_id: str, model_name: str, display_name: str | None = None
     ) -> dict:
-        status = self.status(job_id)
+        status = self.job_meta(job_id)
         state = self.load_state(job_id)
         model_name = (model_name or "").strip()
         if not model_name:
@@ -248,7 +268,7 @@ class JobService:
         set_display: bool = False,
         allow_partial: bool = False,
     ) -> dict:
-        status = self.status(job_id)
+        status = self.job_meta(job_id)
         state = self.load_state(job_id)
         if not state.get("provider_id") or not state.get("model_name"):
             return {

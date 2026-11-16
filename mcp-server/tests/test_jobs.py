@@ -191,3 +191,20 @@ def test_build_result_keeps_job_order(service: JobService) -> None:
     result = build_result(JOB_ID, segment_ids, state, translations)
     assert [row["id"] for row in result["translations"]] == ["s000001", "s000003"]
     assert result["stats"]["rejected"] == 1
+
+
+def test_job_meta_is_cached(service: JobService, monkeypatch) -> None:
+    calls = {"n": 0}
+    original = service.status
+
+    def counting(job_id: str) -> dict:
+        calls["n"] += 1
+        return original(job_id)
+
+    monkeypatch.setattr(service, "status", counting)
+    first = service.job_meta(JOB_ID)
+    second = service.job_meta(JOB_ID)
+    assert first["total"] == 3 and second["segment_ids"] == first["segment_ids"]
+    assert calls["n"] == 1
+    service.job_meta(JOB_ID, refresh=True)
+    assert calls["n"] == 2

@@ -266,6 +266,22 @@ do
     check("listJobs 字段", list[1].total == 4 and list[1].status == "exported"
         and list[1].book_path == BOOK and list[1].chapter_count == 2)
 
+    -- 索引：meta.json + segments.ndjson，供 get-segments/job-status 避免整份解码
+    check("meta.json 写入", lfs.attributes(result.dir .. "/meta.json", "mode") ~= nil)
+    check("segments.ndjson 写入",
+        lfs.attributes(result.dir .. "/segments.ndjson", "mode") ~= nil)
+    local meta = Mcp.loadMeta(result.job_id)
+    check("meta.total", meta and meta.total == 4 and meta.chapter_count == 2)
+    local seg_ids = Mcp.listSegmentIds(result.job_id)
+    check("索引 id 数", seg_ids and #seg_ids == 4 and seg_ids[1] == "s000001")
+    local page = Mcp.readSegmentPage(result.job_id, 0, 2, true)
+    check("索引分页", page and #page.segments == 2 and page.total == 4
+        and page.segments[1].id == "s000001")
+    check("索引 context", page and page.segments[1].prev == nil
+        and page.segments[1].next ~= nil)
+    local tail = Mcp.readSegmentPage(result.job_id, 3, 10, false)
+    check("索引尾页", tail and #tail.segments == 1 and tail.segments[1].id == "s000004")
+
     -- Second export must not reuse the id.
     local second = Mcp.exportJob{ book_path = BOOK, chapter_indexes = { 2 } }
     check("新任务新编号", second and second.job_id ~= result.job_id)

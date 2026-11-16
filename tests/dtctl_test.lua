@@ -290,6 +290,14 @@ do
     local read_ok, read_ok_code = rpc({ argv = { "list-jobs" } }, "read")
     check("只读模式允许读", read_ok_code == 0)
 
+    -- Malformed JSON must come back as a JSON error, not a Lua traceback.
+    local bad_path = ROOT .. "/rpc_bad.json"
+    write_file(bad_path, "{not json")
+    local malformed_out, malformed_code = run("rpc", nil, bad_path)
+    local malformed_data = decode_single_line(malformed_out)
+    check("畸形载荷返回 JSON 错误", malformed_code == 2 and malformed_data
+        and malformed_data.code == "INVALID_ARGUMENT", malformed_out)
+
     local bad_body, bad_body_code = rpc({ argv = { "list-jobs" }, stdin = 123 })
     local bad_body_data = decode_single_line(bad_body)
     check("非字符串 body 拒绝", bad_body_code == 2 and bad_body_data
@@ -302,5 +310,54 @@ do
         write_out)
 end
 
+
+-- ============================================================
+print("== 7. 索引路径（job.json 不存在） ==")
+do
+    local function rpc2(argv_table)
+        local path = ROOT .. "/rpc.json"
+        write_file(path, JSON.encode(argv_table))
+        return run("rpc", nil, path)
+    end
+    local index_job = "20261116_050000_0001"
+    local index_dir = DATA .. "/cache/dualtranslate/mcp/jobs/" .. index_job
+    os.execute('mkdir -p "' .. index_dir .. '"')
+    write_file(index_dir .. "/meta.json", JSON.encode({
+        schema = "dualtranslate.job.meta.v1", job_id = index_job,
+        created_at = os.time(),
+        book = { device_path = BOOK, title = "Index", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 1,
+            file_size = BOOK_SIZE, file_mtime = BOOK_MTIME },
+        chapter_count = 1, total = 3,
+    }))
+    local lines = {}
+    for index = 1, 3 do
+        lines[index] = JSON.encode({
+            id = string.format("s%06d", index), parent_id = string.format("s%06d", index),
+            part = 1, parent_total = 1, chapter_index = 1, chapter_title = "One",
+            selector = "p[" .. index .. "]", source = "text " .. index,
+        })
+    end
+    write_file(index_dir .. "/segments.ndjson", table.concat(lines, "\n") .. "\n")
+    write_file(index_dir .. "/state.json", JSON.encode({
+        schema = "dualtranslate.state.v1", status = "exported", submitted = 0, total = 3 }))
+
+    -- job.json is deliberately absent: the index path must not need it.
+    local index_job_path = index_dir .. "/job.json"
+    local status_out = rpc2({ argv = { "job-status", "--job", index_job_path } })
+    local status = decode_single_line(status_out)
+    check("索引 job-status", status and status.total == 3
+        and #status.segment_ids == 3 and status.title == "Index", status_out)
+
+    local seg_out = rpc2({ argv = { "get-segments", "--job", index_job_path,
+        "--offset", "1", "--limit", "1", "--context" } })
+    local seg = decode_single_line(seg_out)
+    check("索引 get-segments", seg and #seg.segments == 1
+        and seg.segments[1].id == "s000002" and seg.next_offset == 2, seg_out)
+    check("索引 context", seg and seg.segments[1].prev == "text 1"
+        and seg.segments[1].next == "text 3", seg_out)
+
+    os.execute('rm -rf "' .. index_dir .. '"')
+end
 print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))
 os.exit(failed == 0 and 0 or 1)

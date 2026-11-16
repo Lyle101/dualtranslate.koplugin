@@ -414,22 +414,35 @@ handlers["job-status"] = function(opts)
     local job_path, job_id_or_err = validate_job_path(opts.job)
     if not job_path then return nil, job_id_or_err end
     local job_id = job_id_or_err
-    local job, job_err = Mcp.loadJob(job_id)
-    if not job then return nil, job_err end
     local state = Mcp.loadState(job_id) or {}
-    local segment_ids = {}
-    for index, segment in ipairs(job.segments) do segment_ids[index] = segment.id end
+    local meta = Mcp.loadMeta(job_id)
+    local book, total, chapter_count, segment_ids
+    if meta then
+        -- Index path: no job.json decode at all.
+        book = meta.book or {}
+        segment_ids = Mcp.listSegmentIds(job_id) or {}
+        total = tonumber(meta.total) or #segment_ids
+        chapter_count = tonumber(meta.chapter_count) or 0
+    else
+        local job, job_err = Mcp.loadJob(job_id)
+        if not job then return nil, job_err end
+        book = job.book or {}
+        segment_ids = {}
+        for index, segment in ipairs(job.segments) do segment_ids[index] = segment.id end
+        total = #job.segments
+        chapter_count = #(job.chapters or {})
+    end
     return {
         ok = true, job_id = job_id,
-        book_path = job.book and job.book.device_path,
-        title = job.book and job.book.title,
-        source_lang = job.book and job.book.source_lang,
-        target_lang = job.book and job.book.target_lang,
-        spine_count = job.book and job.book.spine_count,
-        file_size = job.book and job.book.file_size,
-        file_mtime = job.book and job.book.file_mtime,
-        total = #job.segments,
-        chapter_count = #(job.chapters or {}),
+        book_path = book.device_path,
+        title = book.title,
+        source_lang = book.source_lang,
+        target_lang = book.target_lang,
+        spine_count = book.spine_count,
+        file_size = book.file_size,
+        file_mtime = book.file_mtime,
+        total = total,
+        chapter_count = chapter_count,
         segment_ids = segment_ids,
         status = state.status or "exported",
         provider_id = state.provider_id,
@@ -438,18 +451,30 @@ handlers["job-status"] = function(opts)
     }
 end
 
--- Pagination lives on the device: a 646-chapter job is several MB and the PC
--- would otherwise re-download it for every page.
+-- Pagination lives on the device.  With the NDJSON index a page costs
+-- O(offset) short lines; a job exported before the index existed falls back
+-- to the old whole-file path.
 handlers["get-segments"] = function(opts)
     local job_path, job_id_or_err = validate_job_path(opts.job)
     if not job_path then return nil, job_id_or_err end
-    local job, job_err = Mcp.loadJob(job_id_or_err)
-    if not job then return nil, job_err end
+    local job_id = job_id_or_err
     local offset = tonumber(opts.offset) or 0
     local limit = tonumber(opts.limit) or 50
     if offset < 0 or offset ~= math.floor(offset) then return nil, "invalid --offset" end
     if limit ~= math.floor(limit) then return nil, "invalid --limit" end
     limit = math.max(1, math.min(limit, 100))
+    local with_context = opts.context == true
+    local page, page_err = Mcp.readSegmentPage(job_id, offset, limit, with_context)
+    if page then
+        local last = offset + #page.segments
+        return {
+            ok = true, job_id = job_id, total = page.total,
+            next_offset = last < page.total and last or nil,
+            segments = page.segments,
+        }
+    end
+    local job, job_err = Mcp.loadJob(job_id)
+    if not job then return nil, job_err or page_err end
     local segments = job.segments
     local rows = {}
     local last = math.min(offset + limit, #segments)
@@ -464,14 +489,14 @@ handlers["get-segments"] = function(opts)
             chapter_title = segment.chapter_title,
             source = segment.source,
         }
-        if opts.context then
+        if with_context then
             row.prev = index > 1 and segments[index - 1].source:sub(-200) or nil
             row.next = index < #segments and segments[index + 1].source:sub(1, 200) or nil
         end
         rows[#rows + 1] = row
     end
     return {
-        ok = true, job_id = job_id_or_err, total = #segments,
+        ok = true, job_id = job_id, total = #segments,
         next_offset = last < #segments and last or nil,
         segments = rows,
     }
@@ -638,9 +663,12 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Read-only commands a key may run.  Everything else needs the write key.
+-- list-providers is not here on purpose: it opens the cache DB, and opening a
+-- v2 database runs the schema migration (a write).  A read-only key must never
+-- trigger that, so provider listing needs the write key.
 local READ_COMMANDS = {
     ["list-jobs"] = true, cat = true, ["job-status"] = true,
-    ["get-segments"] = true, ["list-providers"] = true,
+    ["get-segments"] = true,
 }
 local MODE_ALLOWED = { read = READ_COMMANDS, write = SUBCOMMANDS }
 
@@ -653,8 +681,10 @@ local function read_rpc_payload()
     local raw, read_err = read_stdin(16 * 1024 * 1024)
     if not raw then return nil, read_err end
     if raw == "" then return nil, "empty rpc payload" end
-    local document = JSON.decode(raw)
-    if type(document) ~= "table" or type(document.argv) ~= "table" then
+    -- JSON.decode returns nil on malformed input; an unprotected call would
+    -- leak a Lua traceback to the caller (agent) instead of a JSON error.
+    local decoded, document = pcall(JSON.decode, raw)
+    if not decoded or type(document) ~= "table" or type(document.argv) ~= "table" then
         return nil, "invalid rpc payload"
     end
     local arguments = {}
