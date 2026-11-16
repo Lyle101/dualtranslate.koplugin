@@ -498,8 +498,9 @@ handlers["get-segments"] = function(opts)
             source = segment.source,
         }
         if with_context then
-            row.prev = index > 1 and segments[index - 1].source:sub(-200) or nil
-            row.next = index < #segments and segments[index + 1].source:sub(1, 200) or nil
+            row.prev = index > 1 and Tools.utf8_tail(segments[index - 1].source, 200) or nil
+            row.next = index < #segments
+                and Tools.utf8_head(segments[index + 1].source, 200) or nil
         end
         rows[#rows + 1] = row
     end

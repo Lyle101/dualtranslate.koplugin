@@ -205,5 +205,41 @@ function Tools.unzip_to(archive_path, dest_dir)
     return true
 end
 
+-- UTF-8 safe slices.  A 200-byte boundary lands inside a 3-byte character
+-- two thirds of the time on Chinese sources; cutting by bytes produces an
+-- invalid JSON string that strict clients reject outright.
+function Tools.utf8_char_len(byte)
+    if byte < 0xC0 then return 1 end
+    if byte < 0xE0 then return 2 end
+    if byte < 0xF0 then return 3 end
+    return 4
+end
+
+function Tools.utf8_tail(text, limit)
+    if type(text) ~= "string" or #text <= limit then return text end
+    local start = #text - limit + 1
+    -- 0x80-0xBF are continuation bytes: the slice would start mid-character.
+    -- Step forward to the next character start: dropping one byte keeps the
+    -- result within limit, stepping back would exceed it.
+    while start <= #text do
+        local byte = text:byte(start)
+        if not byte or byte < 0x80 or byte >= 0xC0 then break end
+        start = start + 1
+    end
+    return text:sub(start)
+end
+
+function Tools.utf8_head(text, limit)
+    if type(text) ~= "string" or #text <= limit then return text end
+    local stop = limit
+    while stop > 0 do
+        local byte = text:byte(stop + 1)
+        if not byte or byte < 0x80 or byte >= 0xC0 then break end
+        stop = stop - 1
+    end
+    if stop == 0 then return "" end
+    return text:sub(1, stop)
+end
+
 return Tools
 

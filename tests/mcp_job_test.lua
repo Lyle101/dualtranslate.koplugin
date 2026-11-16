@@ -166,7 +166,7 @@ local BOOK = stub_book(ROOT .. "/books/job.epub", {
     { "META-INF/container.xml", CONTAINER },
     { "OEBPS/content.opf", OPF },
     { "OEBPS/chap1.xhtml", xhtml("<h1>One</h1><p>First paragraph.</p><p>Second paragraph.</p>") },
-    { "OEBPS/chap2.xhtml", xhtml("<p>Chapter two content.</p>") },
+    { "OEBPS/chap2.xhtml", xhtml("<p>Chapter two content.</p><ul><li>First bullet.</li><li>Second bullet.</li></ul><ul><li>Parent bullet.<ul><li>Nested bullet.</li></ul></li></ul>") },
     { "OEBPS/chap3.xhtml", xhtml("<p>" .. long_paragraph .. "</p>") },
 })
 
@@ -188,6 +188,47 @@ do
     end
     check("CJK 不切断 UTF-8", boundary_ok and #cjk_chunks > 1)
     check("空文本", #Tools.split_text("", 10) == 1)
+end
+
+local function valid_utf8(text)
+    local index = 1
+    while index <= #text do
+        local byte = text:byte(index)
+        local width
+        if byte < 0x80 then width = 1
+        elseif byte < 0xC0 then return false
+        elseif byte < 0xE0 then width = 2
+        elseif byte < 0xF0 then width = 3
+        else width = 4 end
+        if index + width - 1 > #text then return false end
+        for offset = 1, width - 1 do
+            local cont = text:byte(index + offset)
+            if not cont or cont < 0x80 or cont > 0xBF then return false end
+        end
+        index = index + width
+    end
+    return true
+end
+
+-- ============================================================
+print("== 1b. UTF-8 安全切片 ==")
+do
+    local cjk = string.rep("中文测试段落内容", 40)
+    local tail = Tools.utf8_tail(cjk, 200)
+    local head = Tools.utf8_head(cjk, 200)
+    check("tail 长度与边界", #tail <= 200 and #tail > 190 and valid_utf8(tail))
+    check("head 长度与边界", #head <= 200 and #head > 190 and valid_utf8(head))
+    check("tail 取自末尾", cjk:sub(-#tail) == tail)
+    check("head 取自开头", cjk:sub(1, #head) == head)
+    local ascii = string.rep("a", 500)
+    check("ASCII 原样", #Tools.utf8_tail(ascii, 200) == 200
+        and #Tools.utf8_head(ascii, 200) == 200)
+    check("短文本原样", Tools.utf8_tail("短", 200) == "短"
+        and Tools.utf8_head("短", 200) == "短")
+    -- 4 字节字符（emoji）也不能被切断
+    local emoji = string.rep("😀", 100)
+    check("4 字节字符", valid_utf8(Tools.utf8_tail(emoji, 201))
+        and valid_utf8(Tools.utf8_head(emoji, 201)))
 end
 
 -- ============================================================
@@ -213,6 +254,21 @@ do
     end
     check("第一章三段（h1+p+p）", parents["s000001"] == 1 and parents["s000002"] == 1
         and parents["s000003"] == 1)
+
+    local list = Epub.collect_segments{
+        book_path = BOOK, chapter_indexes = { 2 }, max_chars = 2000,
+        titles = { [2] = "第二章" },
+    }
+    local sources, li_count = {}, 0
+    for _, segment in ipairs(list and list.segments or {}) do
+        sources[#sources + 1] = segment.source
+        if segment.selector:find("li:nth%-of%-type") then li_count = li_count + 1 end
+    end
+    check("列表项被抽取", list ~= nil and li_count == 4, tostring(li_count))
+    check("列表项文本", sources[1] == "Chapter two content."
+        and sources[2] == "First bullet." and sources[3] == "Second bullet."
+        and sources[4] == "Parent bullet." and sources[5] == "Nested bullet.",
+        table.concat(sources, " | "))
     check("长段落被切分", parts > 1)
     -- Every parent's parts must be contiguous and total parent_total.
     local grouped = {}
@@ -248,11 +304,11 @@ do
     check("export 成功", result ~= nil, tostring(err))
     check("job_id 格式", result and result.job_id:match("^%d%d%d%d%d%d%d%d_%d%d%d%d%d%d_%d%d%d%d$") ~= nil)
     -- Chapters 1 and 2: h1 + 2 paragraphs + 1 paragraph.
-    check("段数", result and result.segments == #result.job.segments and result.segments == 4)
+    check("段数", result and result.segments == #result.job.segments and result.segments == 8)
     check("job 文件落盘", result and Mcp.readJson(result.dir .. "/job.json") ~= nil)
     local state = Mcp.loadState(result.job_id)
     check("state 初始值", state and state.status == "exported"
-        and state.submitted == 0 and state.total == 4)
+        and state.submitted == 0 and state.total == 8)
     local job = Mcp.loadJob(result.job_id)
     check("loadJob schema", job and job.schema == Mcp.JOB_SCHEMA)
     check("book 元数据", job.book.device_path == BOOK and job.book.target_lang == "zh-Hans")
@@ -263,7 +319,7 @@ do
 
     local list = Mcp.listJobs()
     check("listJobs 命中", #list == 1 and list[1].job_id == result.job_id)
-    check("listJobs 字段", list[1].total == 4 and list[1].status == "exported"
+    check("listJobs 字段", list[1].total == 8 and list[1].status == "exported"
         and list[1].book_path == BOOK and list[1].chapter_count == 2)
 
     -- 索引：meta.json + job.json 里 segments 逐行，供 get-segments/job-status
@@ -273,16 +329,16 @@ do
         and job_blob:find('"segments":[\n', 1, true) ~= nil)
     check("job.json 仍是合法 JSON", Mcp.readJson(result.dir .. "/job.json") ~= nil)
     local meta = Mcp.loadMeta(result.job_id)
-    check("meta.total", meta and meta.total == 4 and meta.chapter_count == 2)
+    check("meta.total", meta and meta.total == 8 and meta.chapter_count == 2)
     local seg_ids = Mcp.listSegmentIds(result.job_id)
-    check("索引 id 数", seg_ids and #seg_ids == 4 and seg_ids[1] == "s000001")
+    check("索引 id 数", seg_ids and #seg_ids == 8 and seg_ids[1] == "s000001")
     local page = Mcp.readSegmentPage(result.job_id, 0, 2, true)
-    check("索引分页", page and #page.segments == 2 and page.total == 4
+    check("索引分页", page and #page.segments == 2 and page.total == 8
         and page.segments[1].id == "s000001")
     check("索引 context", page and page.segments[1].prev == nil
         and page.segments[1].next ~= nil)
     local tail = Mcp.readSegmentPage(result.job_id, 3, 10, false)
-    check("索引尾页", tail and #tail.segments == 1 and tail.segments[1].id == "s000004")
+    check("索引尾页", tail and #tail.segments == 5 and tail.segments[1].id == "s000004")
 
     -- 截断（掉电）不能返回 next_offset == offset 的空页，否则客户端空转
     local meta_blob = Mcp.readJson(result.dir .. "/meta.json")

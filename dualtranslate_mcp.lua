@@ -351,8 +351,10 @@ function Mcp.readSegmentPage(job_id, offset, limit, with_context)
         if with_context then
             local previous = decoded[position - 1]
             local following = decoded[position + 1]
-            row.prev = previous and previous.source and previous.source:sub(-200) or nil
-            row.next = following and following.source and following.source:sub(1, 200) or nil
+            row.prev = previous and previous.source
+                and Tools.utf8_tail(previous.source, 200) or nil
+            row.next = following and following.source
+                and Tools.utf8_head(following.source, 200) or nil
         end
         rows[#rows + 1] = row
     end

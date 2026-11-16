@@ -198,6 +198,9 @@ end
 local overlay_target_tags = {
     p = true, h1 = true, h2 = true, h3 = true, h4 = true, h5 = true, h6 = true,
     figcaption = true, dt = true, dd = true,
+    -- List items are paragraphs too; leaving them out silently skipped every
+    -- bullet in the book (both google_free and MCP had no text for them).
+    li = true,
 }
 
 local void_tags = {
@@ -238,9 +241,20 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                         local node = stack[found]
                         if node.target and node.inner_start then
                             local inner = document:sub(node.inner_start, tag_start - 1)
+                            if name == "li" then
+                                -- A parent item contains its nested list; that
+                                -- text belongs to the child items, and a block
+                                -- child (p/h*) owns its own paragraph.
+                                local nested = inner:find("<%s*[ou]l[%s>]")
+                                if nested then inner = inner:sub(1, nested - 1) end
+                                if inner:find("<%s*[ph][%s>]") or inner:find("<%s*h%d[%s>]") then
+                                    inner = ""
+                                end
+                            end
                             local source = html_to_text(inner)
                             if looks_translatable(source) then
                                 table.insert(candidates, {
+                                    order = node.inner_start,
                                     source = source,
                                     selector = 'DocFragment[Source="' .. css_attribute(relative)
                                         .. '"] > body' .. node.path,
@@ -284,6 +298,9 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
             end
         end
     end
+    -- Candidates are appended when their element closes, so a nested <li>
+    -- would otherwise come before its parent (and shift every id/prev/next).
+    table.sort(candidates, function(a, b) return (a.order or 0) < (b.order or 0) end)
     return candidates
 end
 
