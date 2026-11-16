@@ -486,7 +486,16 @@ local function append_rule(rules, selector, entry, color, size, font_family_css)
     if pseudo == "::before" then
         local tag = base:match("([%a]+):nth%-of%-type%(%d+%)$")
         if tag == "ol" or tag == "ul" then
-            margin = "margin:0 0 0 " .. list_offset(entry) .. "!important;"
+            -- CREngine pins a generated box to the list's content edge and
+            -- ignores margin/position/text-indent on it, so the offset has to
+            -- come from the list itself: drop its indent and give the same
+            -- amount back to the items.  The ::before then starts where the
+            -- parent's own text does, and the items stay where they were.
+            local indent = list_offset(entry):sub(2)
+            table.insert(rules, string.format(
+                "%s{margin-left:0!important;padding-left:0!important;}", base))
+            table.insert(rules, string.format(
+                "%s > li{margin-left:%s!important;}", base, indent))
         end
     end
     table.insert(rules, string.format(

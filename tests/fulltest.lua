@@ -163,15 +163,20 @@ do
     check("::before 规则保留", before_css:find("p[2]::before{content:", 1, true) ~= nil,
         before_css:sub(1, 120))
     os.remove(before_path)
-    -- 列表父项：负 margin 用条目里按书算出的缩进
+    -- 列表父项：CREngine 忽略生成盒子上的 margin，所以缩进靠"列表归零 +
+    -- 子项补回"两条规则实现，数值取自条目里按书算出的缩进。
     local indent_path = "/tmp/dualtranslate_overlay_indent.json"
     local indent_file = io.open(indent_path, "w")
     indent_file:write('{"entries":[{"selector":"DocFragment > body > ul:nth-of-type(1)::before",'
         .. '"translation":"父项译文","list_indent":"2.4em"}]}')
     indent_file:close()
     local indent_css = Overlay.buildCss(indent_path, { translation_visible = true })
-    check("列表父项用书的缩进", indent_css:find("margin:0 0 0 -2.4em!important", 1, true) ~= nil,
-        indent_css:sub(1, 200))
+    check("列表归零 + 子项补回缩进",
+        indent_css:find("ul:nth-of-type(1){margin-left:0!important;padding-left:0!important;}", 1, true) ~= nil
+        and indent_css:find("ul:nth-of-type(1) > li{margin-left:2.4em!important;}", 1, true) ~= nil,
+        indent_css:sub(1, 240))
+    check("生成盒子不再带 margin 位移",
+        indent_css:find("margin:0 0 0 ", 1, true) == nil, indent_css:sub(1, 240))
     os.remove(indent_path)
     -- 旧条目没有 list_indent：回落到固定 1.5em
     local legacy_path = "/tmp/dualtranslate_overlay_legacy_list.json"
@@ -181,7 +186,7 @@ do
     legacy_file:close()
     local legacy_css = Overlay.buildCss(legacy_path, { translation_visible = true })
     check("缺 list_indent 回落 1.5em",
-        legacy_css:find("margin:0 0 0 -1.5em!important", 1, true) ~= nil,
+        legacy_css:find("ul:nth-of-type(1) > li{margin-left:1.5em!important;}", 1, true) ~= nil,
         legacy_css:sub(1, 200))
     os.remove(legacy_path)
     check("buildCss 含字体族", css:find("font-family:serif!important", 1, true) ~= nil)
