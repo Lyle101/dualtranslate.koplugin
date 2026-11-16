@@ -321,6 +321,24 @@ do
         and big_page.total == 250, big_page and big_page.segments[1].id)
     Tools.rmtree(big_dir)
 
+    -- 损坏的行（别的工具格式化过 / 截断在行中间）必须返回「索引损坏」，
+    -- 让调用方回退整份解码，而不是抛 Lua 错误。
+    local bad_id = "20261116_000000_0003"
+    local bad_dir = Mcp.jobDir(bad_id)
+    Tools.mkdir_p(bad_dir)
+    local bad_blob = '{"schema":"dualtranslate.job.v1","job_id":"' .. bad_id
+        .. '","created_at":1,"book":{"device_path":"/tmp/x.epub"},'
+        .. '"chapters":[],"options":{},"segments":[\n'
+        .. '{"id":"s1","source":"ok"},\n{bad}\n]}'
+    local bad_file = assert(io.open(bad_dir .. "/job.json", "wb"))
+    bad_file:write(bad_blob); bad_file:close()
+    Mcp.writeJson(bad_dir .. "/meta.json", { schema = Mcp.META_SCHEMA, job_id = bad_id,
+        book = { device_path = "/tmp/x.epub" }, chapter_count = 0, total = 2 })
+    local bad_page, bad_err = Mcp.readSegmentPage(bad_id, 1, 1, false)
+    check("损坏行返回索引错误", bad_page == nil
+        and tostring(bad_err):find("损坏") ~= nil, tostring(bad_err))
+    Tools.rmtree(bad_dir)
+
     -- Second export must not reuse the id.
     local second = Mcp.exportJob{ book_path = BOOK, chapter_indexes = { 2 } }
     check("新任务新编号", second and second.job_id ~= result.job_id)

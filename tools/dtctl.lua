@@ -423,9 +423,17 @@ handlers["job-status"] = function(opts)
         segment_ids = Mcp.listSegmentIds(job_id) or {}
         total = tonumber(meta.total) or #segment_ids
         chapter_count = tonumber(meta.chapter_count) or 0
-    else
+        if total <= 0 or #segment_ids ~= total then
+            -- The index disagrees with meta.total: a truncated file or an
+            -- encoder that changed the line format.  Never hand the PC a
+            -- short id list -- it caches it and would then commit a partial
+            -- job as complete (10.2).
+            segment_ids = nil
+        end
+    end
+    if not segment_ids then
         local job, job_err = Mcp.loadJob(job_id)
-        if not job then return nil, job_err end
+        if not job then return nil, job_err or "任务索引不可用" end
         book = job.book or {}
         segment_ids = {}
         for index, segment in ipairs(job.segments) do segment_ids[index] = segment.id end

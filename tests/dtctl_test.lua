@@ -367,5 +367,56 @@ do
 
     os.execute('rm -rf "' .. index_dir .. '"')
 end
+-- ============================================================
+print("== 8. 截断索引不能给出短 id 表 ==")
+do
+    local function rpc3(argv_table)
+        local path = ROOT .. "/rpc.json"
+        write_file(path, JSON.encode(argv_table))
+        return run("rpc", nil, path)
+    end
+    local trunc_job = "20261116_050000_0002"
+    local trunc_dir = DATA .. "/cache/dualtranslate/mcp/jobs/" .. trunc_job
+    os.execute('mkdir -p "' .. trunc_dir .. '"')
+    local lines = {}
+    for index = 1, 1000 do
+        lines[index] = JSON.encode({
+            id = string.format("t%06d", index), parent_id = string.format("t%06d", index),
+            part = 1, parent_total = 1, chapter_index = 1, chapter_title = "T",
+            selector = "p", source = "s" .. index,
+        })
+    end
+    local shell = JSON.encode({
+        schema = "dualtranslate.job.v1", job_id = trunc_job, created_at = 1,
+        book = { device_path = BOOK, title = "T", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 1,
+            file_size = BOOK_SIZE, file_mtime = BOOK_MTIME },
+        chapters = {}, options = {},
+    })
+    write_file(trunc_dir .. "/job.json",
+        shell:sub(1, -2) .. ',"segments":[\n' .. table.concat(lines, ",\n") .. "\n]}")
+    write_file(trunc_dir .. "/meta.json", JSON.encode({
+        schema = "dualtranslate.job.meta.v1", job_id = trunc_job,
+        book = { device_path = BOOK, title = "T", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 1,
+            file_size = BOOK_SIZE, file_mtime = BOOK_MTIME },
+        chapter_count = 0, total = 1000,
+    }))
+    local handle = io.open(trunc_dir .. "/job.json", "rb")
+    local blob = handle:read("*a"); handle:close()
+    local keep = math.floor(#blob * 0.6)
+    local out_handle = io.open(trunc_dir .. "/job.json", "wb")
+    out_handle:write(blob:sub(1, keep)); out_handle:close()
+
+    local out, code = rpc3({ argv = { "job-status", "--job", trunc_dir .. "/job.json" } })
+    local data = decode_single_line(out)
+    local id_count = 0
+    for _ in out:gmatch("t%d%d%d%d%d%d") do id_count = id_count + 1 end
+    check("截断任务回退后报错", code ~= 0 and data and data.ok == false
+        and data.code ~= nil, out:sub(1, 160))
+    check("不再返回短 id 表", id_count == 0, tostring(id_count))
+    os.execute('rm -rf "' .. trunc_dir .. '"')
+end
+
 print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))
 os.exit(failed == 0 and 0 or 1)

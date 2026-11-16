@@ -105,8 +105,9 @@ end
 function Mcp.loadJob(job_id)
     local path = Mcp.jobPath(job_id)
     if not path then return nil, "任务编号不合法" end
+    if not lfs.attributes(path, "mode") then return nil, "找不到任务文件" end
     local job = Mcp.readJson(path)
-    if not job then return nil, "找不到任务文件" end
+    if not job then return nil, "任务文件损坏" end
     if job.schema ~= Mcp.JOB_SCHEMA or type(job.segments) ~= "table" then
         return nil, "任务文件格式不正确"
     end
@@ -322,7 +323,17 @@ function Mcp.readSegmentPage(job_id, offset, limit, with_context)
     -- being decoded again per row (120 decodes -> 41 for a 50-row page).
     local decoded = {}
     for position = from, last do
-        if lines[position] then decoded[position] = JSON.decode(lines[position]) end
+        local line = lines[position]
+        if line then
+            -- A line that another tool reformatted (or a truncated tail) must
+            -- surface as "index unusable" so the caller can fall back, not as
+            -- a Lua error the agent cannot act on.
+            local ok, segment = pcall(JSON.decode, line)
+            if not ok or type(segment) ~= "table" then
+                return nil, "段落索引损坏"
+            end
+            decoded[position] = segment
+        end
     end
     local rows = {}
     for position = offset + 1, offset + limit do
