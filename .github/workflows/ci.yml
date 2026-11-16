@@ -12,38 +12,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LuaJIT and unzip
+      - name: Install jq
         run: |
           sudo apt-get update
-          sudo apt-get install -y luajit unzip jq
+          sudo apt-get install -y jq
 
       # The suites load lfs / json / lua-ljsqlite3 from a KOReader install, so
       # CI fetches the same runtime the device uses instead of stubbing them.
+      # The Linux asset is a .tar.xz and unpacks to lib/koreader, not koreader/.
       - name: Download KOReader runtime
         run: |
+          set -eu
           url=$(curl -sSf https://api.github.com/repos/koreader/koreader/releases/latest \
-            | jq -r '.assets[] | select(.name | test("linux-x86_64.*\\.zip$")) | .browser_download_url' \
+            | jq -r '.assets[] | select(.name | test("^koreader-linux-x86_64-.*\\.tar\\.xz$")) | .browser_download_url' \
             | head -1)
           echo "asset: $url"
           test -n "$url"
-          curl -sSfL -o koreader.zip "$url"
-          unzip -q koreader.zip
-          test -d koreader
-          echo "KO_ROOT=$PWD/koreader" >> "$GITHUB_ENV"
+          curl -sSfL -o koreader.tar.xz "$url"
+          mkdir -p runtime
+          tar -xJf koreader.tar.xz -C runtime
+          test -x runtime/lib/koreader/luajit
+          test -d runtime/lib/koreader/common/json
+          echo "KO_ROOT=$PWD/runtime/lib/koreader" >> "$GITHUB_ENV"
 
+      # `luajit -b` needs the jit.bc module, which the KOReader bundle does not
+      # ship, so parse with loadfile(): it compiles the chunk without running it.
       - name: Syntax check
         run: |
+          set -eu
           for f in *.lua tools/*.lua; do
-            luajit -b "$f" /dev/null || exit 1
+            "$KO_ROOT/luajit" -e "local ok, err = loadfile('$f'); if not ok then io.stderr:write(err .. '\n'); os.exit(1) end"
           done
 
+      # Use the interpreter and libraries from the same bundle the device runs.
+      # LUA_CPATH: the suites resolve `lpeg` (needed by common/json) from
+      # common/; libs/ covers the rest.  LD_LIBRARY_PATH: ffi.loadlib falls back
+      # to the system loader for libsqlite3.so.0, which lua-ljsqlite3 needs
+      # before any SQLite-backed suite can run.
       - name: Run every Lua suite
+        env:
+          LUA_CPATH: "${{ github.workspace }}/runtime/lib/koreader/common/?.so;${{ github.workspace }}/runtime/lib/koreader/libs/?.so;;"
+          LD_LIBRARY_PATH: ${{ github.workspace }}/runtime/lib/koreader/libs
         run: |
+          set -eu
+          failed=0
           for t in tests/*.lua; do
             echo "::group::$t"
-            luajit "$t" || exit 1
+            if ! out=$("$KO_ROOT/luajit" "$PWD/$t" 2>&1); then
+              echo "$out"; echo "::endgroup::"; echo "::error::$t failed"; failed=1; continue
+            fi
+            echo "$out"
             echo "::endgroup::"
+            # A suite that cannot load lfs/json/lua-ljsqlite3 exits 0 after
+            # printing SKIP.  That is fine for the opt-in live smoke test and a
+            # silent hole everywhere else, so treat it as a failure.
+            case "$t" in
+              tests/smoke_live.lua) ;;
+              *) if echo "$out" | grep -q "^SKIP:"; then
+                   echo "::error::$t skipped (runtime libraries missing)"; failed=1
+                 fi ;;
+            esac
           done
+          exit "$failed"
 
   python:
     name: MCP server tests
