@@ -259,7 +259,7 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                         local node = stack[found]
                         if node.target and node.inner_start then
                             local inner = document:sub(node.inner_start, tag_start - 1)
-                            local pseudo
+                            local pseudo, anchor_path
                             if name == "li" then
                                 local lowered = inner:lower()
                                 local nested = lowered:find("<%s*[ou]l[%s>]")
@@ -270,13 +270,22 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                                     -- translating the item too would duplicate.
                                     inner = ""
                                 elseif nested then
-                                    -- The parent's text belongs above its child
-                                    -- list.  ::after is the element's last
-                                    -- child and would render below the list, so
-                                    -- this entry is emitted as ::before (above
-                                    -- the item's own text) instead.
+                                    -- The parent's text belongs between the
+                                    -- item's own text and its child list.  CSS
+                                    -- can only attach generated content to the
+                                    -- start or the end of an element's content,
+                                    -- so "::after" lands below the whole list
+                                    -- and "::before" above the item's text.
+                                    -- The one insertion point that sits where
+                                    -- we want it is the child list itself:
+                                    -- attaching there puts the translation
+                                    -- after the parent's text and before the
+                                    -- first child.  That box inherits the list
+                                    -- indent, which append_rule cancels with a
+                                    -- negative margin.
                                     inner = inner:sub(1, nested - 1)
                                     pseudo = "::before"
+                                    anchor_path = node.child_list_path
                                 end
                             end
                             local source = html_to_text(inner)
@@ -285,7 +294,7 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                                     order = node.inner_start,
                                     source = source,
                                     selector = 'DocFragment[Source="' .. css_attribute(relative)
-                                        .. '"] > body' .. node.path .. (pseudo or ""),
+                                        .. '"] > body' .. (anchor_path or node.path) .. (pseudo or ""),
                                     xpointer = "/body/DocFragment"
                                         .. (fragment_index > 1
                                             and ("[" .. tostring(fragment_index) .. "]") or "")
@@ -310,6 +319,13 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                         xpath = xpath .. "/" .. name
                             .. (parent.counts[name] > 1
                                 and ("[" .. tostring(parent.counts[name]) .. "]") or "")
+                    end
+                    -- Remember where a nested list sits, so the parent <li>
+                    -- can attach its translation to the list (the only spot
+                    -- between its own text and the first child item).
+                    if (name == "ul" or name == "ol") and parent.name == "li"
+                        and not parent.child_list_path and path ~= "" then
+                        parent.child_list_path = path
                     end
                     local node = {
                         name = name,

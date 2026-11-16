@@ -449,8 +449,12 @@ local function rule_style(options)
     return color, size, font_family_css
 end
 
--- A selector may already name the pseudo-element: a list parent's text has to
--- go above its nested list, so the entry is stored as "... > li::before".
+-- A selector may already name the pseudo-element: a list parent's translation
+-- is attached to its child list, so the entry is stored as
+-- "... > li:nth-of-type(2) > ol:nth-of-type(1)::before".
+-- One list indent in CREngine's default stylesheet (ul/ol padding-left).
+local LIST_TRANSLATION_OFFSET = "-1.5em"
+
 local function split_pseudo(selector)
     if selector:sub(-8) == "::before" then
         return selector:sub(1, -9), "::before"
@@ -463,9 +467,19 @@ end
 
 local function append_rule(rules, selector, translation, color, size, font_family_css)
     local base, pseudo = split_pseudo(selector)
+    -- A list parent's translation rides on its child list, so the box starts at
+    -- the child items' indent; pull it back one list indent to line up with the
+    -- parent's own text.  1.5em is CREngine's default ul/ol padding-left.
+    local margin = "margin:0!important;"
+    if pseudo == "::before" then
+        local tag = base:match("([%a]+):nth%-of%-type%(%d+%)$")
+        if tag == "ol" or tag == "ul" then
+            margin = "margin:0 0 0 " .. LIST_TRANSLATION_OFFSET .. "!important;"
+        end
+    end
     table.insert(rules, string.format(
-        "%s%s{content:%s!important;display:block!important;white-space:pre-wrap!important;color:%s!important;font-size:%s!important;%sline-height:130%%!important;margin:0!important;padding:0!important;}",
-        base, pseudo, css_string(translation), color, size, font_family_css))
+        "%s%s{content:%s!important;display:block!important;white-space:pre-wrap!important;color:%s!important;font-size:%s!important;%sline-height:130%%!important;%spadding:0!important;}",
+        base, pseudo, css_string(translation), color, size, font_family_css, margin))
 end
 
 local function build_css(path, options)
