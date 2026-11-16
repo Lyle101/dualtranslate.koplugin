@@ -93,6 +93,19 @@ KOReader 的插件目录是安装根目录下的 `plugins/` 文件夹，目录�
 
 设备端只负责导出与导入，翻译由电脑端完成：
 
+```
+设备：导出所选章节
+  └─ cache/dualtranslate/mcp/jobs/<id>/job.json （原文，segments 每行一个）
+     + meta.json （书籍字段 / 总段数 / 每 100 行锚点）
+
+PC（只读 key）                 PC（写 key）
+  dt_list_jobs / job-status      dt_confirm_model（elicitation 询问用户）
+  dt_get_segments（分页 50 段）   dt_submit_translations（put，可断点续传）
+                                 dt_commit_job（import → SQLite + entries）
+
+设备：manifest.revision++ → reload.signal seq++ → 翻页刷新显示
+```
+
 1. **导出**：「MCP 外部翻译 → 导出所选章节…」，确认隐私提示后任务写入 `cache/dualtranslate/mcp/jobs/<job_id>/job.json`（含原文，供电脑端读取）。
 2. **电脑端**：安装 `mcp-server/`（`pip install -e mcp-server`），按 `mcp-server/config.example.toml` 配置 SSH 双 key，在 MCP 客户端里使用 `dt_list_jobs` / `dt_get_segments` / `dt_confirm_model` / `dt_submit_translations` / `dt_commit_job`。模型名称必须由用户确认。
 3. **回传**：`dt_commit_job` 经 `tools/dtctl.sh rpc` 写入设备；设备上没有 SSH 时把 `result.json` 放进 `cache/dualtranslate/mcp/inbox/<job_id>.json`，再用「MCP 外部翻译 → 导入结果」。

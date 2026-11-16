@@ -4,5 +4,5 @@ local _ = require("gettext")
 return {
     fullname = _("DualTranslate"),
     description = _([[Whole-book and chapter-by-chapter bilingual translation with a chapter picker, per-service caches, and a choice of the built-in KOReader translator or Microsoft Edge Free.]]),
-    version = "3.0.1",
+    version = "3.1.0",
 }

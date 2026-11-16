@@ -8,8 +8,8 @@
 | 日期 | 2026-11-16 |
 | 适用代码 | DualTranslate `v3.0.1` 之后（P0 / P1 / P2 已合入；P3 收件箱 MVP 与 dtctl rpc 已合入） |
 | 目标版本 | `v3.0.1` 已发布多服务 + 章节选择；MCP 外部翻译仍按 `v1.3.0` 规划 |
-| 状态 | P0/P1/P2 已实施；P3 收件箱 MVP 与 SSH 双 key 传输已在真机跑通（导出 → 读段 → 提交 → 导入）；elicitation 与 P4 未实现 |
-| 代码状态 | P0/P1/P2/P3-MVP 已提交并有回归测试；P4（reconcile 硬化、ndjson、打包文档）未实现 |
+| 状态 | P0/P1/P2/P3 已实施（收件箱 + SSH 双 key + elicitation）；P4（reconcile 硬化、打包文档）未实现 |
+| 代码状态 | P0/P1/P2/P3 已提交并有回归测试；P4（reconcile 硬化、打包文档）未实现 |
 
 **修订记录**
 
@@ -744,7 +744,7 @@ local slug = provider_id:gsub("[^%w._-]", "_")  -- mcp:gpt-5 -> mcp_gpt-5
 - 触发条件：单 provider entries 文件 > 5 MB，或 checkpoint 写入耗时 > 500 ms。
 - 实测（PW2，`Overlay.saveEntries` + `loadEntries` 各 3 次）：1,000 段 ≈ 0.4 MB → 写 181/188/183 ms、读 132/130/121 ms；5,000 段 ≈ 2.2 MB → 写 ~938 ms、读 ~632 ms。**2.2 MB 就已越过 500 ms 触发线。**
 - 已落地（`v3.0.1` 之后，`translate_overlay`）：checkpoint 从「每批」改为「每 5 批或 60 秒」一次，`batch_size = 48`。崩溃代价只是 overlay 增量——这些段落已写进 SQLite（`storeForBook`），续跑时全部命中缓存、不发网络请求。5,000 段由 ~105 次降到 ~21 次，1 万段由 ~208 次降到 ~42 次。
-- 剩余（P4）：翻译过程中改用 `entries/<provider>.ndjson` 追加日志，每行一个 entry；加载时逐行解析，忽略最后一行截断；任务完成后压缩回 `.json`。删除/导入需同时处理 `.json` 与 `.ndjson`；以 `.json` 优先。
+- ~~剩余（P4）：`entries/<provider>.ndjson` 追加日志~~：2026-11-16 实测 `io.lines()` 在 Voyage 上约 0.5–1 ms/行，逐行读比整份解码更慢，ndjson 方案取消。MCP job 改用「`job.json` 的 segments 每行一个对象 + `string.find` 切片 + 每 100 行锚点」，1 万段翻页 41–132 ms；overlay 侧继续用 checkpoint 节流，不再考虑 ndjson。
 - ndjson 与「降低频率」不冲突：前者把单次成本从 O(全书) 降到 O(本批)，后者把次数降一个量级；已落地的频率调整不放宽本节的触发条件。
 
 ### 6.4 设置与显示选择
@@ -1247,7 +1247,7 @@ end
 
 ---
 
-## 10. R2 MCP 外部翻译设计
+## 10. R2 MCP 外部翻译（已实现）
 
 ### 10.1 角色与流程
 
@@ -1446,7 +1446,7 @@ book_root = "/mnt/us/documents"
 | `dt_delete_provider` | 删除某服务在某本书的译文 | 否 |
 | `dt_set_display_provider` | 设置当前显示服务 | 否 |
 | `dt_refresh_device` | 通知插件刷新外部译文 | 否 |
-| `dt_prepare_job` | （可选）PC 发起抽取 | 否 |
+| `dt_prepare_job` | （不实现）PC 发起抽取；`dtctl extract` 与设备端菜单已覆盖同一抽取器 | 否 |
 
 传输归属（双 key 见本节「工具安全约束」与 10.4）：全部走 `dtctl rpc`。只读 key 的强制命令带 `--mode=read`，允许 `list-jobs` / `job-status` / `get-segments` / `cat`；`list-providers` 因打开缓存库可能触发迁移而必须走写 key；写入 key 允许全部子命令。`get-segments` 在设备端分页，PC 不下载整份 `job.json`；文件上传（`state.json`、`result*.json`）走 rpc 的 `stdin` 字段。
 
