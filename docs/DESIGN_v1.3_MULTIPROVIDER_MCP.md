@@ -22,7 +22,7 @@
 | 0.5 | 2026-11-15 | P0/P1/P2 全部落地（`v3.0.1`）后对齐表头：适用代码、状态、代码状态三行改为「P0/P1/P2 已实施，P3 未开工」；正文设计与剩余 P3 章节不变 |
 | 0.6 | 2026-11-15 | 真机实测 checkpoint 成本（5,000 段写 ~938 ms / 读 ~632 ms）后落地节流：`translate_overlay` 改为每 5 批或 60 s 写一次，§2.2 数据流与 §6.3 性能硬化同步；ndjson 仍留 P4 |
 | 0.7 | 2026-11-15 | P3 收件箱 MVP 落地：`dualtranslate_mcp.lua`（导出/收件箱/导入信号）、`Store.importResult`、`tools/dtctl`、`mcp-server/`；设计 10.2/10.5/10.6/10.7 的收件箱路径已实现，SSH 自动导入与 elicitation 留待真机验证 |
-| 0.8 | 2026-11-16 | SSH 双 key 真机联调：`/mnt/us` 是 world-writable FUSE，chroot 不可能（§10.4 改写）；传输统一为 `dtctl rpc`（argv JSON over stdin + `--mode=read|write` 白名单），新增 `cat` / `job-status` / `get-segments`，分页移到设备端；`ControlMaster` 复用后约 0.5 s/次；B1–B3（sftp 回显、空格路径、超时/缺 key）已修 |
+| 0.8 | 2026-11-16 | SSH 双 key 真机联调：`/mnt/us` 是 world-writable FUSE，chroot 不可能（§10.4 改写）；传输统一为 `dtctl rpc`（argv JSON over stdin + `--mode=read|write` 白名单），新增 `cat` / `job-status` / `get-segments`，分页移到设备端；`ControlMaster` 热连接 0.5–0.7 s/次（空闲 5 分钟后的首次重连 4–5 s）；B1–B3（sftp 回显、空格路径、超时/缺 key）已修 |
 
 **阅读约定**
 
@@ -1566,7 +1566,7 @@ class Transport(Protocol):
 
 | 实现 | 场景 | 说明 |
 | --- | --- | --- |
-| `SshTransport` | Kindle 越狱 + USBNetwork | 唯一通道是 `dtctl rpc`（JSON over stdin）；读 key 用 `--mode=read` 强制命令，写 key 用全命令；读 key 缺省时回退到写 key；`ControlMaster` 按 key 身份分 socket（`~/.dtmcp/cm-ro-%C` / `cm-rw-%C`），复用后单次调用约 0.5 s；不提供任意 `ssh exec`，也不使用 SFTP |
+| `SshTransport` | Kindle 越狱 + USBNetwork | 唯一通道是 `dtctl rpc`（JSON over stdin）；读 key 用 `--mode=read` 强制命令，写 key 用全命令；读 key 缺省时回退到写 key；`ControlMaster` 按 key 身份分 socket（`~/.dtmcp/cm-ro-%C` / `cm-rw-%C`），热连接 0.5–0.7 s/次、冷连接 4–5 s；不提供任意 `ssh exec`，也不使用 SFTP |
 | `UsbTransport` | Kindle 挂载为 U 盘 | 直接文件读写；无法执行导入命令，走「收件箱」模式 |
 | `LocalTransport` | 模拟器/测试 | 指向本地目录，CI 用 |
 | `AdbTransport` | Android 设备 | 后续扩展 |

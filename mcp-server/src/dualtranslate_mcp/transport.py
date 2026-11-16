@@ -24,9 +24,9 @@ from .models import validate_job
 JOB_ID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
 CAT_NAMES = {"job.json", "state.json", "result.json", "result.partial.json"}
 CM_FLAGS = {"context", "inbox", "allow-partial"}
-READ_COMMANDS = frozenset(
-    {"list-jobs", "job-status", "get-segments", "cat", "list-providers"}
-)
+# list-providers opens the cache DB, and opening a v2 DB migrates it (a
+# write), so that command needs the write key (design 10.3).
+READ_COMMANDS = frozenset({"list-jobs", "job-status", "get-segments", "cat"})
 
 
 class TransportError(RuntimeError):
@@ -291,7 +291,9 @@ class SshTransport:
             raise TransportError("empty rpc command")
         read = argv[0] in READ_COMMANDS
         command = [
-            "ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            "ssh", "-T", "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "IdentitiesOnly=yes",
             "-o", f"ConnectTimeout={self.config.timeout}",
             "-o", "ControlMaster=auto",
             "-o", f"ControlPath={self._control_path(read)}",
@@ -301,7 +303,10 @@ class SshTransport:
         command += [f"{self.config.user}@{self.config.host}", "rpc"]
         envelope: dict = {"argv": [str(value) for value in argv]}
         if stdin is not None:
-            envelope["stdin"] = stdin.decode("utf-8")
+            try:
+                envelope["stdin"] = stdin.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise TransportError("stdin is not valid UTF-8") from error
         payload = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
         result = self._run(command, payload)
         return _parse_dtctl_reply(result)

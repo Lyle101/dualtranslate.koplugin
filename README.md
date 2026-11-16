@@ -107,7 +107,7 @@ command=".../tools/dtctl.sh rpc",no-pty,...            ssh-ed25519 AAAA... dualt
 
 - 两把 key 都只能执行 dtctl（SFTP 子系统被强制命令拦下），读 key 额外被限制在白名单（`list-jobs` / `job-status` / `get-segments` / `cat` / `list-providers`）。
 - 电脑端把 `--mode=read` 写在强制命令里，客户端无法注入；命令参数以 JSON 从 stdin 传来，书路径含空格也不需要引号。
-- 连接复用（`ControlMaster`）后单次调用约 0.5 s；不配双 key 也可以只配写 key，读命令会走它（仍被 dtctl 锁定）。
+- 延迟：`ControlMaster` 热连接下单次调用 **0.5–0.7 s**（含设备端 luajit 启动）；空闲超过 `ControlPersist=300` 秒后首次要重连，**4–5 s**（ProxyCommand 的 ARP+TCP 校验），不是坏了。不配双 key 也可以只配写 key，读命令会走它（仍被 dtctl 锁定）。
 
 没有 PC 端时，原有三个在线引擎不受影响。
 
