@@ -12,9 +12,23 @@ import sys
 from typing import Any, Callable
 
 from .config import Config
+from .elicit import elicit_model
 from .jobs import JobService
 from .models import ValidationError
 from .transport import HeadlessUnavailable, TransportError, build_transport
+
+try:
+    # Module-level so FastMCP can resolve the `ctx: Context` annotation.
+    from mcp.server.fastmcp import Context
+    from pydantic import BaseModel
+
+    class ModelChoice(BaseModel):
+        model_name: str
+        display_name: str = ""
+
+except ImportError:  # pragma: no cover - mcp pulls both in at runtime
+    Context = None
+    ModelChoice = None
 
 
 SAFETY_NOTE = (
@@ -71,13 +85,30 @@ def build_server(config: Config | None = None, transport: Any = None):
         return _guarded(lambda: service.get_segments(job_id, offset, limit, include_context))
 
     @mcp.tool()
-    def dt_confirm_model(
-        job_id: str, model_name: str, display_name: str = ""
+    async def dt_confirm_model(
+        job_id: str, ctx: Context, model_name: str = "", display_name: str = ""
     ) -> dict:
-        """确认本次翻译使用的模型名称（必须询问用户，不能自动填写）。
+        """确认本次翻译使用的模型名称（必须由用户决定，不能自动填写）。
 
+        未提供 model_name 时通过 MCP elicitation 直接询问用户；客户端不支持
+        elicitation 时返回 needs_model_confirmation，由 agent 用文字追问。
         设备端用 provider_id 区分不同模型的译文，所以模型名不能是 unknown。
         """
+        if not (model_name or "").strip() and ModelChoice is not None:
+            elicited = await elicit_model(
+                ctx,
+                f"任务 {job_id}：本次翻译使用哪个模型？（provider_id 按模型名生成）",
+                ModelChoice,
+            )
+            if elicited and elicited.get("model_name"):
+                model_name = elicited["model_name"]
+                display_name = display_name or elicited.get("display_name", "")
+        if not (model_name or "").strip():
+            return {
+                "ok": False,
+                "status": "needs_model_confirmation",
+                "message": "请询问用户本次翻译使用的模型名称，然后传 model_name",
+            }
         return _guarded(lambda: service.confirm_model(job_id, model_name, display_name))
 
     @mcp.tool()
@@ -100,8 +131,9 @@ def build_server(config: Config | None = None, transport: Any = None):
     ) -> dict:
         """校验并写入设备：SQLite + overlay entries + manifest。
 
-        未确认模型时返回 needs_model_confirmation；还有段落未提交时返回
-        incomplete_job（除非 allow_partial=true）。
+        未确认模型时返回 needs_model_confirmation —— 此时调用 dt_confirm_model
+        （它会用 elicitation 直接问用户）；还有段落未提交时返回 incomplete_job
+        （除非 allow_partial=true）。
         """
         return _guarded(lambda: service.commit(job_id, set_display, allow_partial))
 

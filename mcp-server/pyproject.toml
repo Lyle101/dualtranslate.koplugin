@@ -3,7 +3,7 @@ name = "dualtranslate-mcp"
 version = "0.1.0"
 description = "MCP server for DualTranslate: read device jobs, collect translations, import them back"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.2.0"]
+dependencies = ["mcp>=1.2.0,<2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
