@@ -205,6 +205,30 @@ function Tools.unzip_to(archive_path, dest_dir)
     return true
 end
 
+-- A killed process (ssh timeout, reader restart) leaves its unpacked book tree
+-- behind; one 646-chapter export is 25 MB, so a few crashes fill a 3 GB
+-- partition.  Called before every new work dir.
+function Tools.sweep_temp_dirs(base_dir, prefixes, max_age)
+    local ok, iterator, state = pcall(lfs.dir, base_dir)
+    if not ok or not iterator then return 0 end
+    local now = os.time()
+    local removed = 0
+    for name in iterator, state do
+        for _, prefix in ipairs(prefixes or {}) do
+            if name:sub(1, #prefix) == prefix then
+                local path = base_dir .. "/" .. name
+                local mtime = lfs.attributes(path, "modification")
+                if mtime and now - mtime > (max_age or 6 * 3600) then
+                    Tools.rmtree(path)
+                    removed = removed + 1
+                end
+                break
+            end
+        end
+    end
+    return removed
+end
+
 -- UTF-8 safe slices.  A 200-byte boundary lands inside a 3-byte character
 -- two thirds of the time on Chinese sources; cutting by bytes produces an
 -- invalid JSON string that strict clients reject outright.

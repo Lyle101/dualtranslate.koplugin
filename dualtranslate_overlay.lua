@@ -449,10 +449,23 @@ local function rule_style(options)
     return color, size, font_family_css
 end
 
+-- A selector may already name the pseudo-element: a list parent's text has to
+-- go above its nested list, so the entry is stored as "... > li::before".
+local function split_pseudo(selector)
+    if selector:sub(-8) == "::before" then
+        return selector:sub(1, -9), "::before"
+    end
+    if selector:sub(-7) == "::after" then
+        return selector:sub(1, -8), "::after"
+    end
+    return selector, "::after"
+end
+
 local function append_rule(rules, selector, translation, color, size, font_family_css)
+    local base, pseudo = split_pseudo(selector)
     table.insert(rules, string.format(
-        "%s::after{content:%s!important;display:block!important;white-space:pre-wrap!important;color:%s!important;font-size:%s!important;%sline-height:130%%!important;margin:0!important;padding:0!important;}",
-        selector, css_string(translation), color, size, font_family_css))
+        "%s%s{content:%s!important;display:block!important;white-space:pre-wrap!important;color:%s!important;font-size:%s!important;%sline-height:130%%!important;margin:0!important;padding:0!important;}",
+        base, pseudo, css_string(translation), color, size, font_family_css))
 end
 
 local function build_css(path, options)

@@ -195,6 +195,24 @@ function Epub:resolve(book_path, work_dir, fragment)
     }
 end
 
+-- One place for temp unpacking: sweeps leftovers from killed runs, then makes
+-- a fresh overlay_/outline_/job_ directory.
+local WORK_PREFIXES = { "overlay_", "outline_", "job_" }
+local WORK_MAX_AGE = 6 * 3600
+
+local function new_work_dir(prefix)
+    local base = DataStorage:getDataDir() .. "/cache/dualtranslate"
+    -- Tests stub Tools with a minimal table; the sweep is an enhancement, not
+    -- a prerequisite for unpacking.
+    if type(Tools.sweep_temp_dirs) == "function" then
+        Tools.sweep_temp_dirs(base, WORK_PREFIXES, WORK_MAX_AGE)
+    end
+    local nonce = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
+    local dir = base .. "/" .. prefix .. nonce
+    if not Tools.mkdir_p(dir) then return nil end
+    return dir
+end
+
 local overlay_target_tags = {
     p = true, h1 = true, h2 = true, h3 = true, h4 = true, h5 = true, h6 = true,
     figcaption = true, dt = true, dd = true,
@@ -241,20 +259,24 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                         local node = stack[found]
                         if node.target and node.inner_start then
                             local inner = document:sub(node.inner_start, tag_start - 1)
+                            local pseudo
                             if name == "li" then
-                                -- A parent item with a nested list is a TOC
-                                -- label (or a short lead-in).  ::after is the
-                                -- element's last child, so its translation
-                                -- would render *below* the child list; the
-                                -- plugin is CSS-only and cannot move it, so
-                                -- such items are skipped instead of shown in
-                                -- the wrong place.  A block child (p/h*) owns
-                                -- its own paragraph the same way.
                                 local lowered = inner:lower()
-                                if lowered:find("<%s*[ou]l[%s>]")
-                                    or lowered:find("<%s*[ph][%s>]")
-                                    or lowered:find("<%s*h%d[%s>]") then
+                                local nested = lowered:find("<%s*[ou]l[%s>]")
+                                local block = lowered:find("<%s*p[%s>]")
+                                    or lowered:find("<%s*h%d[%s>]")
+                                if block then
+                                    -- A block child owns its own paragraph;
+                                    -- translating the item too would duplicate.
                                     inner = ""
+                                elseif nested then
+                                    -- The parent's text belongs above its child
+                                    -- list.  ::after is the element's last
+                                    -- child and would render below the list, so
+                                    -- this entry is emitted as ::before (above
+                                    -- the item's own text) instead.
+                                    inner = inner:sub(1, nested - 1)
+                                    pseudo = "::before"
                                 end
                             end
                             local source = html_to_text(inner)
@@ -263,7 +285,7 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                                     order = node.inner_start,
                                     source = source,
                                     selector = 'DocFragment[Source="' .. css_attribute(relative)
-                                        .. '"] > body' .. node.path,
+                                        .. '"] > body' .. node.path .. (pseudo or ""),
                                     xpointer = "/body/DocFragment"
                                         .. (fragment_index > 1
                                             and ("[" .. tostring(fragment_index) .. "]") or "")
@@ -378,10 +400,8 @@ function Epub.translate_overlay(opts, ...)
     if type(translate) ~= "function" then
         return nil, "缺少翻译函数"
     end
-    local data_dir = DataStorage:getDataDir()
-    local nonce = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
-    local work_dir = data_dir .. "/cache/dualtranslate/overlay_" .. nonce
-    if not Tools.mkdir_p(work_dir) then
+    local work_dir = new_work_dir("overlay_")
+    if not work_dir then
         return nil, "无法创建临时目录"
     end
     local function cleanup()
@@ -1180,9 +1200,8 @@ function Epub.outline(book_path, ...)
     -- first.  Called after both cache paths, so a cache hit never flashes it.
     if before_parse then before_parse() end
 
-    local nonce = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
-    local work_dir = DataStorage:getDataDir() .. "/cache/dualtranslate/outline_" .. nonce
-    if not Tools.mkdir_p(work_dir) then return nil, "无法创建临时目录" end
+    local work_dir = new_work_dir("outline_")
+    if not work_dir then return nil, "无法创建临时目录" end
     -- pcall keeps the cleanup unconditional: a parse error must not leave an
     -- outline_<nonce> directory behind (design 7.2).
     local ok, result, err = pcall(parse_outline, book_path, work_dir)
@@ -1213,9 +1232,8 @@ function Epub.collect_segments(opts)
         return nil, "MCP 任务导出目前仅支持 EPUB"
     end
     local max_chars = math.max(200, tonumber(opts.max_chars) or 4500)
-    local nonce = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
-    local work_dir = DataStorage:getDataDir() .. "/cache/dualtranslate/job_" .. nonce
-    if not Tools.mkdir_p(work_dir) then return nil, "无法创建临时目录" end
+    local work_dir = new_work_dir("job_")
+    if not work_dir then return nil, "无法创建临时目录" end
     local function cleanup() Tools.rmtree(work_dir) end
 
     local first = Tools.extract_entries(book_path, work_dir,

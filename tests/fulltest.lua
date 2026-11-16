@@ -106,7 +106,14 @@ print("== 2. Overlay CSS ==")
 do
     local JSON_stub = {
         encode = function(t) return '{"entries":[{"selector":"p:first","translation":"你好"}]}' end,
-        decode = function(s) return { entries = { { selector = "p:first", translation = "你好" } } } end,
+        decode = function(s)
+            -- The stub only needs to tell the two fixtures apart; the real
+            -- decoder returns whatever the file contains.
+            if s:find("::before", 1, true) then
+                return { entries = { { selector = "p[2]::before", translation = "上文" } } }
+            end
+            return { entries = { { selector = "p:first", translation = "你好" } } }
+        end,
     }
     package.preload["json"] = function() return JSON_stub end
     package.preload["libs/libkoreader-lfs"] = function()
@@ -135,6 +142,15 @@ do
         translation_font_family = "serif",
     })
     check("buildCss 含 ::after", css:find("::after") ~= nil)
+    -- 父项列表的译文存成 "... > li::before"，规则必须原样保留伪元素。
+    local before_path = "/tmp/dualtranslate_overlay_before.json"
+    local before_file = io.open(before_path, "w")
+    before_file:write('{"entries":[{"selector":"p[2]::before","translation":"上文"}]}')
+    before_file:close()
+    local before_css = Overlay.buildCss(before_path, { translation_visible = true })
+    check("::before 规则保留", before_css:find("p[2]::before{content:", 1, true) ~= nil,
+        before_css:sub(1, 120))
+    os.remove(before_path)
     check("buildCss 含字体族", css:find("font-family:serif!important", 1, true) ~= nil)
     check("buildCss 含颜色", css:find("color:#666666!important") ~= nil)
     -- 隐藏时不生成规则

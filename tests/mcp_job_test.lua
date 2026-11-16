@@ -211,6 +211,24 @@ local function valid_utf8(text)
 end
 
 -- ============================================================
+print("== 1a. 临时解包目录清扫 ==")
+do
+    -- A killed run leaves overlay_<nonce> behind; 25 MB per book adds up.
+    local base = ROOT .. "/sweep"
+    os.execute('rm -rf "' .. base .. '"')
+    os.execute('mkdir -p "' .. base .. '/overlay_old" "' .. base
+        .. '/outline_new" "' .. base .. '/keep"')
+    os.execute('touch -t 200001010000 "' .. base .. '/overlay_old"')
+    local removed = Tools.sweep_temp_dirs(base, { "overlay_", "outline_", "job_" }, 6 * 3600)
+    check("清扫旧临时目录", removed == 1, tostring(removed))
+    check("保留新目录", lfs.attributes(base .. "/outline_new", "mode") == "directory")
+    check("保留非前缀目录", lfs.attributes(base .. "/keep", "mode") == "directory")
+    check("缺失目录返回 0", Tools.sweep_temp_dirs(base .. "/missing",
+        { "overlay_" }, 10) == 0)
+    os.execute('rm -rf "' .. base .. '"')
+end
+
+-- ============================================================
 print("== 1b. UTF-8 安全切片 ==")
 do
     local cjk = string.rep("中文测试段落内容", 40)
@@ -260,16 +278,23 @@ do
         titles = { [2] = "第二章" },
     }
     local sources, li_count = {}, 0
+    local parent_selector, leaf_selector
     for _, segment in ipairs(list and list.segments or {}) do
         sources[#sources + 1] = segment.source
         if segment.selector:find("li:nth%-of%-type") then li_count = li_count + 1 end
+        if segment.source == "Parent bullet." then parent_selector = segment.selector end
+        if segment.source == "First bullet." then leaf_selector = segment.selector end
     end
-    -- 带子列表的父项（TOC 标签）跳过：::after 会落在子列表之后
-    check("列表项被抽取", list ~= nil and li_count == 3, tostring(li_count))
+    check("列表项被抽取", list ~= nil and li_count == 4, tostring(li_count))
     check("列表项文本", sources[1] == "Chapter two content."
         and sources[2] == "First bullet." and sources[3] == "Second bullet."
-        and sources[4] == "Nested bullet." and #sources == 4,
-        table.concat(sources, " | "))
+        and sources[4] == "Parent bullet." and sources[5] == "Nested bullet."
+        and #sources == 5, table.concat(sources, " | "))
+    -- 父项的译文必须落在子列表之前：selector 自带 ::before
+    check("父项用 ::before", parent_selector and parent_selector:sub(-8) == "::before",
+        tostring(parent_selector))
+    check("叶子项不加伪元素", leaf_selector and leaf_selector:sub(-7) ~= "::after"
+        and leaf_selector:sub(-8) ~= "::before", tostring(leaf_selector))
     check("长段落被切分", parts > 1)
     -- Every parent's parts must be contiguous and total parent_total.
     local grouped = {}
@@ -305,11 +330,11 @@ do
     check("export 成功", result ~= nil, tostring(err))
     check("job_id 格式", result and result.job_id:match("^%d%d%d%d%d%d%d%d_%d%d%d%d%d%d_%d%d%d%d$") ~= nil)
     -- Chapters 1 and 2: h1 + 2 paragraphs + 1 paragraph.
-    check("段数", result and result.segments == #result.job.segments and result.segments == 7)
+    check("段数", result and result.segments == #result.job.segments and result.segments == 8)
     check("job 文件落盘", result and Mcp.readJson(result.dir .. "/job.json") ~= nil)
     local state = Mcp.loadState(result.job_id)
     check("state 初始值", state and state.status == "exported"
-        and state.submitted == 0 and state.total == 7)
+        and state.submitted == 0 and state.total == 8)
     local job = Mcp.loadJob(result.job_id)
     check("loadJob schema", job and job.schema == Mcp.JOB_SCHEMA)
     check("book 元数据", job.book.device_path == BOOK and job.book.target_lang == "zh-Hans")
@@ -320,7 +345,7 @@ do
 
     local list = Mcp.listJobs()
     check("listJobs 命中", #list == 1 and list[1].job_id == result.job_id)
-    check("listJobs 字段", list[1].total == 7 and list[1].status == "exported"
+    check("listJobs 字段", list[1].total == 8 and list[1].status == "exported"
         and list[1].book_path == BOOK and list[1].chapter_count == 2)
 
     -- 索引：meta.json + job.json 里 segments 逐行，供 get-segments/job-status
@@ -330,16 +355,16 @@ do
         and job_blob:find('"segments":[\n', 1, true) ~= nil)
     check("job.json 仍是合法 JSON", Mcp.readJson(result.dir .. "/job.json") ~= nil)
     local meta = Mcp.loadMeta(result.job_id)
-    check("meta.total", meta and meta.total == 7 and meta.chapter_count == 2)
+    check("meta.total", meta and meta.total == 8 and meta.chapter_count == 2)
     local seg_ids = Mcp.listSegmentIds(result.job_id)
-    check("索引 id 数", seg_ids and #seg_ids == 7 and seg_ids[1] == "s000001")
+    check("索引 id 数", seg_ids and #seg_ids == 8 and seg_ids[1] == "s000001")
     local page = Mcp.readSegmentPage(result.job_id, 0, 2, true)
-    check("索引分页", page and #page.segments == 2 and page.total == 7
+    check("索引分页", page and #page.segments == 2 and page.total == 8
         and page.segments[1].id == "s000001")
     check("索引 context", page and page.segments[1].prev == nil
         and page.segments[1].next ~= nil)
     local tail = Mcp.readSegmentPage(result.job_id, 3, 10, false)
-    check("索引尾页", tail and #tail.segments == 4 and tail.segments[1].id == "s000004")
+    check("索引尾页", tail and #tail.segments == 5 and tail.segments[1].id == "s000004")
 
     -- 截断（掉电）不能返回 next_offset == offset 的空页，否则客户端空转
     local meta_blob = Mcp.readJson(result.dir .. "/meta.json")
