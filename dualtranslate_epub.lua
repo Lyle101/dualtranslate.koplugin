@@ -5,6 +5,7 @@
 local Epub = {}
 local Archiver = require("ffi/archiver")
 local Overlay = require("dualtranslate_overlay")
+local ListIndent = require("dualtranslate_listindent")
 local Tools = require("dualtranslate_tools")
 local DataStorage = require("datastorage")
 local socket_url = require("socket.url")
@@ -166,6 +167,21 @@ local function parse_package(opf, opf_path)
     }
 end
 
+-- Publisher stylesheets in manifest order (later rules win in the cascade,
+-- which is what the list-indent matcher expects).  read(href) returns the
+-- file text or nil; extract paths differ, so the caller owns the lookup.
+local function package_stylesheets(package, read)
+    local styles = {}
+    for _, item in ipairs(package and package.items or {}) do
+        local media_type = tostring(item.media_type or ""):lower()
+        if media_type:find("css", 1, true) then
+            local text = read(item.href)
+            if text and text ~= "" then styles[#styles + 1] = text end
+        end
+    end
+    return styles
+end
+
 function Epub:resolve(book_path, work_dir, fragment)
     local container = read_file(work_dir .. "/META-INF/container.xml")
     if not container then return nil, "找不到 META-INF/container.xml" end
@@ -174,7 +190,8 @@ function Epub:resolve(book_path, work_dir, fragment)
     local opf = read_file(work_dir .. "/" .. opf_path)
     if not opf then return nil, "找不到 OPF 文件" end
 
-    local spine = parse_package(opf, opf_path).spine
+    local package = parse_package(opf, opf_path)
+    local spine = package.spine
 
     -- fragment is either a plain spine index (preferred: the reader resolves
     -- the current chapter index because CREngine xpointers carry no
@@ -192,6 +209,9 @@ function Epub:resolve(book_path, work_dir, fragment)
         index = index,
         spine_count = #spine,
         spine = spine,
+        styles = package_stylesheets(package, function(href)
+            return read_file(work_dir .. "/" .. href)
+        end),
     }
 end
 
@@ -234,9 +254,38 @@ end
 -- Build selectors from the original XHTML tree.  These selectors address
 -- CREngine's internal DocFragment nodes, so generated text is laid out in the
 -- open source EPUB while the archive itself stays byte-for-byte untouched.
-local function collect_overlay_candidates(document, relative, fragment_index, div_fallback)
+local function element_info(raw, name)
+    local classes = {}
+    local class_attr = attr(raw, "class")
+    if class_attr then
+        for class in class_attr:gmatch("%S+") do classes[class] = true end
+    end
+    return { tag = name, id = attr(raw, "id"), classes = classes }
+end
+
+-- Ancestor chain (outermost first, the element itself excluded) for the
+-- list-indent matcher: selectors such as "#toc > ol" need to know which
+-- container a list actually sits in.
+local function ancestor_chain(stack)
+    local ancestors = {}
+    for index = 2, #stack do ancestors[#ancestors + 1] = stack[index].info end
+    return ancestors
+end
+
+local function collect_overlay_candidates(document, relative, fragment_index, div_fallback, styles)
     local targets = div_fallback and { div = true } or overlay_target_tags
-    local root = { counts = {}, in_body = false, path = "", xpath = "" }
+    local sheet = ListIndent.resolve(styles)
+    -- Per-chapter <style> blocks override the book stylesheet (they are last
+    -- in the cascade for this document).
+    local chapter_css = {}
+    for css in document:gmatch("<[sS][tT][yY][lL][eE][^>]*>(.-)</[sS][tT][yY][lL][eE]>") do
+        chapter_css[#chapter_css + 1] = css
+    end
+    if #chapter_css > 0 then
+        sheet = ListIndent.extend(sheet, table.concat(chapter_css, "\n"))
+    end
+    local root = { counts = {}, in_body = false, path = "", xpath = "",
+        info = { tag = "#root", classes = {} } }
     local stack = { root }
     local candidates = {}
     local position = 1
@@ -290,9 +339,18 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                             end
                             local source = html_to_text(inner)
                             if looks_translatable(source) then
+                                -- The negative margin that pulls the layer back
+                                -- to the parent's text must match the indent
+                                -- this book actually gives the child list; it
+                                -- comes from the book's own stylesheet below.
+                                local list_indent
+                                if pseudo == "::before" and node.child_list then
+                                    list_indent = ListIndent.indent(sheet, node.child_list)
+                                end
                                 table.insert(candidates, {
                                     order = node.inner_start,
                                     source = source,
+                                    list_indent = list_indent,
                                     selector = 'DocFragment[Source="' .. css_attribute(relative)
                                         .. '"] > body' .. (anchor_path or node.path) .. (pseudo or ""),
                                     xpointer = "/body/DocFragment"
@@ -323,10 +381,6 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                     -- Remember where a nested list sits, so the parent <li>
                     -- can attach its translation to the list (the only spot
                     -- between its own text and the first child item).
-                    if (name == "ul" or name == "ol") and parent.name == "li"
-                        and not parent.child_list_path and path ~= "" then
-                        parent.child_list_path = path
-                    end
                     local node = {
                         name = name,
                         counts = {},
@@ -334,8 +388,44 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                         path = path,
                         xpath = xpath,
                         inner_start = tag_end + 1,
+                        info = element_info(raw, name),
                         target = in_body and targets[name] == true,
                     }
+                    -- The list itself is what the indent depends on (its
+                    -- margin/padding, marker style and item count), so it is
+                    -- recorded once and attached to the parent <li> that will
+                    -- host the translation layer.
+                    if (name == "ul" or name == "ol") and in_body then
+                        node.list_info = {
+                            element = {
+                                tag = name,
+                                id = node.info.id,
+                                classes = node.info.classes,
+                                ancestors = ancestor_chain(stack),
+                            },
+                            item_count = 0,
+                            start = tonumber(attr(raw, "start")) or 1,
+                            style_attr = attr(raw, "style"),
+                        }
+                        if parent.name == "li" and not parent.child_list_path and path ~= "" then
+                            parent.child_list_path = path
+                            parent.child_list = node.list_info
+                        end
+                    elseif name == "li" and parent.list_info then
+                        parent.list_info.item_count = parent.list_info.item_count + 1
+                        -- CREngine measures each item's own marker, so an item
+                        -- rule such as ".calibre3 { list-style-type: none }"
+                        -- collapses the list padding to 0 even when the list
+                        -- itself still says "decimal".
+                        if not parent.list_info.first_li then
+                            parent.list_info.first_li = {
+                                tag = "li",
+                                id = node.info.id,
+                                classes = node.info.classes,
+                                ancestors = ancestor_chain(stack),
+                            }
+                        end
+                    end
                     local self_closing = raw:match("/%s*>$") ~= nil or void_tags[name]
                     if not self_closing then table.insert(stack, node) end
                 end
@@ -447,6 +537,9 @@ function Epub.translate_overlay(opts, ...)
     local unreadable = {}
     local total = 0
     local unreadable_chapters = 0
+    -- Compile the book stylesheet once; per-chapter <style> blocks are layered
+    -- on top inside the extractor.
+    local styles = ListIndent.compile(resolved.styles)
     for _, current in ipairs(chapters) do
         local document = read_file(current.absolute)
         if not document then
@@ -454,10 +547,10 @@ function Epub.translate_overlay(opts, ...)
             unreadable_chapters = unreadable_chapters + 1
         end
         local candidates = document and collect_overlay_candidates(document,
-            current.relative, current.index, false) or {}
+            current.relative, current.index, false, styles) or {}
         if #candidates == 0 and document then
             candidates = collect_overlay_candidates(document, current.relative,
-                current.index, true)
+                current.index, true, styles)
         end
         chapter_candidates[current.index] = candidates
         total = total + #candidates
@@ -784,6 +877,7 @@ function Epub.translate_overlay(opts, ...)
                     local entry = { selector = candidate.selector,
                         xpointer = candidate.xpointer, chapter_index = current.index,
                         source = source, translation = translated,
+                        list_indent = candidate.list_indent,
                         created_at = os.time() }
                     local existing = entry_index[entry.selector]
                     if existing then
@@ -1286,6 +1380,26 @@ function Epub.collect_segments(opts)
     local third = Tools.extract_entries(book_path, work_dir, wanted)
     if not third then cleanup(); return nil, "无法读取章节文件" end
 
+    -- The list indent comes from the publisher stylesheets, so they are
+    -- extracted alongside the chapters (one extra archive pass, only for the
+    -- CSS entries the manifest declares).
+    local css_wanted, css_order = {}, {}
+    for _, item in ipairs(package.items) do
+        if tostring(item.media_type or ""):lower():find("css", 1, true) then
+            css_wanted[item.href] = true
+            css_order[#css_order + 1] = item.href
+        end
+    end
+    local styles = {}
+    if #css_order > 0 then
+        local css_files = Tools.extract_entries(book_path, work_dir, css_wanted) or {}
+        for _, href in ipairs(css_order) do
+            local text = css_files[href] and read_file(css_files[href])
+            if text and text ~= "" then styles[#styles + 1] = text end
+        end
+    end
+    local sheet = ListIndent.compile(styles)
+
     local chapters, segments = {}, {}
     local unreadable = 0
     for _, index in ipairs(chapter_indexes) do
@@ -1294,9 +1408,9 @@ function Epub.collect_segments(opts)
         if not document then
             unreadable = unreadable + 1
         else
-            local candidates = collect_overlay_candidates(document, relative, index, false)
+            local candidates = collect_overlay_candidates(document, relative, index, false, sheet)
             if #candidates == 0 then
-                candidates = collect_overlay_candidates(document, relative, index, true)
+                candidates = collect_overlay_candidates(document, relative, index, true, sheet)
             end
             local title = (type(opts.titles) == "table" and opts.titles[index])
                 or string.format("第 %d 章", index)
@@ -1315,6 +1429,7 @@ function Epub.collect_segments(opts)
                         chapter_title = title,
                         selector = candidate.selector,
                         xpointer = candidate.xpointer,
+                        list_indent = candidate.list_indent,
                         source = part_text,
                     }
                 end

@@ -452,7 +452,9 @@ end
 -- A selector may already name the pseudo-element: a list parent's translation
 -- is attached to its child list, so the entry is stored as
 -- "... > li:nth-of-type(2) > ol:nth-of-type(1)::before".
--- One list indent in CREngine's default stylesheet (ul/ol padding-left).
+-- Fallback only: entries carry the indent measured from the book's own
+-- stylesheets (dualtranslate_listindent.lua); this value is used for overlays
+-- written before that field existed.
 local LIST_TRANSLATION_OFFSET = "-1.5em"
 
 local function split_pseudo(selector)
@@ -465,16 +467,26 @@ local function split_pseudo(selector)
     return selector, "::after"
 end
 
-local function append_rule(rules, selector, translation, color, size, font_family_css)
+-- The book-derived indent for a list-parent entry, already in CSS units.
+local function list_offset(entry)
+    local indent = type(entry) == "table" and entry.list_indent or nil
+    if type(indent) == "string" and indent:match("^%d+%.?%d*em$") then
+        return "-" .. indent
+    end
+    return LIST_TRANSLATION_OFFSET
+end
+
+local function append_rule(rules, selector, entry, color, size, font_family_css)
     local base, pseudo = split_pseudo(selector)
+    local translation = type(entry) == "table" and entry.translation or entry
     -- A list parent's translation rides on its child list, so the box starts at
-    -- the child items' indent; pull it back one list indent to line up with the
-    -- parent's own text.  1.5em is CREngine's default ul/ol padding-left.
+    -- the child items' indent; pull it back by exactly that indent to line up
+    -- with the parent's own text.
     local margin = "margin:0!important;"
     if pseudo == "::before" then
         local tag = base:match("([%a]+):nth%-of%-type%(%d+%)$")
         if tag == "ol" or tag == "ul" then
-            margin = "margin:0 0 0 " .. LIST_TRANSLATION_OFFSET .. "!important;"
+            margin = "margin:0 0 0 " .. list_offset(entry) .. "!important;"
         end
     end
     table.insert(rules, string.format(
@@ -495,7 +507,7 @@ local function build_css(path, options)
         local selector = entry.selector
         if selector and selector ~= "" then
             if translation_visible and entry.translation and entry.translation ~= "" then
-                append_rule(rules, selector, entry.translation, color, size, font_family_css)
+                append_rule(rules, selector, entry, color, size, font_family_css)
             end
         end
     end
@@ -533,7 +545,7 @@ local function render_v3(dir, manifest, provider, entries_doc, fallback, options
             local selector = entry.selector
             if selector and selector ~= "" and entry.translation and entry.translation ~= ""
                 and by_selector[selector] == nil then
-                by_selector[selector] = entry.translation
+                by_selector[selector] = entry
                 order[#order + 1] = selector
             end
         end

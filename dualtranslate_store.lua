@@ -517,6 +517,7 @@ function Store.importResult(job, result, opts)
                 selector = segment.selector,
                 xpointer = segment.xpointer,
                 chapter_index = segment.chapter_index,
+                list_indent = segment.list_indent,
                 total = tonumber(segment.parent_total) or 1,
                 parts = {},
             }
@@ -549,6 +550,7 @@ function Store.importResult(job, result, opts)
                 selector = parent.selector,
                 xpointer = parent.xpointer,
                 chapter_index = parent.chapter_index,
+                list_indent = parent.list_indent,
                 source = table.concat(sources, " "),
                 translation = table.concat(translations, " "),
             }
@@ -615,15 +617,17 @@ function Store.importResult(job, result, opts)
         end
         local now = os.time()
         for _, parent in ipairs(complete) do
+            local at = entry_index[parent.selector]
             local entry = {
                 selector = parent.selector,
                 xpointer = parent.xpointer,
                 chapter_index = parent.chapter_index,
                 source = parent.source,
                 translation = parent.translation,
+                list_indent = parent.list_indent
+                    or (at and entries[at] and entries[at].list_indent) or nil,
                 created_at = now,
             }
-            local at = entry_index[entry.selector]
             if at then
                 entries[at] = entry
             else

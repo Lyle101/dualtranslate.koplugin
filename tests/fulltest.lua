@@ -107,8 +107,20 @@ do
     local JSON_stub = {
         encode = function(t) return '{"entries":[{"selector":"p:first","translation":"你好"}]}' end,
         decode = function(s)
-            -- The stub only needs to tell the two fixtures apart; the real
+            -- The stub only needs to tell the fixtures apart; the real
             -- decoder returns whatever the file contains.
+            if s:find("list_indent", 1, true) then
+                return { entries = { {
+                    selector = "DocFragment > body > ul:nth-of-type(1)::before",
+                    translation = "父项译文", list_indent = "2.4em",
+                } } }
+            end
+            if s:find("ul:nth-of-type(1)::before", 1, true) then
+                return { entries = { {
+                    selector = "DocFragment > body > ul:nth-of-type(1)::before",
+                    translation = "父项译文",
+                } } }
+            end
             if s:find("::before", 1, true) then
                 return { entries = { { selector = "p[2]::before", translation = "上文" } } }
             end
@@ -151,6 +163,27 @@ do
     check("::before 规则保留", before_css:find("p[2]::before{content:", 1, true) ~= nil,
         before_css:sub(1, 120))
     os.remove(before_path)
+    -- 列表父项：负 margin 用条目里按书算出的缩进
+    local indent_path = "/tmp/dualtranslate_overlay_indent.json"
+    local indent_file = io.open(indent_path, "w")
+    indent_file:write('{"entries":[{"selector":"DocFragment > body > ul:nth-of-type(1)::before",'
+        .. '"translation":"父项译文","list_indent":"2.4em"}]}')
+    indent_file:close()
+    local indent_css = Overlay.buildCss(indent_path, { translation_visible = true })
+    check("列表父项用书的缩进", indent_css:find("margin:0 0 0 -2.4em!important", 1, true) ~= nil,
+        indent_css:sub(1, 200))
+    os.remove(indent_path)
+    -- 旧条目没有 list_indent：回落到固定 1.5em
+    local legacy_path = "/tmp/dualtranslate_overlay_legacy_list.json"
+    local legacy_file = io.open(legacy_path, "w")
+    legacy_file:write('{"entries":[{"selector":"DocFragment > body > ul:nth-of-type(1)::before",'
+        .. '"translation":"父项译文"}]}')
+    legacy_file:close()
+    local legacy_css = Overlay.buildCss(legacy_path, { translation_visible = true })
+    check("缺 list_indent 回落 1.5em",
+        legacy_css:find("margin:0 0 0 -1.5em!important", 1, true) ~= nil,
+        legacy_css:sub(1, 200))
+    os.remove(legacy_path)
     check("buildCss 含字体族", css:find("font-family:serif!important", 1, true) ~= nil)
     check("buildCss 含颜色", css:find("color:#666666!important") ~= nil)
     -- 隐藏时不生成规则

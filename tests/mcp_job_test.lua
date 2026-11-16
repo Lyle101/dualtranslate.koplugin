@@ -145,6 +145,7 @@ local OPF = [[<?xml version="1.0"?>
     <item id="c1" href="chap1.xhtml" media-type="application/xhtml+xml"/>
     <item id="c2" href="chap2.xhtml" media-type="application/xhtml+xml"/>
     <item id="c3" href="chap3.xhtml" media-type="application/xhtml+xml"/>
+    <item id="css" href="style.css" media-type="text/css"/>
   </manifest>
   <spine>
     <itemref idref="c1"/>
@@ -166,7 +167,8 @@ local BOOK = stub_book(ROOT .. "/books/job.epub", {
     { "META-INF/container.xml", CONTAINER },
     { "OEBPS/content.opf", OPF },
     { "OEBPS/chap1.xhtml", xhtml("<h1>One</h1><p>First paragraph.</p><p>Second paragraph.</p>") },
-    { "OEBPS/chap2.xhtml", xhtml("<p>Chapter two content.</p><ul><li>First bullet.</li><li>Second bullet.</li></ul><ul><li>Parent bullet.<ul><li>Nested bullet.</li></ul></li></ul>") },
+    { "OEBPS/style.css", "ul.tight { padding-left: 0; }\n" },
+    { "OEBPS/chap2.xhtml", xhtml("<p>Chapter two content.</p><ul><li>First bullet.</li><li>Second bullet.</li></ul><ul><li>Parent bullet.<ul class=\"tight\"><li>Nested bullet.</li></ul></li></ul>") },
     { "OEBPS/chap3.xhtml", xhtml("<p>" .. long_paragraph .. "</p>") },
 })
 
@@ -278,12 +280,18 @@ do
         titles = { [2] = "第二章" },
     }
     local sources, li_count = {}, 0
-    local parent_selector, leaf_selector
+    local parent_selector, parent_indent, leaf_selector, leaf_indent
     for _, segment in ipairs(list and list.segments or {}) do
         sources[#sources + 1] = segment.source
         if segment.selector:find("li:nth%-of%-type") then li_count = li_count + 1 end
-        if segment.source == "Parent bullet." then parent_selector = segment.selector end
-        if segment.source == "First bullet." then leaf_selector = segment.selector end
+        if segment.source == "Parent bullet." then
+            parent_selector = segment.selector
+            parent_indent = segment.list_indent
+        end
+        if segment.source == "First bullet." then
+            leaf_selector = segment.selector
+            leaf_indent = segment.list_indent
+        end
     end
     check("列表项被抽取", list ~= nil and li_count == 4, tostring(li_count))
     check("列表项文本", sources[1] == "Chapter two content."
@@ -295,6 +303,10 @@ do
         tostring(parent_selector))
     check("叶子项不加伪元素", leaf_selector and leaf_selector:sub(-7) ~= "::after"
         and leaf_selector:sub(-8) ~= "::before", tostring(leaf_selector))
+    -- The negative margin must come from the book's own stylesheet:
+    -- "ul.tight { padding-left: 0 }" leaves only epub.css's 1em margin.
+    check("父项带书的列表缩进", parent_indent == "1em", tostring(parent_indent))
+    check("叶子项不带缩进", leaf_indent == nil, tostring(leaf_indent))
     check("长段落被切分", parts > 1)
     -- Every parent's parts must be contiguous and total parent_total.
     local grouped = {}

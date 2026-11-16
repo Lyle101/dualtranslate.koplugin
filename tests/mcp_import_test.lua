@@ -107,10 +107,12 @@ local job = {
     segments = {
         { id = "s000001", parent_id = "s000001", part = 1, parent_total = 2,
           chapter_index = 1, chapter_title = "One", selector = "sel-a",
-          xpointer = "/body/DocFragment/body/p[1]", source = "Part one" },
+          xpointer = "/body/DocFragment/body/p[1]", source = "Part one",
+          list_indent = "2.2em" },
         { id = "s000002", parent_id = "s000001", part = 2, parent_total = 2,
           chapter_index = 1, chapter_title = "One", selector = "sel-a",
-          xpointer = "/body/DocFragment/body/p[1]", source = "part two" },
+          xpointer = "/body/DocFragment/body/p[1]", source = "part two",
+          list_indent = "2.2em" },
         { id = "s000003", parent_id = "s000003", part = 1, parent_total = 1,
           chapter_index = 2, chapter_title = "Two", selector = "sel-b",
           xpointer = "/body/DocFragment/body/p[2]", source = "Second chapter" },
@@ -180,6 +182,15 @@ do
     local entries = Overlay.loadEntries(Store.bookDir(BOOK, "zh-Hans"), "mcp:gpt-5")
     check("entries 两条 selector", entries and #entries.entries == 2)
     check("entries 保留 selector", entries and entries.entries[1].selector == "sel-a")
+    -- 列表父项的缩进跟着 segment 走，渲染 CSS 时才能算出正确的负 margin
+    local indent_entries = {}
+    for _, entry in ipairs(entries and entries.entries or {}) do
+        indent_entries[entry.selector] = entry.list_indent
+    end
+    check("导入保留 list_indent", indent_entries["sel-a"] == "2.2em",
+        tostring(indent_entries["sel-a"]))
+    check("无缩进的条目不加字段", indent_entries["sel-b"] == nil,
+        tostring(indent_entries["sel-b"]))
 
     local manifest = load_manifest()
     check("manifest 存在", manifest ~= nil)
