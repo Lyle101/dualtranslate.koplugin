@@ -27,6 +27,8 @@ CM_FLAGS = {"context", "inbox", "allow-partial"}
 # list-providers opens the cache DB, and opening a v2 DB migrates it (a
 # write), so that command needs the write key (design 10.3).
 READ_COMMANDS = frozenset({"list-jobs", "job-status", "get-segments", "cat"})
+# Commands that touch a whole book and must not be cut off by the short timeout.
+LONG_COMMANDS = frozenset({"import", "extract"})
 
 
 class TransportError(RuntimeError):
@@ -308,18 +310,21 @@ class SshTransport:
             except UnicodeDecodeError as error:
                 raise TransportError("stdin is not valid UTF-8") from error
         payload = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
-        result = self._run(command, payload)
+        timeout = self.config.long_timeout if argv[0] in LONG_COMMANDS else None
+        result = self._run(command, payload, timeout)
         return _parse_dtctl_reply(result)
 
-    def _run(self, command: list[str], input_bytes: bytes | None = None):
+    def _run(self, command: list[str], input_bytes: bytes | None = None,
+             timeout: int | None = None):
+        limit = timeout or self.config.timeout
         try:
             return subprocess.run(
-                command, input=input_bytes, capture_output=True,
-                timeout=self.config.timeout,
+                command, input=input_bytes, capture_output=True, timeout=limit,
             )
         except subprocess.TimeoutExpired as error:
             raise TransportError(
-                f"ssh command timed out after {self.config.timeout}s"
+                f"ssh command timed out after {limit}s; the device may still be "
+                "writing — check dt_list_providers before retrying"
             ) from error
 
     def write_inbox(self, job_id: str, payload: bytes) -> str:

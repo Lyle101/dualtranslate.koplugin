@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lua:
+    name: Lua suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LuaJIT and unzip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit unzip jq
+
+      # The suites load lfs / json / lua-ljsqlite3 from a KOReader install, so
+      # CI fetches the same runtime the device uses instead of stubbing them.
+      - name: Download KOReader runtime
+        run: |
+          url=$(curl -sSf https://api.github.com/repos/koreader/koreader/releases/latest \
+            | jq -r '.assets[] | select(.name | test("linux-x86_64.*\\.zip$")) | .browser_download_url' \
+            | head -1)
+          echo "asset: $url"
+          test -n "$url"
+          curl -sSfL -o koreader.zip "$url"
+          unzip -q koreader.zip
+          test -d koreader
+          echo "KO_ROOT=$PWD/koreader" >> "$GITHUB_ENV"
+
+      - name: Syntax check
+        run: |
+          for f in *.lua tools/*.lua; do
+            luajit -b "$f" /dev/null || exit 1
+          done
+
+      - name: Run every Lua suite
+        run: |
+          for t in tests/*.lua; do
+            echo "::group::$t"
+            luajit "$t" || exit 1
+            echo "::endgroup::"
+          done
+
+  python:
+    name: MCP server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The tests do not import the mcp SDK (they exercise jobs/transport/
+      # elicit only), so this stays fast and network-independent.
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run pytest
+        run: pytest -q mcp-server

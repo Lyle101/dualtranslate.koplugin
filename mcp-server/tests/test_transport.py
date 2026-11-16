@@ -131,3 +131,25 @@ def test_control_paths_separate_identities(tmp_path: Path) -> None:
     write_path = transport._control_path(read=False)
     assert read_path != write_path
     assert "cm-ro-" in read_path and "cm-rw-" in write_path
+
+
+def test_import_and_extract_use_the_long_timeout(tmp_path: Path, monkeypatch) -> None:
+    transport = make_ssh(tmp_path)
+    seen: list[int | None] = []
+
+    def fake_run(command, input_bytes=None, timeout=None):
+        seen.append(timeout)
+
+        class Result:
+            returncode = 0
+            stdout = b'{"ok":true}'
+            stderr = b""
+
+        return Result()
+
+    monkeypatch.setattr(transport, "_run", fake_run)
+    job = f"{JOBS}/2026_2/job.json"
+    transport.rpc(["import", "--job", job])
+    transport.rpc(["list-jobs"])
+    assert seen[0] == transport.config.long_timeout
+    assert seen[1] is None

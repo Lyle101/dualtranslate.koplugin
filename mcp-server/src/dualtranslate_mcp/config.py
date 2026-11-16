@@ -49,6 +49,10 @@ class Config:
     max_segments_per_call: int = 100
     max_chars_per_segment: int = 20_000
     timeout: int = 30
+    # import/extract write or parse a whole book; 16k segments took ~2 min on a
+    # Voyage, so a 30 s timeout would report failure while the device kept
+    # working (and a retry then collides with the book lock).
+    long_timeout: int = 300
 
     def __post_init__(self) -> None:
         self.work_dir = Path(self.work_dir)
@@ -80,6 +84,7 @@ class Config:
             config.ko_root = device.get("koreader_root", config.ko_root)
             config.local_root = device.get("local_root", config.local_root)
             config.timeout = int(device.get("timeout", config.timeout))
+            config.long_timeout = int(device.get("long_timeout", config.long_timeout))
             if device.get("work_dir"):
                 config.work_dir = Path(device["work_dir"]).expanduser()
 
@@ -97,5 +102,7 @@ class Config:
             config.work_dir = Path(env["DT_WORK_DIR"]).expanduser()
         if env.get("DT_TIMEOUT"):
             config.timeout = int(env["DT_TIMEOUT"])
+        if env.get("DT_LONG_TIMEOUT"):
+            config.long_timeout = int(env["DT_LONG_TIMEOUT"])
         config.work_dir.mkdir(parents=True, exist_ok=True)
         return config
