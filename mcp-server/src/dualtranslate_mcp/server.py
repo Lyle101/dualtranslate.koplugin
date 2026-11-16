@@ -18,6 +18,11 @@ from .models import ValidationError
 from .transport import HeadlessUnavailable, TransportError, build_transport
 
 try:
+    import anyio
+except ImportError:  # pragma: no cover - anyio ships with mcp
+    anyio = None
+
+try:
     # Module-level so FastMCP can resolve the `ctx: Context` annotation.
     from mcp.server.fastmcp import Context
     from pydantic import BaseModel
@@ -109,7 +114,14 @@ def build_server(config: Config | None = None, transport: Any = None):
                 "status": "needs_model_confirmation",
                 "message": "请询问用户本次翻译使用的模型名称，然后传 model_name",
             }
-        return _guarded(lambda: service.confirm_model(job_id, model_name, display_name))
+        # This is the only async tool, so the synchronous ssh call (0.5-1 s)
+        # would otherwise block the server's event loop.
+        confirm = lambda: _guarded(
+            lambda: service.confirm_model(job_id, model_name, display_name)
+        )
+        if anyio is not None:
+            return await anyio.to_thread.run_sync(confirm)
+        return confirm()
 
     @mcp.tool()
     def dt_submit_translations(job_id: str, segments: list[dict]) -> dict:

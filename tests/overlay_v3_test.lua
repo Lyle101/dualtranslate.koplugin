@@ -16,9 +16,14 @@ if not ok_lfs or not ok_json then
 end
 
 local passed, failed = 0, 0
+local failures = {}
 local function check(name, cond, detail)
     if cond then passed = passed + 1; print("  PASS:", name)
-    else failed = failed + 1; print("  FAIL:", name, detail or "") end
+    else
+        failed = failed + 1
+        failures[#failures + 1] = name
+        print("  FAIL:", name, detail or "")
+    end
 end
 
 local ROOT = "/tmp/dt_overlay_v3_test"
@@ -616,6 +621,8 @@ print(string.format("\n==== Overlay v3 测试：%d 通过，%d 失败 ====", pas
 if failed == 0 then
     os.execute('rm -rf "' .. ROOT .. '"')
 else
+    -- A flake must name itself on the last line, or a single tail hides it.
+    print("失败断言：" .. table.concat(failures, " | "))
     print("临时目录保留供排查：" .. ROOT)
     for _, line in ipairs(warnings) do print("  log:", line) end
 end

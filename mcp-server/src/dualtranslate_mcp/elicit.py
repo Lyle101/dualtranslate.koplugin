@@ -7,7 +7,14 @@ the result.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
+
+
+def _log(message: str) -> None:
+    # stderr is the MCP log channel; without a line here an absent dialog is
+    # indistinguishable from a client that declined.
+    print(f"[dualtranslate-mcp] elicitation: {message}", file=sys.stderr)
 
 
 async def elicit_model(ctx: Any, message: str, schema: Any) -> dict | None:
@@ -19,15 +26,20 @@ async def elicit_model(ctx: Any, message: str, schema: Any) -> dict | None:
     """
     elicit = getattr(ctx, "elicit", None)
     if not callable(elicit):
+        _log("context has no elicit(); falling back to a plain-text question")
         return None
     try:
         result = await elicit(message=message, schema=schema)
-    except Exception:  # noqa: BLE001 - unsupported clients throw many types
+    except Exception as error:  # noqa: BLE001 - unsupported clients throw many types
+        _log(f"failed: {type(error).__name__}: {error}")
         return None
-    if getattr(result, "action", None) != "accept":
+    action = getattr(result, "action", None)
+    if action != "accept":
+        _log(f"declined ({action})")
         return None
     data = getattr(result, "data", None)
     if data is None:
+        _log("accepted without data")
         return None
     return {
         "model_name": (getattr(data, "model_name", "") or "").strip(),

@@ -4,11 +4,11 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.8（SSH 双 key 联调） |
+| 文档版本 | 0.9（UTF-8 切片与列表项） |
 | 日期 | 2026-11-16 |
 | 适用代码 | DualTranslate `v3.0.1` 之后（P0 / P1 / P2 已合入；P3 收件箱 MVP 与 dtctl rpc 已合入） |
 | 目标版本 | `v3.0.1` 已发布多服务 + 章节选择；MCP 外部翻译仍按 `v1.3.0` 规划 |
-| 状态 | P0/P1/P2/P3 已实施（收件箱 + SSH 双 key + elicitation）；P4（reconcile 硬化、打包文档）未实现 |
+| 状态 | P0/P1/P2/P3 已实施（收件箱 + SSH 双 key + elicitation + 列表项）；P4（reconcile 硬化、CI、打包文档）未实现 |
 | 代码状态 | P0/P1/P2/P3 已提交并有回归测试；P4（reconcile 硬化、打包文档）未实现 |
 
 **修订记录**
@@ -22,6 +22,7 @@
 | 0.5 | 2026-11-15 | P0/P1/P2 全部落地（`v3.0.1`）后对齐表头：适用代码、状态、代码状态三行改为「P0/P1/P2 已实施，P3 未开工」；正文设计与剩余 P3 章节不变 |
 | 0.6 | 2026-11-15 | 真机实测 checkpoint 成本（5,000 段写 ~938 ms / 读 ~632 ms）后落地节流：`translate_overlay` 改为每 5 批或 60 s 写一次，§2.2 数据流与 §6.3 性能硬化同步；ndjson 仍留 P4 |
 | 0.7 | 2026-11-15 | P3 收件箱 MVP 落地：`dualtranslate_mcp.lua`（导出/收件箱/导入信号）、`Store.importResult`、`tools/dtctl`、`mcp-server/`；设计 10.2/10.5/10.6/10.7 的收件箱路径已实现，SSH 自动导入与 elicitation 留待真机验证 |
+| 0.9 | 2026-11-16 | B1：`prev`/`next` 改为 UTF-8 安全切片（`Tools.utf8_tail/head`，中文源 200 字节边界不再切断 3 字节字符）；列表项 `<li>` 纳入段落白名单（父项去掉嵌套列表、块级子元素归子段、候选按文档顺序排序）；`mcp` 依赖收紧到 `>=1.30,<2`；elicitation 失败写 stderr，同步 ssh 调用移出事件循环 |
 | 0.8 | 2026-11-16 | SSH 双 key 真机联调：`/mnt/us` 是 world-writable FUSE，chroot 不可能（§10.4 改写）；传输统一为 `dtctl rpc`（argv JSON over stdin + `--mode=read|write` 白名单），新增 `cat` / `job-status` / `get-segments`，分页移到设备端；`ControlMaster` 热连接 0.5–0.7 s/次（空闲 5 分钟后的首次重连 4–5 s）；B1–B3（sftp 回显、空格路径、超时/缺 key）已修 |
 
 **阅读约定**
