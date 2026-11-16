@@ -995,9 +995,14 @@ function Store.reconcile(book_path, target_lang, cache, opts)
                     local pid = doc and doc.provider
                     if pid and pid ~= ""
                         and not (manifest and manifest.providers[pid]) then
-                        local mtime = lfs.attributes(path, "modification") or 0
+                        local mtime = lfs.attributes(path, "modification")
                         if db_provider_count(cache, book_path, target_lang, pid) > 0 then
-                            patch_manifest(pid, doc, mtime)
+                            patch_manifest(pid, doc, mtime or 0)
+                        elseif not mtime then
+                            -- A stat failure (FUSE hiccup) is not an old file:
+                            -- never delete what we cannot date, just adopt it.
+                            patch_manifest(pid, doc, 0)
+                            logger.warn("dualtranslate: orphan entries without mtime kept:", pid)
                         elseif os.time() - mtime > ORPHAN_MAX_AGE then
                             os.remove(path)
                             summary.removed[#summary.removed + 1] = pid

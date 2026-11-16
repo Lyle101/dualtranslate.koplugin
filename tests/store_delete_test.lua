@@ -445,6 +445,31 @@ do
     check("补建 display_mode=auto", manifest and manifest.display_mode == "auto")
 end
 
+do
+    -- 读不到 mtime（FUSE 抖动）不能当成"很旧"而删掉别人的数据
+    newCase("orphan_without_mtime")
+    local dir = Store.bookDir(BOOK, LANG)
+    os.execute('mkdir -p "' .. dir .. '"')
+    Overlay.saveEntries(dir, "mcp:ghost", { entries = {
+        { selector = "p[1]", source = "ghost", translation = "旧" },
+    } })
+    local ghost_path = Overlay.entriesPath(dir, "mcp:ghost")
+    local real_attributes = lfs.attributes
+    lfs.attributes = function(path, field)
+        if field == "modification" and type(path) == "string"
+            and path:sub(-#ghost_path) == ghost_path then
+            return nil
+        end
+        return real_attributes(path, field)
+    end
+    local ok, summary = pcall(Store.reconcile, BOOK, LANG, cache)
+    lfs.attributes = real_attributes
+    check("无 mtime 时 reconcile 成功", ok and summary ~= nil, tostring(summary))
+    check("无 mtime 不删除 entries", lfs.attributes(ghost_path, "mode") ~= nil)
+    check("无 mtime 保留 provider", Overlay.loadManifest(dir)
+        and Overlay.loadManifest(dir).providers["mcp:ghost"] ~= nil)
+end
+
 -- ============================================================
 print("== 7. reconcile：缺失 entries / revision 补齐 ==")
 do

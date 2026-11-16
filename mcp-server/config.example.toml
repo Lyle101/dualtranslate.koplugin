@@ -9,6 +9,9 @@ host = "kindle"
 user = "root"
 port = 22
 timeout = 30
+# import/extract touch a whole book (16k segments ≈ 2 min on a Voyage); the
+# short timeout stays for ordinary calls.
+long_timeout = 300
 
 # Two keys, never one. The Kindle cannot chroot (the data partition is a
 # world-writable FUSE mount), so the split is enforced by forced commands:
