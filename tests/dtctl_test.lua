@@ -41,12 +41,20 @@ local BOOK_MTIME = lfs.attributes(BOOK, "modification")
 -- read-only through the same override.
 -- io.popen:close() exposes no exit status on this LuaJIT, so redirect stdout
 -- to a file and read the wait status from os.execute (512 = exit 2).
+-- Spawn dtctl with the interpreter that is running this test and an absolute
+-- script path.  `luajit` is not on PATH in CI (the runner uses the KOReader
+-- bundle's binary) and the tests do not run from the repo root on every
+-- machine; arg[-1] is the interpreter, arg[0] this file.
+local LUA = (arg and arg[-1]) or "luajit"
+local TEST_DIR = (arg and arg[0] or ""):match("^(.*)/[^/]+$") or "tests"
+local DTCTL = TEST_DIR .. "/../tools/dtctl.lua"
+
 local function run(args, extra_env, stdin_path)
     local out_path = ROOT .. "/stdout.txt"
     local env = string.format("KO_ROOT='%s' DT_DATA_DIR='%s'", KO, DATA)
     if extra_env then env = env .. " " .. extra_env end
-    local command = string.format("%s luajit tools/dtctl.lua %s > %s 2>/dev/null",
-        env, args, out_path)
+    local command = string.format("%s '%s' '%s' %s > %s 2>/dev/null",
+        env, LUA, DTCTL, args, out_path)
     if stdin_path then command = command .. " < " .. stdin_path end
     local status = os.execute(command)
     local code = 0
