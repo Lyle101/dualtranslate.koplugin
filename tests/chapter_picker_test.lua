@@ -83,6 +83,14 @@ local stubs = {
     ["dualtranslate_providers"] = {},
     ["dualtranslate_overlay"] = {},
     ["dualtranslate_store"] = {},
+    ["dualtranslate_tools"] = {
+        utf8_char_len = function(byte)
+            if byte < 0xC0 then return 1 end
+            if byte < 0xE0 then return 2 end
+            if byte < 0xF0 then return 3 end
+            return 4
+        end,
+    },
 }
 for name, value in pairs(stubs) do package.preload[name] = function() return value end end
 _G.G_reader_settings = {

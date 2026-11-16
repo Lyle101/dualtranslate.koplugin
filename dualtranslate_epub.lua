@@ -242,12 +242,18 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                         if node.target and node.inner_start then
                             local inner = document:sub(node.inner_start, tag_start - 1)
                             if name == "li" then
-                                -- A parent item contains its nested list; that
-                                -- text belongs to the child items, and a block
-                                -- child (p/h*) owns its own paragraph.
-                                local nested = inner:find("<%s*[ou]l[%s>]")
-                                if nested then inner = inner:sub(1, nested - 1) end
-                                if inner:find("<%s*[ph][%s>]") or inner:find("<%s*h%d[%s>]") then
+                                -- A parent item with a nested list is a TOC
+                                -- label (or a short lead-in).  ::after is the
+                                -- element's last child, so its translation
+                                -- would render *below* the child list; the
+                                -- plugin is CSS-only and cannot move it, so
+                                -- such items are skipped instead of shown in
+                                -- the wrong place.  A block child (p/h*) owns
+                                -- its own paragraph the same way.
+                                local lowered = inner:lower()
+                                if lowered:find("<%s*[ou]l[%s>]")
+                                    or lowered:find("<%s*[ph][%s>]")
+                                    or lowered:find("<%s*h%d[%s>]") then
                                     inner = ""
                                 end
                             end

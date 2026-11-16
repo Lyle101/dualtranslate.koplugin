@@ -7,6 +7,7 @@
 -- size (Menu.getItemFontSize); pinning 30 rows would shrink small-screen text
 -- to an unreadable size, so the dialog keeps the reader's own page size.
 local _ = require("gettext")
+local Tools = require("dualtranslate_tools")
 local TranslationUI = require("dualtranslate_ui")
 
 local Picker = {}
@@ -15,12 +16,8 @@ Picker.TITLE_MAX_CHARS = 40
 
 -- Byte length of the UTF-8 character that starts with `byte` (7.1: titles are
 -- truncated by characters, never by bytes, or a Chinese title gets chopped).
-local function utf8_char_len(byte)
-    if byte < 0xC0 then return 1 end
-    if byte < 0xE0 then return 2 end
-    if byte < 0xF0 then return 3 end
-    return 4
-end
+-- One implementation lives in Tools, shared with the MCP prev/next slices.
+local utf8_char_len = Tools.utf8_char_len
 
 function Picker.truncate_title(title, max_chars)
     if type(title) ~= "string" or title == "" then return "" end
