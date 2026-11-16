@@ -1448,7 +1448,7 @@ book_root = "/mnt/us/documents"
 | `dt_refresh_device` | 通知插件刷新外部译文 | 否 |
 | `dt_prepare_job` | （可选）PC 发起抽取 | 否 |
 
-传输归属（双 key 见本节「工具安全约束」与 10.4）：全部走 `dtctl rpc`。只读 key 的强制命令带 `--mode=read`，允许 `list-jobs` / `job-status` / `get-segments` / `cat` / `list-providers`；写入 key 允许全部子命令。`get-segments` 在设备端分页，PC 不下载整份 `job.json`；文件上传（`state.json`、`result*.json`）走 rpc 的 `stdin` 字段。
+传输归属（双 key 见本节「工具安全约束」与 10.4）：全部走 `dtctl rpc`。只读 key 的强制命令带 `--mode=read`，允许 `list-jobs` / `job-status` / `get-segments` / `cat`；`list-providers` 因打开缓存库可能触发迁移而必须走写 key；写入 key 允许全部子命令。`get-segments` 在设备端分页，PC 不下载整份 `job.json`；文件上传（`state.json`、`result*.json`）走 rpc 的 `stdin` 字段。
 
 `dt_get_segments` 输入：
 

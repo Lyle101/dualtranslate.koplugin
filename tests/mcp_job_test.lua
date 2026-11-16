@@ -266,10 +266,12 @@ do
     check("listJobs 字段", list[1].total == 4 and list[1].status == "exported"
         and list[1].book_path == BOOK and list[1].chapter_count == 2)
 
-    -- 索引：meta.json + segments.ndjson，供 get-segments/job-status 避免整份解码
+    -- 索引：meta.json + job.json 里 segments 逐行，供 get-segments/job-status
     check("meta.json 写入", lfs.attributes(result.dir .. "/meta.json", "mode") ~= nil)
-    check("segments.ndjson 写入",
-        lfs.attributes(result.dir .. "/segments.ndjson", "mode") ~= nil)
+    local job_blob = Mcp.slurp(result.dir .. "/job.json")
+    check("job.json 段落逐行", job_blob
+        and job_blob:find('"segments":[\n', 1, true) ~= nil)
+    check("job.json 仍是合法 JSON", Mcp.readJson(result.dir .. "/job.json") ~= nil)
     local meta = Mcp.loadMeta(result.job_id)
     check("meta.total", meta and meta.total == 4 and meta.chapter_count == 2)
     local seg_ids = Mcp.listSegmentIds(result.job_id)
@@ -281,6 +283,43 @@ do
         and page.segments[1].next ~= nil)
     local tail = Mcp.readSegmentPage(result.job_id, 3, 10, false)
     check("索引尾页", tail and #tail.segments == 1 and tail.segments[1].id == "s000004")
+
+    -- 截断（掉电）不能返回 next_offset == offset 的空页，否则客户端空转
+    local meta_blob = Mcp.readJson(result.dir .. "/meta.json")
+    local short = {
+        schema = job.schema, job_id = result.job_id, created_at = job.created_at,
+        book = job.book, chapters = job.chapters, options = job.options,
+        segments = { job.segments[1], job.segments[2] },
+    }
+    check("写入短索引", Mcp.writeJobFiles(result.dir, short) == true)
+    check("恢复完整 total", Mcp.writeJson(result.dir .. "/meta.json", meta_blob) == true)
+    local broken, broken_err = Mcp.readSegmentPage(result.job_id, 3, 1, false)
+    check("截断索引拒绝空页", broken == nil
+        and tostring(broken_err):find("不完整") ~= nil, tostring(broken_err))
+    local restored = assert(io.open(result.dir .. "/job.json", "wb"))
+    restored:write(job_blob); restored:close()
+    check("恢复 meta", Mcp.writeJson(result.dir .. "/meta.json", meta) == true)
+
+    -- anchors：每 100 行一个字节偏移，末端页不必从头扫
+    local big = {
+        schema = job.schema, job_id = "20261116_000000_0002", created_at = 1,
+        book = job.book, chapters = {}, options = job.options, segments = {},
+    }
+    for index = 1, 250 do
+        big.segments[index] = {
+            id = string.format("b%06d", index), parent_id = string.format("b%06d", index),
+            part = 1, parent_total = 1, chapter_index = 1, chapter_title = "B",
+            selector = "p[" .. index .. "]", source = "big " .. index,
+        }
+    end
+    local big_dir = Mcp.jobDir(big.job_id)
+    check("大任务写入", Mcp.writeJobFiles(big_dir, big) == true)
+    local big_meta = Mcp.loadMeta(big.job_id)
+    check("anchors 每 100 行一个", big_meta and #(big_meta.anchors or {}) == 3)
+    local big_page = Mcp.readSegmentPage(big.job_id, 200, 2, false)
+    check("anchors 定位", big_page and big_page.segments[1].id == "b000201"
+        and big_page.total == 250, big_page and big_page.segments[1].id)
+    Tools.rmtree(big_dir)
 
     -- Second export must not reuse the id.
     local second = Mcp.exportJob{ book_path = BOOK, chapter_indexes = { 2 } }

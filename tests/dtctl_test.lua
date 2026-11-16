@@ -338,11 +338,19 @@ do
             selector = "p[" .. index .. "]", source = "text " .. index,
         })
     end
-    write_file(index_dir .. "/segments.ndjson", table.concat(lines, "\n") .. "\n")
+    local shell = JSON.encode({
+        schema = "dualtranslate.job.v1", job_id = index_job, created_at = 1,
+        book = { device_path = BOOK, title = "Index", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 1,
+            file_size = BOOK_SIZE, file_mtime = BOOK_MTIME },
+        chapters = { { index = 1, title = "One" } },
+        options = { max_chars_per_segment = 4500 },
+    })
+    write_file(index_dir .. "/job.json",
+        shell:sub(1, -2) .. ',"segments":[\n' .. table.concat(lines, ",\n") .. "\n]}")
     write_file(index_dir .. "/state.json", JSON.encode({
         schema = "dualtranslate.state.v1", status = "exported", submitted = 0, total = 3 }))
 
-    -- job.json is deliberately absent: the index path must not need it.
     local index_job_path = index_dir .. "/job.json"
     local status_out = rpc2({ argv = { "job-status", "--job", index_job_path } })
     local status = decode_single_line(status_out)

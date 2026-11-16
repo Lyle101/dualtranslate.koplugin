@@ -180,20 +180,110 @@ end
 -- Design 10.2: the device writes job.json + state.json; segments carry the
 -- selectors CREngine will match, so the PC never parses the EPUB itself.
 -- ---------------------------------------------------------------------------
--- Job index (meta.json + segments.ndjson)
+-- Job index (meta.json + line-per-segment job.json)
 --
--- A 10k-segment job.json is ~2.9 MB and takes ~825 ms to decode on a Voyage;
--- get-segments runs once per page, so decoding the whole file for 50 lines is
--- the next bottleneck.  The index keeps the same data line-per-segment:
--- metadata in a tiny meta.json, segments as NDJSON, so a page costs O(offset)
--- over short lines and job-status never touches job.json.
+-- A 10k-segment job.json is ~4.7 MB and takes ~9.8 s to decode+validate on a
+-- Voyage; get-segments runs once per page, so the whole-file path was the
+-- bottleneck.  Export writes the segments array one object per line (JSON
+-- allows the newlines), plus a tiny meta.json for book fields and totals.
+-- Keeping the index inside job.json means one file and one write, not two.
+--
+-- Measured on the device: io.lines()/read("*l") costs ~0.5-1 ms per line, so
+-- every reader below slurps the file once (~24 ms) and slices it with
+-- string.find; a page costs O(offset) characters, not O(offset) syscalls.
 -- ---------------------------------------------------------------------------
 Mcp.META_SCHEMA = "dualtranslate.job.meta.v1"
 
-function Mcp.writeJobIndex(dir, job)
+local SEGMENTS_MARKER = '"segments":[\n'
+
+function Mcp.slurp(path)
+    local file = io.open(path, "rb")
+    if not file then return nil end
+    local data = file:read("*a")
+    file:close()
+    return data
+end
+
+local function segments_start(blob)
+    if not blob then return nil end
+    local pos = blob:find(SEGMENTS_MARKER, 1, true)
+    if not pos then return nil end
+    return pos + #SEGMENTS_MARKER
+end
+
+-- Byte offset of every SEGMENT_ANCHOR-th line, stored in meta.json so a page
+-- near the end starts within one block instead of scanning thousands of lines
+-- (a 10k-line scan costs ~0.6 s on a Voyage).
+Mcp.SEGMENT_ANCHOR = 100
+
+-- Lines [from, to] (1-based) of the segments array, one object per line.
+-- A trailing comma belongs to the array, not to the object.
+local function read_segment_lines(blob, anchors, from, to)
+    local start = segments_start(blob)
+    if not start then return nil end
+    local index, pos = 1, start
+    if anchors and #anchors > 0 then
+        local block = math.floor((from - 1) / Mcp.SEGMENT_ANCHOR) + 1
+        if anchors[block] then
+            pos = anchors[block]
+            index = (block - 1) * Mcp.SEGMENT_ANCHOR + 1
+        end
+    end
+    local lines = {}
+    while index <= to do
+        local stop = blob:find("\n", pos, true)
+        if not stop then break end
+        local line = blob:sub(pos, stop - 1)
+        if line:sub(-1) == "," then line = line:sub(1, -2) end
+        if index >= from then lines[index] = line end
+        pos = stop + 1
+        index = index + 1
+    end
+    return lines
+end
+
+local function count_segment_lines(blob)
+    local start = segments_start(blob)
+    if not start then return 0 end
+    local count, pos = 0, start
+    while true do
+        local stop = blob:find("\n", pos, true)
+        if not stop then break end
+        count = count + 1
+        pos = stop + 1
+    end
+    return count
+end
+
+-- Encodes every segment once and lays the array out one object per line, so
+-- the same bytes serve job.json compatibility and the page index.
+function Mcp.writeJobFiles(dir, job)
     if not dir or type(job) ~= "table" or type(job.segments) ~= "table" then
         return false
     end
+    local lines = {}
+    for index, segment in ipairs(job.segments) do
+        local encoded = JSON.encode(segment)
+        if not encoded then return false end
+        lines[index] = encoded
+    end
+    local shell = {
+        schema = job.schema, job_id = job.job_id, created_at = job.created_at,
+        book = job.book, chapters = job.chapters, options = job.options,
+    }
+    local encoded_shell = JSON.encode(shell)
+    if not encoded_shell then return false end
+    -- JSON.encode returns an object literal; drop its closing brace and
+    -- append the already-encoded segments (JSON field order does not matter).
+    local head = encoded_shell:sub(1, -2) .. "," .. SEGMENTS_MARKER
+    local anchors, cursor = {}, #head + 1
+    for index, line in ipairs(lines) do
+        if (index - 1) % Mcp.SEGMENT_ANCHOR == 0 then
+            anchors[#anchors + 1] = cursor
+        end
+        cursor = cursor + #line + 2 -- ",\n" between objects
+    end
+    local job_json = head .. table.concat(lines, ",\n") .. "\n]}"
     local meta = {
         schema = Mcp.META_SCHEMA,
         job_id = job.job_id,
@@ -202,20 +292,11 @@ function Mcp.writeJobIndex(dir, job)
         chapter_count = #(job.chapters or {}),
         total = #job.segments,
         max_chars_per_segment = job.options and job.options.max_chars_per_segment,
+        anchors = anchors,
     }
-    if not Mcp.writeJson(dir .. "/meta.json", meta) then return false end
-    local lines = {}
-    for index, segment in ipairs(job.segments) do
-        local encoded = JSON.encode(segment)
-        if not encoded then return false end
-        lines[index] = encoded
-    end
-    local file = io.open(dir .. "/segments.ndjson", "wb")
-    if not file then return false end
-    file:write(table.concat(lines, "\n"))
-    file:write("\n")
-    file:close()
-    return true
+    if not Tools.mkdir_p(dir) then return false end
+    if not write_file(dir .. "/job.json", job_json) then return false end
+    return Mcp.writeJson(dir .. "/meta.json", meta)
 end
 
 function Mcp.loadMeta(job_id)
@@ -225,65 +306,28 @@ function Mcp.loadMeta(job_id)
     return data
 end
 
-local function count_lines(path)
-    local file = io.open(path, "rb")
-    if not file then return nil end
-    local count = 0
-    for line in file:lines() do
-        if line ~= "" then count = count + 1 end
-    end
-    file:close()
-    return count
-end
-
--- Lines [offset, offset + limit] (0-based page) plus one neighbour on each
--- side for context.  Scanning stops once the window is complete, so a page
--- costs O(offset + limit) short lines instead of one giant decode.
-local function read_ndjson_window(path, offset, limit)
-    local file = io.open(path, "rb")
-    if not file then return nil end
-    local from = math.max(1, offset)
-    local to = offset + limit + 1
-    local lines, index, complete = {}, 0, true
-    for line in file:lines() do
-        if line ~= "" then
-            index = index + 1
-            if index >= from and index <= to then lines[index] = line end
-            if index > to then
-                complete = false
-                break
-            end
-        end
-    end
-    file:close()
-    if index == 0 then return nil end
-    return lines, index, complete
-end
-
-local function source_tail(line, from_end)
-    local segment = line and JSON.decode(line)
-    local source = segment and segment.source
-    if type(source) ~= "string" then return nil end
-    if from_end then return source:sub(-200) end
-    return source:sub(1, 200)
-end
-
 function Mcp.readSegmentPage(job_id, offset, limit, with_context)
     if not Mcp.validJobId(job_id) then return nil, "invalid job id" end
-    local path = Mcp.jobDir(job_id) .. "/segments.ndjson"
-    local lines, scanned, complete = read_ndjson_window(path, offset, limit)
-    if not lines then return nil, "没有可用的段落索引" end
+    local blob = Mcp.slurp(Mcp.jobDir(job_id) .. "/job.json")
+    if not blob or not segments_start(blob) then
+        return nil, "没有可用的段落索引"
+    end
     local meta = Mcp.loadMeta(job_id)
     local total = meta and tonumber(meta.total) or nil
-    if not total then
-        total = complete and scanned or count_lines(path)
+    if not total then total = count_segment_lines(blob) end
+    local from = math.max(1, offset)
+    local last = offset + limit + 1
+    local lines = read_segment_lines(blob, meta and meta.anchors, from, last)
+    -- Decode each line once: neighbours are reused for prev/next instead of
+    -- being decoded again per row (120 decodes -> 41 for a 50-row page).
+    local decoded = {}
+    for position = from, last do
+        if lines[position] then decoded[position] = JSON.decode(lines[position]) end
     end
     local rows = {}
     for position = offset + 1, offset + limit do
-        local line = lines[position]
-        if not line or position > (total or 0) then break end
-        local segment = JSON.decode(line)
-        if not segment then return nil, "段落索引损坏" end
+        local segment = decoded[position]
+        if not segment or position > total then break end
         local row = {
             id = segment.id,
             parent_id = segment.parent_id or segment.id,
@@ -294,25 +338,35 @@ function Mcp.readSegmentPage(job_id, offset, limit, with_context)
             source = segment.source,
         }
         if with_context then
-            row.prev = source_tail(lines[position - 1], true)
-            row.next = source_tail(lines[position + 1], false)
+            local previous = decoded[position - 1]
+            local following = decoded[position + 1]
+            row.prev = previous and previous.source and previous.source:sub(-200) or nil
+            row.next = following and following.source and following.source:sub(1, 200) or nil
         end
         rows[#rows + 1] = row
+    end
+    -- A truncated job.json (power loss while writing) would otherwise come
+    -- back as an empty page with next_offset == offset and spin the client.
+    if #rows == 0 and offset < total then
+        return nil, "段落索引不完整"
     end
     return { segments = rows, total = total }
 end
 
 function Mcp.listSegmentIds(job_id)
     if not Mcp.validJobId(job_id) then return nil end
-    local file = io.open(Mcp.jobDir(job_id) .. "/segments.ndjson", "rb")
-    if not file then return nil end
-    local ids = {}
-    for line in file:lines() do
-        -- "parent_id" cannot match: the pattern needs a quote right before id.
-        local id = line:match('"id"%s*:%s*"([^"]+)"')
-        if id then ids[#ids + 1] = id end
+    local blob = Mcp.slurp(Mcp.jobDir(job_id) .. "/job.json")
+    local start = segments_start(blob)
+    if not start then return nil end
+    local ids, pos = {}, start
+    while true do
+        local found = blob:find('"id":"', pos, true)
+        if not found then break end
+        local stop = blob:find('"', found + 6, true)
+        if not stop then break end
+        ids[#ids + 1] = blob:sub(found + 6, stop - 1)
+        pos = stop + 1
     end
-    file:close()
     return ids
 end
 
@@ -361,15 +415,10 @@ function Mcp.exportJob(opts)
             style_guide = opts.style_guide or DEFAULT_STYLE_GUIDE,
         },
     }
-    if not Mcp.writeJson(dir .. "/job.json", job) then
+    -- One encode per segment, shared by job.json and the index (10.3).
+    if not Mcp.writeJobFiles(dir, job) then
         Tools.rmtree(dir)
         return nil, "无法写入任务文件"
-    end
-    -- The fast path for the PC (10.3): keep get-segments and job-status away
-    -- from the full job.json decode.
-    if not Mcp.writeJobIndex(dir, job) then
-        Tools.rmtree(dir)
-        return nil, "无法写入任务索引"
     end
     local state = {
         schema = Mcp.STATE_SCHEMA,
