@@ -4,17 +4,18 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.10（列表布局与整书压测） |
-| 日期 | 2026-11-16 |
-| 适用代码 | DualTranslate `v3.0.1` 之后（P0 / P1 / P2 已合入；P3 收件箱 MVP 与 dtctl rpc 已合入） |
-| 目标版本 | `v3.0.1` 已发布多服务 + 章节选择；MCP 外部翻译仍按 `v1.3.0` 规划 |
-| 状态 | P0/P1/P2/P3 已实施（收件箱 + SSH 双 key + elicitation + 列表项）；P4（reconcile 硬化、CI、打包文档）未实现 |
-| 代码状态 | P0/P1/P2/P3 已提交并有回归测试；P4（reconcile 硬化、打包文档）未实现 |
+| 文档版本 | 0.11（v3.2.0 发版：条目去重、分片导出、CREngine 约束） |
+| 日期 | 2026-11-18 |
+| 适用代码 | DualTranslate `v3.2.0`（P0–P3 已合入；P4 的 CI 与 orphan 边界已落地） |
+| 目标版本 | `v3.2.0` 已发布：多服务 + 章节选择 + MCP 外部翻译（P3）随本版一起发布 |
+| 状态 | P0–P3 已实施（收件箱 + SSH 双 key + elicitation + 列表项 + 父项译文对齐）；P4 部分落地：GitHub Actions（Lua 套件 + MCP server 的 pytest）、reconcile 遇读不到 mtime 的 orphan 不再删除；`entries` ndjson 与按章 GC 明确不做 |
+| 代码状态 | 全部有回归测试，CI 自 `4d60e58` 起每次 push 跑全套（28 个 Lua 套件，含可选的 `smoke_live`；外加 MCP server 的 pytest） |
 
 **修订记录**
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 0.11 | 2026-11-18 | v3.2.0 收口：条目按「归属元素」去重，三种列表父项选择器形态收敛（§6.3）；导出改为分片会话 + 真实章节进度（§10.2.1）；补记 CREngine 生成盒的实测约束——`margin`/`position:relative`/`text-indent` 全无效，横向偏移只能移动真实元素（§8.6）；表头状态改为「P0–P3 已实施，P4 部分落地」 |
 | 0.1 | 2026-11-13 | 初稿：可行性、数据模型 v3、R1-R4、P0 补丁、MCP 设计、迁移与测试计划 |
 | 0.2 | 2026-11-13 | P0 合入后对齐代码；修订迁移 SQL（缺 `providers` 表）、内置 provider seed、显示模式（`display_mode`）、fallback 顺序与「最近使用」解耦、删除意图文件、MCP 长段 part 合并、锁模块与依赖方向、0 候选章节语义、outline 解析实现路径、性能指标拆分；行号引用改为函数名 |
 | 0.3 | 2026-11-14 | 第二轮评审：缓存命中补定位行（A1）、SSH 双 key 拆分（A2）、`reconcile` 不再仅凭「DB 无行」删 entries（A3）、`storeForBook` 统一 upsert（A4）、`reload.signal` 改用单调序号（A5）、`complete` 增加 `spine_count=0` 边界（A6）、迁移备份强制 checkpoint（A7）；统一 `book_size`/`book_mtime` 口径；清理与非目标重复的开放问题；性能指标补测量口径 |
@@ -741,6 +742,25 @@ local slug = provider_id:gsub("[^%w._-]", "_")  -- mcp:gpt-5 -> mcp_gpt-5
 - `revision`：manifest 每次成功写入递增；entries 头部也写入同一 revision（导入/checkpoint 写 `manifest.revision + 1`），CSS 缓存 key 取两者最大值（见 8.2）。
 
 
+**条目合并与身份（3.2.0）：**
+
+entries 的写入是「按 selector upsert、只增不删」：checkpoint 与 MCP 导入都把磁盘上已有的条目和新条目按 selector 并集。这条规则在 selector 形态稳定时没有问题，但列表父项的锚点换过三次：
+
+| 版本 | 列表父项的选择器 |
+| --- | --- |
+| 3.0.x | `... > li:nth-of-type(2)`（伪元素缺省 `::after`，落在子列表之后） |
+| 3.1.0 | `... > li:nth-of-type(2)::before`（落在条目正文之前） |
+| 3.2.0 | `... > li:nth-of-type(2) > ol:nth-of-type(1)::before`（挂在子列表上，唯一「父项正文之后、子项之前」的位置） |
+
+升级后重译一章，同一个段落会以两种形态并存，页面上就出现**上下两份译文**。因此条目身份不再等于选择器字符串，而是「拥有这段文字的元素」：
+
+1. 去掉尾部伪元素（`::before` / `::after`）；
+2. 若末尾是 `> ol|ul:nth-of-type(n)`，再去掉这一段（列表父项的译文挂在子列表上）。
+
+`Overlay.dedupeEntries` 按该身份收敛：同身份只留**最后一条**（写入顺序是「磁盘在前、本次在后」，最后一条即最新形态），位置沿用**首次出现**的那条，重译一章不会让整个文件位移。三个入口都走同一函数：`save_checkpoint`（合并后、计数前）、`Store.importResult` / `rebuild_entries_from_db`（写 entries 前）、`Overlay.saveEntries`（兜底）。`loadEntries` 读的时候也过一遍，所以升级后**即使不重译**，旧文件里的双形态也在打开时收敛成一条。
+
+按章 GC（章节完整重译后删掉该章不再产出的条目）**未实现**：部分完成/中断的章节会误删仍有效的译文，收益不足以承担这个风险；上面的去重已经覆盖用户可见的重复。
+
 **性能硬化（可选，P4）：**
 
 - 触发条件：单 provider entries 文件 > 5 MB，或 checkpoint 写入耗时 > 500 ms。
@@ -1124,6 +1144,37 @@ visible | color | size | font_family
 - 样式（字号/字体/颜色）切换不影响 provider 选择。
 - fallback 关闭时，CSS 构建不加载未选中的 entries；fallback 开启时最多加载 `fallback_order` 中的其他 entries。
 
+### 8.6 CREngine 生成盒的实测约束（3.2.0 补记，踩过两次）
+
+CREngine 把 `::before` / `::after` 的 `content` 实例化成**真实排版节点**，所以它参与分页、也会继承源码段的样式——这是整个非侵入方案的基础。但它对这个生成盒只认一部分 CSS，以下是**真机实测**结论，写样式前务必先读：
+
+| 属性 | 在生成盒上的行为 |
+| --- | --- |
+| `content` / `display:block` / `white-space:pre-wrap` / `color` / `font-size` / `line-height` | 生效（译文层的基本形状就靠这几个） |
+| `margin`（含 `margin-left`、负 margin） | **无效**，盒子始终贴在其宿主元素的内容边缘 |
+| `position: relative` + `top/left` | **无效**，不能靠相对定位平移 |
+| `text-indent` | **无效** |
+| `padding` | 无效或不可预期，统一写 `padding:0` 更安全 |
+
+由此推出两条实现约定：
+
+1. **插入点只有「元素内容的开头或结尾」**。`li` 父项的译文要落在「父项正文之后、第一个子项之前」，CSS 没有这个位置；唯一可行的锚点是子列表本身 → `... > li:nth-of-type(2) > ol:nth-of-type(1)::before`（3.2.0 的形态）。挂在 `li::after` 会跑到整个子列表之后，`li::before` 会跑到父项正文之前。
+2. **横向偏移只能移动真实元素**。生成盒继承子列表的缩进，要让它和父项正文对齐，必须先取消列表自身的缩进、把同样的量还给 `li`：
+
+```css
+... > li:nth-of-type(2) > ol:nth-of-type(1) {
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+}
+... > li:nth-of-type(2) > ol:nth-of-type(1) > li {
+  margin-left: <书的列表缩进> !important;
+}
+```
+
+缩进量取自**这本书自己的样式表**（`dualtranslate_listindent.lua`：`ul.tight{padding-left:0}` 与 `epub.css` 默认 1em 得到的值不同）；`1.5em` 只是老 overlay 缺 `list_indent` 字段时的回退值。
+
+尚未验证：`td` / `th` / `caption` 里的 `display:block` 生成盒会不会撑破列宽（表格可能在窄列上重排）。候选段落白名单先只扩到 `blockquote`（块级，行为与 `p` 一致），表格单独一轮、用抓屏比对列宽再决定。
+
 ---
 
 ## 9. R4 按服务删除设计
@@ -1306,6 +1357,26 @@ cache/dualtranslate/mcp/jobs/<job_id>/result.json          -- 翻译后（dtctl 
 ```
 
 任务目录保留策略：`committed` 且超过 7 天的 job 由 `dtctl` 在下次导入成功时顺带清理；「删除本书全部译文」必须同时删除 `job.book.device_path` 指向该书的 job 目录与 inbox 结果（`job.json` 含原文，不能留）。这是 P3 的必做项，不能推到 P4。
+
+#### 10.2.1 导出的分片执行（3.2.0）
+
+实测 646 章 / 16,106 段的整本书，导出 <45 s——但**全部发生在 UI 线程**：`scheduleIn` 只是让「正在导出」的提示先画出来，之后照样一次跑完，屏幕几十秒不动，没进度也没法退出。
+
+现在抽取是一个会话，调用方每轮事件循环推一片：
+
+```lua
+local session = Epub.begin_segment_export{ book_path, chapter_indexes, titles }
+session:chapter_count()        -- 本次要走的章节数（进度分母）
+session:processed()            -- 已走完的章节数
+session:step(0.2)              -- 按 **CPU 时间** 走 0.2 s，返回已走章节数
+session:finish()               -- 清理临时目录，返回原 collect_segments 的结果表
+session:abort()                -- 取消：删临时目录并置 aborted
+```
+
+- 预算用 `os.clock()`（CPU）而不是墙钟：慢速 SD 卡不会把一片拉成一次可见的卡顿。
+- 阅读器用 `ProgressbarDialog` 显示**章节进度**（真实百分比），每片 `scheduleIn(0.01, step)`；点外部只隐藏对话框、导出继续，结果仍落进任务列表。
+- `Mcp.exportJob{ collected = ... }` 直接使用会话结果，不再二次解包；`dtctl` 与测试仍走 `Epub.collect_segments`（内部就是「开会话 + 一次 `step(math.huge)` + finish」）。
+- 仍会阻塞的两段：**开档**（三趟 archive 解包，在 `begin_segment_export` 里）与**写 `job.json`**（逐段编码）。前者在会话创建时完成，后者在进度 100% 后把副标题改成「写入任务文件…」。
 
 `job.json`：
 
