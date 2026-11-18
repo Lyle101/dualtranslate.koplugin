@@ -797,6 +797,15 @@ function Epub.translate_overlay(opts, ...)
     local processed, translated_count, failed_count = 0, 0, 0
     local first_error
     local cancelled = false
+    -- A dead network (or an engine that cannot reach its endpoint) fails every
+    -- segment; walking the rest of a 600-chapter book only multiplies the
+    -- timeout.  Stop after a run of consecutive failures and let the reader
+    -- offer another engine - one success resets the counter, so a few bad
+    -- paragraphs never abort a healthy run.
+    local consecutive_failures = 0
+    local engine_down = false
+    local engine_failure_threshold = math.max(1,
+        tonumber(opts.engine_failure_threshold) or 5)
     local last_processed_index = 0
     local function cancel_requested()
         if not cancel_path then return false end
@@ -894,9 +903,16 @@ function Epub.translate_overlay(opts, ...)
                     end
                     translated_count = translated_count + 1
                     st.success = st.success + 1
+                    consecutive_failures = 0
                 else
                     failed_count = failed_count + 1
                     st.failed = st.failed + 1
+                    consecutive_failures = consecutive_failures + 1
+                    if consecutive_failures >= engine_failure_threshold then
+                        engine_down = true
+                        st.cancelled = true
+                        break
+                    end
                 end
                 write_progress(progress_path, processed, total, translated_count,
                     failed_count, chapter_pos, #chapters)
@@ -912,8 +928,29 @@ function Epub.translate_overlay(opts, ...)
                 batches_since_checkpoint = 0
                 last_checkpoint_at = os.time()
             end
+            if engine_down then break end
         end
         release_chapter()
+        if engine_down then break end
+    end
+    -- The engine stopped answering: keep what was translated and report it as
+    -- its own outcome, so the reader can offer another provider instead of
+    -- showing "N segments failed" for a book that never had a chance.
+    if engine_down then
+        save_checkpoint(false)
+        cleanup()
+        return {
+            output = output,
+            overlay = true,
+            chapters = #chapters,
+            translated = translated_count,
+            failed = failed_count,
+            cancelled = false,
+            engine_down = true,
+            last_chapter = false,
+            error = type(first_error) == "table" and first_error.message
+                or tostring(first_error or ""),
+        }
     end
     -- total == 0 is a success only when every chapter was readable and really
     -- had no translatable text (image-only books).  An unreadable chapter

@@ -330,28 +330,6 @@ do
 end
 
 -- ============================================================
-print("== 7. inbox → job 目录归档 ==")
-do
-    local inbox = Mcp.inboxDir()
-    Tools.mkdir_p(inbox)
-    local result = make_result({
-        { id = "s000001", text = "a" }, { id = "s000002", text = "b" },
-        { id = "s000003", text = "c" },
-    })
-    local inbox_path = inbox .. "/" .. JOB_ID .. ".json"
-    writeJson(inbox_path, result)
-    check("pendingResults 发现 inbox", #Mcp.pendingResults() == 1)
-    local summary, err = Mcp.importFile(inbox_path, { allow_partial = false })
-    check("importFile 成功", summary ~= nil, tostring(err))
-    check("inbox 已清空", lfs.attributes(inbox_path, "mode") == nil)
-    check("result 归档到 job 目录", lfs.attributes(job_dir .. "/result.json", "mode") ~= nil)
-    local state = Mcp.loadState(JOB_ID)
-    check("state committed", state and state.status == "committed"
-        and state.provider_id == "mcp:gpt-5")
-    check("已提交任务不再待导入", #Mcp.pendingResults() == 0)
-end
-
--- ============================================================
 print("== 7b. entries 丢失后从 SQLite 重建 ==")
 do
     local dir = Store.bookDir(BOOK, "zh-Hans")

@@ -496,7 +496,7 @@ function dualtranslate:exportMcpJob(indexes)
 
     local function finish_with_error(message)
         UIManager:close(progress_dialog)
-        TranslationUI.showInfo(message)
+        TranslationUI.showPersistent(tostring(message) .. _("\n\n请轻触屏幕以关闭此消息"))
     end
 
     local step
@@ -527,101 +527,33 @@ function dualtranslate:exportMcpJob(indexes)
         -- the bar does not look like a hang.
         report(100, _("写入任务文件…"))
         if UIManager.forceRePaint then UIManager:forceRePaint() end
-        local result, err = Mcp.exportJob{
+        -- pcall: a raise inside the writer used to leave the dialog sitting at
+        -- 100% forever, with nothing to tell the user it had failed.
+        local ok_export, result, err = pcall(Mcp.exportJob, {
             book_path = book_path,
             collected = collected,
             source_lang = self:getSourceLang(),
             target_lang = self:getTargetLang(),
-        }
+        })
+        if not ok_export then result, err = nil, tostring(result) end
         UIManager:close(progress_dialog)
         if not result then
-            TranslationUI.showInfo(_("导出失败：") .. tostring(err))
+            TranslationUI.showPersistent(
+                (_("导出失败\n\n%s\n\n请轻触屏幕以关闭此消息")):format(tostring(err)))
             return
         end
         -- The task list is cached for a second; a fresh export must not be
         -- hidden behind a menu the user opened just before it.
         self._mcp_job_menu_cache = nil
-        TranslationUI.showInfo(string.format(
-            _("已导出 MCP 任务 %s\n%d 章 · %d 段\n电脑端可读取 cache/dualtranslate/mcp/jobs/"),
-            result.job_id, result.chapters, result.segments), 6)
+        -- A whole-book export takes a minute; a 6-second toast is easy to miss
+        -- while the screen repaints, so this one waits for a tap.
+        TranslationUI.showPersistent((_(
+            "导出完成\n\n任务：%s\n%d 章 · %d 段\n"
+            .. "电脑端可读取 cache/dualtranslate/mcp/jobs/\n\n"
+            .. "请轻触屏幕以关闭此消息")):format(
+            result.job_id, result.chapters, result.segments))
     end
     UIManager:scheduleIn(0.1, step)
-end
-
-function dualtranslate:importMcpResults()
-    local Mcp = require("dualtranslate_mcp")
-    local ok, summary = pcall(Mcp.importPending, { cache = self.cache,
-        allow_partial = self:getSetting("mcp_allow_partial_import", false) })
-    if not ok or type(summary) ~= "table" then
-        TranslationUI.showInfo(_("导入失败：") .. tostring(summary))
-        return
-    end
-    if #summary.failed > 0 and summary.count == 0 then
-        local message = summary.failed[1] and summary.failed[1].error or ""
-        if message:find("尚未翻译完成")
-            and self:getSetting("mcp_allow_partial_import", false) ~= true then
-            message = message .. _("\n可在本菜单勾选「允许导入未完成的任务」")
-        end
-        TranslationUI.showInfo(string.format(_("导入失败：%d 个结果无法导入\n%s"),
-            #summary.failed, message), 6)
-        return
-    end
-    if summary.count == 0 then
-        TranslationUI.showInfo(_("收件箱里没有待导入的结果"))
-        return
-    end
-    self._page_translation_overlay_state = nil
-    self._mcp_job_menu_cache = nil
-    self:refreshDocumentStyles()
-    local segments, last = 0, nil
-    for _, item in ipairs(summary.imported) do
-        segments = segments + (item.accepted or 0)
-        last = item
-    end
-    TranslationUI.showInfo(string.format(_("已导入 %d 个任务，共 %d 段"),
-        summary.count, segments))
-    if #summary.failed > 0 then
-        TranslationUI.showInfo(string.format(_("%d 个结果导入失败（详见日志）"), #summary.failed), 5)
-    end
-    self:offerMcpDisplaySwitch(last)
-end
-
--- Auto-switching the visible layer forces a re-pagination, so it is only done
--- when the user asked for it; otherwise ask once (design 10.7).
-function dualtranslate:offerMcpDisplaySwitch(summary)
-    if not summary or not summary.provider_id then return end
-    local book_path = self:currentBookPath()
-    local target_lang = self:getTargetLang()
-    local manifest = self:currentManifest()
-    local provider = manifest and manifest.providers[summary.provider_id]
-    if not provider or not provider.confirmed then return end
-    if manifest.display_provider == summary.provider_id then return end
-    if self:getSetting("auto_switch_after_import", false) == true then
-        Store.setDisplayProvider(book_path, target_lang, summary.provider_id)
-        self:refreshDocumentStyles()
-        return
-    end
-    local name = provider.display_name or summary.provider_id
-    local dialog
-    dialog = ButtonDialog:new{
-        title = string.format(_("已导入 %s 的译文，是否切换显示？"), name),
-        buttons = {{
-            {
-                text = _("稍后"),
-                callback = function() UIManager:close(dialog) end,
-            },
-            {
-                text = _("切换"),
-                callback = function()
-                    UIManager:close(dialog)
-                    local ok, result = pcall(Store.setDisplayProvider,
-                        book_path, target_lang, summary.provider_id)
-                    if ok and result then self:refreshDocumentStyles() end
-                end,
-            },
-        }},
-    }
-    UIManager:show(dialog)
 end
 
 -- Poll the reload signal on page turns (10.7).  The comparison uses the
@@ -659,7 +591,6 @@ function dualtranslate:showMcpJob(item)
                 callback = function()
                     UIManager:close(dialog)
                     Tools.rmtree(Mcp.jobDir(item.job_id))
-                    os.remove(Mcp.inboxDir() .. "/" .. item.job_id .. ".json")
                     self._mcp_job_menu_cache = nil
                     TranslationUI.showInfo(_("已删除任务"))
                 end,
@@ -719,33 +650,6 @@ function dualtranslate:buildMcpMenu()
             sub_item_table_func = function() return self:buildMcpJobMenu() end,
         },
         {
-            text = _("导入结果"),
-            callback = function() self:importMcpResults() end,
-        },
-        {
-            -- Partial results are a user decision: the PC may have translated
-            -- 90% and the rest is not worth another round trip.
-            text = _("允许导入未完成的任务"),
-            checked_func = function()
-                return self:getSetting("mcp_allow_partial_import", false) == true
-            end,
-            callback = function()
-                self:saveSetting("mcp_allow_partial_import",
-                    self:getSetting("mcp_allow_partial_import", false) ~= true)
-            end,
-        },
-        {
-            -- Switching the visible layer re-paginates, so it stays opt-in.
-            text = _("导入后自动切换显示"),
-            checked_func = function()
-                return self:getSetting("auto_switch_after_import", false) == true
-            end,
-            callback = function()
-                self:saveSetting("auto_switch_after_import",
-                    self:getSetting("auto_switch_after_import", false) ~= true)
-            end,
-        },
-        {
             text = _("刷新外部译文"),
             enabled_func = function() return self:isEpub() end,
             callback = function()
@@ -755,6 +659,72 @@ function dualtranslate:buildMcpMenu()
             end,
         },
     }
+end
+
+-- The worker stops after a run of consecutive failures.  Microsoft Edge is
+-- the only provider that works without a proxy, so the fallback is offered as
+-- one explicit choice: the engine is never switched behind the user's back.
+function dualtranslate:offerEngineFallback(item, result)
+    local current = item.provider or self:getMode()
+    local reason = tostring(result and result.error or "")
+    local function give_up()
+        item.switch_display_to = nil
+        item.status = "failed"
+        item.error = reason ~= ""
+            and reason
+            or _("当前翻译引擎不可用（可能无法访问 Google）")
+        self:saveTranslationQueue()
+        if item.silent then
+            logger.warn("dualtranslate: engine unavailable, job parked:", item.error)
+        else
+            TranslationUI.showInfo(item.error
+                .. _("\n可在「翻译引擎」菜单改用 Microsoft Edge（免费）"), 6)
+        end
+        self:startNextQueuedTranslation()
+    end
+    if current == "microsoft_free" or item.silent then
+        give_up()
+        return
+    end
+    local name = current
+    for _, provider in ipairs(Providers.list or {}) do
+        if provider.id == current then name = provider.name or current end
+    end
+    local dialog
+    dialog = ButtonDialog:new{
+        title = string.format(
+            _("当前引擎（%s）连续失败\n%s\n\n可能无法访问 Google。\n"
+                .. "改用「Microsoft Edge（免费）」重试同一范围？"),
+            tostring(name), reason),
+        buttons = {{
+            {
+                text = _("取消"),
+                callback = function()
+                    UIManager:close(dialog)
+                    give_up()
+                end,
+            },
+            {
+                text = _("改用 Edge 重试"),
+                is_enter_default = true,
+                callback = function()
+                    UIManager:close(dialog)
+                    self:saveSetting("mode", "microsoft_free")
+                    item.provider = "microsoft_free"
+                    item.status = "queued"
+                    item.error = nil
+                    item.retry_count = 0
+                    item.partial_retry_count = 0
+                    item.switch_display_to = "microsoft_free"
+                    self:saveTranslationQueue()
+                    UIManager:show(Notification:new{
+                        text = _("已改用 Microsoft Edge，继续翻译…"), timeout = 2 })
+                    self:startNextQueuedTranslation()
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
 end
 
 function dualtranslate:_runTranslation(item)
@@ -1066,6 +1036,27 @@ function dualtranslate:_runTranslation(item)
                     UIManager:show(Notification:new{ text = "已取消翻译。", timeout = 2 })
                 end
                 self:startNextQueuedTranslation()
+                return
+            end
+            if item.switch_display_to and (tonumber(result.translated) or 0) > 0 then
+                -- A fallback run wrote a different provider; show it, or the
+                -- user keeps looking at the layer that just failed.
+                local pid = item.switch_display_to
+                item.switch_display_to = nil
+                local switched = pcall(Store.setDisplayProvider, book_path,
+                    self:getTargetLang(), pid)
+                if switched then self:refreshDocumentStyles() end
+            end
+            if result.engine_down then
+                -- The worker stopped after N consecutive failures: the engine
+                -- is unreachable, not the book.  Offer the one provider that
+                -- needs no proxy instead of grinding through the remaining
+                -- chapters at one timeout each.
+                progress_active = false
+                self._translation_progress.active = false
+                self._page_translation_follow_active = nil
+                pcall(function() UIManager:close(progress_dialog) end)
+                self:offerEngineFallback(item, result)
                 return
             end
             local result_failed = tonumber(result.failed) or 0

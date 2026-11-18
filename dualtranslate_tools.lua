@@ -14,7 +14,7 @@ local lfs = require("libs/libkoreader-lfs")
 local util = require("util")
 local logger = require("logger")
 
--- Archiver is required lazily: the MCP inbox commands (list-jobs / put /
+-- Archiver is required lazily: the MCP job commands (list-jobs / put /
 -- import / list-providers) never touch an EPUB, and on a desktop checkout
 -- libarchive may not be on the loader path.  Only the two extraction paths
 -- need it, and they report a readable error when it is unavailable.

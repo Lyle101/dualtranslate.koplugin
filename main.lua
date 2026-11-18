@@ -676,8 +676,7 @@ function dualtranslate:confirmClearCache()
                         end
                         local removed = self:clearBookTranslationData(book_path)
                         -- 10.2: job.json carries the book's source text, so
-                        -- "delete every translation" must take the job and
-                        -- its inbox copy too.
+                        -- "delete every translation" must take the job too.
                         pcall(function()
                             require("dualtranslate_mcp").cleanupBookJobs(book_path)
                         end)

@@ -87,6 +87,11 @@ end
 package.preload["ui/widget/notification"] = function()
     return { new = function(_, o) notifications[#notifications + 1] = o.text return o end }
 end
+-- TranslationUI.showPersistent: a completion message the user dismisses, so it
+-- lands in the same list the assertions read.
+package.preload["ui/widget/infomessage"] = function()
+    return { new = function(_, o) notifications[#notifications + 1] = o.text return o end }
+end
 package.preload["ui/widget/buttondialog"] = function()
     return { new = function(_, o) last_dialog = o return o end }
 end
@@ -184,15 +189,12 @@ end
 print("== 2. buildMcpMenu ==")
 do
     local items = dualtranslate:buildMcpMenu()
-    check("六个入口", #items == 6)
+    -- 3.2.1: the device-side inbox is gone (the agent always commits through
+    -- dtctl), so only export / task list / refresh are left.
+    check("三个入口", #items == 3)
     check("导出所选章节", items[1].text == "导出所选章节…")
     check("任务列表带计数", items[2].text_func() == "任务列表（0）")
-    check("导入结果", items[3].text == "导入结果")
-    check("允许部分导入开关", items[4].text == "允许导入未完成的任务"
-        and items[4].checked_func() == false)
-    check("自动切换开关", items[5].text == "导入后自动切换显示"
-        and items[5].checked_func() == false)
-    check("刷新外部译文", items[6].text == "刷新外部译文")
+    check("刷新外部译文", items[3].text == "刷新外部译文")
     local job_items = items[2].sub_item_table_func()
     check("空任务列表有占位行", #job_items == 1 and job_items[1].text == "没有任务")
     -- The menu builder runs twice per open; the second call must hit the cache.
@@ -250,18 +252,6 @@ do
 end
 
 -- ============================================================
-print("== 4. 空收件箱提示 ==")
-do
-    notifications = {}
-    dualtranslate:importMcpResults()
-    local found = false
-    for _, text in ipairs(notifications) do
-        if text:find("没有待导入", 1, true) then found = true end
-    end
-    check("提示没有待导入", found, table.concat(notifications, " | "))
-end
-
--- ============================================================
 print("== 5. exportMcpJob 分片驱动（3.2.0）==")
 do
     -- 真机路径：begin_segment_export 开一次会话，事件循环每轮走一片，
@@ -312,10 +302,11 @@ do
         dialogs[1] and tostring(dialogs[1].percent))
     local done
     for _, text in ipairs(notifications) do
-        if text:find("已导出 MCP 任务", 1, true) then done = text end
+        if text:find("导出完成", 1, true) then done = text end
     end
     check("导出完成提示", done ~= nil, table.concat(notifications, " | "))
     check("结果来自 collected（1 段）", done and done:find("1 段", 1, true) ~= nil, tostring(done))
+    check("完成提示等待轻触关闭", done and done:find("轻触屏幕", 1, true) ~= nil, tostring(done))
 
     dualtranslate.getBookOutline, dualtranslate.epub = real_outline, real_epub
     UIManager.scheduleIn, ProgressbarDialog.new = real_schedule, real_new

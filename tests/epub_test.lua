@@ -347,6 +347,27 @@ do
     check("取消标志生效", result3 and result3.cancelled == true)
     os.remove(cancel_flag)
 
+    -- 3.2.1: 引擎连续失败达到阈值就停，返回 engine_down（让阅读器提示换引擎），
+    -- 而不是把整本书跑成「0 段成功」或「N 段失败」。
+    local output_dir_down = "/tmp/dualtranslate_out_down"
+    os.execute("rm -rf " .. output_dir_down)
+    local attempts = 0
+    local down = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "all", fragment = "1",
+        source_lang = "auto", target_lang = "zh-Hans", provider = "google_free",
+        progress_path = "/tmp/dualtranslate_prog_down.txt", output_dir = output_dir_down,
+        engine_failure_threshold = 1,
+        translate = function()
+            attempts = attempts + 1
+            return nil, { message = "429 Too Many Requests" }
+        end,
+        translate_batch = function() return nil, "429 Too Many Requests" end,
+    })
+    check("引擎连续失败标记 engine_down", down ~= nil and down.engine_down == true,
+        tostring(down))
+    check("引擎失败只尝试一次", attempts == 1, tostring(attempts))
+    check("引擎失败仍带退出路径", down ~= nil and down.output ~= nil)
+
     -- 非 EPUB 报错
     local bad_res, bad_err = Epub2:translate_overlay({
         book_path = "/books/x.txt", mode = "all", fragment = "1",

@@ -285,7 +285,7 @@ function Overlay.clearIntent(dir)
     return not Overlay.exists(dir .. "/delete.pending.json")
 end
 
--- External writers (dtctl, the MCP inbox importer) leave a reload.signal so a
+-- External writers (dtctl, i.e. an MCP commit) leave a reload.signal so a
 -- running plugin knows the overlay changed.  The payload carries a monotonic
 -- seq (the manifest revision) instead of relying on mtime: FAT32 timestamps
 -- only have ~2 s granularity, so two imports in the same second would

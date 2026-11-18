@@ -98,7 +98,7 @@ local SUBCOMMANDS = {
 
 local ALLOWED_KEYS = {
     extract = { book = true, chapters = true, source = true, target = true, out = true },
-    put = { job = true, name = true, inbox = true },
+    put = { job = true, name = true },
     import = { job = true, result = true, ["allow-partial"] = true },
     ["list-jobs"] = {},
     ["list-providers"] = { book = true, target = true },
@@ -112,7 +112,7 @@ local ALLOWED_KEYS = {
 
 -- Flags take no value; every other --key needs one.
 local FLAGS = {
-    put = { inbox = true }, import = { ["allow-partial"] = true },
+    import = { ["allow-partial"] = true },
     ["get-segments"] = { context = true },
 }
 
@@ -561,16 +561,11 @@ function handlers.put(opts)
     local decoded, document = pcall(JSON.decode, raw)
     if not decoded or type(document) ~= "table" then return nil, "stdin is not valid JSON" end
 
-    local target
-    if opts.inbox then
-        target = Mcp.inboxDir() .. "/" .. job_id .. ".json"
-    else
-        local name = opts.name
-        if name ~= "state.json" and name ~= "result.partial.json" and name ~= "result.json" then
-            return nil, "--name must be state.json, result.partial.json or result.json"
-        end
-        target = dir .. "/" .. name
+    local name = opts.name
+    if name ~= "state.json" and name ~= "result.partial.json" and name ~= "result.json" then
+        return nil, "--name must be state.json, result.partial.json or result.json"
     end
+    local target = dir .. "/" .. name
     return with_job_lock(dir, function()
         if not write_atomic(target, raw) then return nil, "cannot write target file" end
         return { ok = true, path = target, bytes = #raw }
