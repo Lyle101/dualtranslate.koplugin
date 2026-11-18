@@ -195,6 +195,11 @@ do
     check("导出所选章节", items[1].text == "导出所选章节…")
     check("任务列表带计数", items[2].text_func() == "任务列表（0）")
     check("刷新外部译文", items[3].text == "刷新外部译文")
+    -- 3.2.2: actions keep the menu open, so a finished export returns to this
+    -- page instead of dropping the user back into the book.
+    check("导出保持菜单", items[1].keep_menu_open == true)
+    check("刷新保持菜单", items[3].keep_menu_open == true)
+    check("MCP 页可自刷新", items.refresh_func ~= nil and #items.refresh_func() == 3)
     local job_items = items[2].sub_item_table_func()
     check("空任务列表有占位行", #job_items == 1 and job_items[1].text == "没有任务")
     -- The menu builder runs twice per open; the second call must hit the cache.

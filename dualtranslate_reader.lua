@@ -401,7 +401,7 @@ end
 ------------------------------------------------------------------------
 
 -- privacy notice required before the book text leaves the device (10.10).
-function dualtranslate:confirmMcpExport(indexes)
+function dualtranslate:confirmMcpExport(indexes, menu)
     local scope = indexes and string.format(_("所选 %d 章"), #indexes) or _("整本书")
     local dialog
     dialog = ButtonDialog:new{
@@ -416,7 +416,7 @@ function dualtranslate:confirmMcpExport(indexes)
                 text = _("导出"),
                 callback = function()
                     UIManager:close(dialog)
-                    self:exportMcpJob(indexes)
+                    self:exportMcpJob(indexes, menu)
                 end,
             },
         }},
@@ -424,7 +424,7 @@ function dualtranslate:confirmMcpExport(indexes)
     UIManager:show(dialog)
 end
 
-function dualtranslate:exportMcpJob(indexes)
+function dualtranslate:exportMcpJob(indexes, menu)
     local book_path = self:currentBookPath()
     if not book_path then return end
     local outline = self:getBookOutline(book_path)
@@ -497,8 +497,16 @@ function dualtranslate:exportMcpJob(indexes)
         end)
     end
 
+    -- The menu stays open under the picker and the progress dialog; rebuild
+    -- it so a finished export shows up in the task count without the user
+    -- having to leave and re-enter the page.
+    local function refresh_menu()
+        if menu then self:refreshMenuPage(menu) end
+    end
+
     local function finish_with_error(message)
         UIManager:close(progress_dialog, "ui")
+        refresh_menu()
         TranslationUI.showPersistent(tostring(message) .. _("\n\n请轻触屏幕以关闭此消息"))
     end
 
@@ -541,6 +549,7 @@ function dualtranslate:exportMcpJob(indexes)
         if not ok_export then result, err = nil, tostring(result) end
         UIManager:close(progress_dialog, "ui")
         if not result then
+            refresh_menu()
             TranslationUI.showPersistent(
                 (_("导出失败\n\n%s\n\n请轻触屏幕以关闭此消息")):format(tostring(err)))
             return
@@ -548,6 +557,7 @@ function dualtranslate:exportMcpJob(indexes)
         -- The task list is cached for a second; a fresh export must not be
         -- hidden behind a menu the user opened just before it.
         self._mcp_job_menu_cache = nil
+        refresh_menu()
         -- A whole-book export takes a minute; a 6-second toast is easy to miss
         -- while the screen repaints, so this one waits for a tap.
         TranslationUI.showPersistent((_(
@@ -850,14 +860,18 @@ end
 -- identity rules are shared with normal translation.
 function dualtranslate:buildMcpMenu()
     local Mcp = require("dualtranslate_mcp")
-    return {
+    local items = {
         {
             text = _("导出所选章节…"),
             enabled_func = function() return self:isEpub() end,
-            callback = function()
+            -- Keep the menu under the picker and the progress dialog: the
+            -- export ends on a message box, and closing the menu would drop
+            -- the user back into the book after every export.
+            keep_menu_open = true,
+            callback = function(menu)
                 self:showChapterPicker({
                     start_text = _("导出任务（%d 章）"),
-                    on_start = function(indexes) self:confirmMcpExport(indexes) end,
+                    on_start = function(indexes) self:confirmMcpExport(indexes, menu) end,
                 })
             end,
         },
@@ -870,6 +884,7 @@ function dualtranslate:buildMcpMenu()
         {
             text = _("刷新外部译文"),
             enabled_func = function() return self:isEpub() end,
+            keep_menu_open = true,
             callback = function()
                 local signal = self:checkExternalReload(true)
                 TranslationUI.showInfo(signal and _("已刷新外部译文")
@@ -877,6 +892,11 @@ function dualtranslate:buildMcpMenu()
             end,
         },
     }
+    -- Back from the task list, and after an export, the count in the title has
+    -- to be rebuilt rather than left as it was when the page was opened.
+    items.needs_refresh = true
+    items.refresh_func = function() return self:buildMcpMenu() end
+    return items
 end
 
 -- The worker stops after a run of consecutive failures.  Microsoft Edge is

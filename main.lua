@@ -210,6 +210,9 @@ function dualtranslate:buildMenuTable()
                 {
                     text = "翻译整本",
                     enabled_func = book_enabled,
+                    -- Actions keep the menu open: the progress dialog closes
+                    -- back onto it, so the next command is one tap away.
+                    keep_menu_open = true,
                     callback = function()
                         -- 7.4: whole-book translation is unconditional and
                         -- never consults the 逐章模式 preference.
@@ -219,6 +222,7 @@ function dualtranslate:buildMenuTable()
                 {
                     text = "翻译当前章节",
                     enabled_func = book_enabled,
+                    keep_menu_open = true,
                     callback = function()
                         self:translateCurrentChapter(true)
                     end,
@@ -226,6 +230,7 @@ function dualtranslate:buildMenuTable()
                 {
                     text = "选择章节…",
                     enabled_func = book_enabled,
+                    keep_menu_open = true,
                     callback = function()
                         self:showChapterPicker()
                     end,
@@ -317,6 +322,7 @@ function dualtranslate:buildMenuTable()
             text_func = function()
                 return "译文字号：" .. self:getInlineFontSize()
             end,
+            keep_menu_open = true,
             callback = function() self:showInlineFontSpin() end,
         },
         {
