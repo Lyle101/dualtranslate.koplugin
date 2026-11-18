@@ -456,41 +456,69 @@ function dualtranslate:buildDisplayMenu()
     return items
 end
 
-function dualtranslate:buildManageMenu()
+function dualtranslate:buildDeleteProviderMenu()
     local path = self:currentBookPath()
     local target_lang = self:getTargetLang()
-    local delete_items = {}
+    local items = {}
+    -- Never name the loop variable "_": it shadows gettext, and _("段") in the
+    -- row closure below would then be an attempt to call a number.
     for idx, item in ipairs(path and Store.listProviders(path, target_lang) or {}) do
         local pid, name, count = item.id, item.display_name, item.count
-        delete_items[#delete_items + 1] = {
+        items[#items + 1] = {
             text_func = function()
                 return string.format("%s（%d %s）", name, count, _("段"))
             end,
-            callback = function()
-                self:confirmDeleteProvider(pid, name, count)
+            -- Deleting one service must not end the session: the menu stays
+            -- open and this page is rebuilt in place afterwards.
+            keep_menu_open = true,
+            callback = function(menu)
+                self:confirmDeleteProvider(pid, name, count, menu)
             end,
         }
     end
-    return {
+    if #items == 0 then
+        -- TouchMenu:updateItems() gives up on an empty table, which would
+        -- leave the row that was just deleted on screen.
+        items[1] = { text = _("没有可删除的译文"), enabled = false }
+    end
+    items.refresh_func = function() return self:buildDeleteProviderMenu() end
+    return items
+end
+
+function dualtranslate:buildManageMenu()
+    local items = {
         {
             text = _("删除某服务的译文…"),
-            enabled_func = function() return #delete_items > 0 end,
-            sub_item_table = delete_items,
+            enabled_func = function()
+                local path = self:currentBookPath()
+                return path ~= nil
+                    and #Store.listProviders(path, self:getTargetLang()) > 0
+            end,
+            sub_item_table_func = function()
+                return self:buildDeleteProviderMenu()
+            end,
         },
         {
             text = _("删除本书全部译文"),
             enabled_func = function() return self:isEpub() end,
-            callback = function() self:confirmClearCache() end,
+            keep_menu_open = true,
+            callback = function(menu) self:confirmClearCache(menu) end,
         },
         {
             text = _("修复本书译文数据"),
             enabled_func = function() return self:isEpub() end,
-            callback = function() self:repairBookTranslationData() end,
+            keep_menu_open = true,
+            callback = function(menu) self:repairBookTranslationData(menu) end,
         },
     }
+    -- Rebuilt when the user comes back from the delete page, so its rows and
+    -- the enabled state reflect what is left.
+    items.needs_refresh = true
+    items.refresh_func = function() return self:buildManageMenu() end
+    return items
 end
 
-function dualtranslate:confirmDeleteProvider(provider_id, display_name, count)
+function dualtranslate:confirmDeleteProvider(provider_id, display_name, count, menu)
     local book_path = self:currentBookPath()
     if not book_path then return end
     -- 6.2.1: DB rows are not segments.  Refresh the entries-based
@@ -530,6 +558,9 @@ function dualtranslate:confirmDeleteProvider(provider_id, display_name, count)
                     end
                     self._page_translation_overlay_state = nil
                     self:refreshDocumentStyles()
+                    -- The delete page is still open underneath the dialog:
+                    -- drop the deleted row instead of the whole menu.
+                    self:refreshMenuPage(menu)
                     TranslationUI.showInfo(string.format(_("已删除 %s 译文 %d 段"),
                         display_name, count or 0))
                 end,
@@ -539,7 +570,7 @@ function dualtranslate:confirmDeleteProvider(provider_id, display_name, count)
     UIManager:show(dialog)
 end
 
-function dualtranslate:repairBookTranslationData()
+function dualtranslate:repairBookTranslationData(menu)
     local book_path = self:currentBookPath()
     if not book_path then return end
     -- Full reconcile (14.3): orphan scan + revision catch-up, only on this
@@ -552,6 +583,9 @@ function dualtranslate:repairBookTranslationData()
     end
     self._page_translation_overlay_state = nil
     self:refreshDocumentStyles()
+    -- Repairs can remove providers, so the page (and its parent) is rebuilt
+    -- while the menu stays open.
+    self:refreshMenuPage(menu)
     local rebuilt = #(summary.rebuilt or {})
     local removed = #(summary.removed or {})
     if rebuilt > 0 or removed > 0 then
@@ -635,7 +669,7 @@ end
 ------------------------------------------------------------------------
 -- Clear cache
 ------------------------------------------------------------------------
-function dualtranslate:confirmClearCache()
+function dualtranslate:confirmClearCache(menu)
     local ButtonDialog = require("ui/widget/buttondialog")
     local dialog
     dialog = ButtonDialog:new{
@@ -693,6 +727,9 @@ function dualtranslate:confirmClearCache()
                             self.ui.document._dualtranslate_extra_css = nil
                         end
                         self:refreshDocumentStyles()
+                        -- Nothing is left to delete: rebuild the page so its
+                        -- rows and enabled state match, and keep it open.
+                        self:refreshMenuPage(menu)
                         TranslationUI.showInfo(removed > 0
                             and "已彻底删除本书译文"
                             or "已清除本书译文数据库记录")

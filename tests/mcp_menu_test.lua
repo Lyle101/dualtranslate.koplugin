@@ -225,15 +225,128 @@ do
     dualtranslate._mcp_job_menu_cache = nil
 
     local ok, items = pcall(function() return dualtranslate:buildMcpJobMenu() end)
-    check("有任务时列表可构建", ok and #items == 1, tostring(items))
-    check("列表项含段数", ok and items[1].text:find("段") ~= nil,
-        ok and items[1].text or "")
-    check("列表项带序号", ok and items[1].text:find("^1%. ") ~= nil,
-        ok and items[1].text or "")
+    check("有任务时列表可构建", ok and #items == 2, tostring(items))
+    check("首行是批量管理", ok and items[1].text_func() == "批量管理（1）")
+    check("任务行含段数", ok and items[2].text:find("段") ~= nil,
+        ok and items[2].text or "")
+    check("任务行带序号", ok and items[2].text:find("^1%. ") ~= nil,
+        ok and items[2].text or "")
+    -- 删除任务后菜单要留着：任务行的点击不能关菜单。
+    check("任务行保持菜单", ok and items[2].keep_menu_open == true)
+    check("列表可自刷新", ok and items.needs_refresh == true
+        and type(items.refresh_func) == "function")
     check("标题计数来自目录名", Mcp.countJobs() == 1)
 
-    os.execute('rm -rf "' .. job_dir .. '"')
-    check("删除后计数归零", Mcp.countJobs() == 0)
+    -- 2b-1: 打开详情 → 删除任务，列表原地刷新而不是消失。
+    local function fake_menu(item_table)
+        local menu = { item_table = item_table, updates = 0, backs = 0 }
+        function menu:updateItems(page) self.updates = self.updates + 1; self.page = page end
+        function menu:backToUpperMenu() self.backs = self.backs + 1 end
+        return menu
+    end
+
+    local menu = fake_menu(items)
+    items[2].callback(menu)
+    check("点任务弹出详情", last_dialog ~= nil
+        and tostring(last_dialog.title):find(job_id, 1, true) ~= nil,
+        last_dialog and tostring(last_dialog.title))
+    last_dialog.buttons[1][2].callback()
+    check("删除后任务目录消失", Mcp.countJobs() == 0)
+    check("删除后原地刷新菜单", menu.updates == 1 and menu.backs == 0)
+    check("删除后列表只剩占位行", #menu.item_table == 1
+        and menu.item_table[1].text == "没有任务", #menu.item_table)
+    -- 缓存要跟着重建（不能把已删任务留在同秒缓存里）。
+    check("删除后同秒缓存已重建", dualtranslate._mcp_job_menu_cache ~= nil
+        and dualtranslate._mcp_job_menu_cache.items[1].text == "没有任务")
+end
+
+-- ============================================================
+print("== 2c. 批量管理 ==")
+do
+    local function add_job(job_id)
+        local dir = Mcp.jobDir(job_id)
+        os.execute('mkdir -p "' .. dir .. '"')
+        local job = {
+            schema = "dualtranslate.job.v1", job_id = job_id, created_at = os.time(),
+            book = { device_path = BOOK, title = "T", source_lang = "en",
+                target_lang = "zh-Hans", spine_count = 1, file_size = 1234, file_mtime = 0 },
+            chapters = { { index = 1, title = "One" } },
+            segments = { { id = "s000001", parent_id = "s000001", part = 1,
+                parent_total = 1, chapter_index = 1, chapter_title = "One",
+                selector = "p[1]", xpointer = "/body/p[1]", source = "Hello" } },
+            options = { max_chars_per_segment = 4500 },
+        }
+        local file = assert(io.open(dir .. "/job.json", "wb"))
+        file:write(JSON.encode(job)); file:close()
+    end
+    local function fake_menu(item_table)
+        local menu = { item_table = item_table, updates = 0, backs = 0 }
+        function menu:updateItems(page) self.updates = self.updates + 1; self.page = page end
+        function menu:backToUpperMenu() self.backs = self.backs + 1 end
+        return menu
+    end
+
+    add_job("20261117_100000_0001")
+    add_job("20261117_090000_0002")
+    dualtranslate._mcp_job_menu_cache = nil
+    dualtranslate._mcp_batch_selected = nil
+    check("两个任务", Mcp.countJobs() == 2)
+
+    local batch = dualtranslate:buildMcpBatchMenu()
+    check("全选 + 2 任务 + 删除行", #batch == 4, #batch)
+    check("批量页标记", batch.batch == true)
+    local select_all, first, second, delete_row = batch[1], batch[2], batch[3], batch[4]
+    check("默认未选中", first.checked_func() == false
+        and delete_row.enabled_func() == false)
+    check("未选中时删除行文案", delete_row.text_func() == "删除所选任务…",
+        delete_row.text_func())
+
+    first.callback()
+    check("勾选一行", first.checked_func() == true and second.checked_func() == false)
+    check("删除行随选择更新", delete_row.enabled_func() == true
+        and delete_row.text_func() == "删除所选（1）…", delete_row.text_func())
+
+    select_all.callback()
+    check("全选勾上所有行", first.checked_func() and second.checked_func())
+    check("全选后按钮变取消", select_all.text_func() == "取消全选（2）",
+        select_all.text_func())
+    check("全选后计数", delete_row.text_func() == "删除所选（2）…",
+        delete_row.text_func())
+    select_all.callback()
+    check("取消全选清空", first.checked_func() == false and second.checked_func() == false)
+
+    -- 勾选只属于一次批量操作：从任务列表重新进入是干净的，
+    -- 只有「删完原地重建」那条路（keep_selection）保留勾选。
+    first.callback()
+    local reentry = dualtranslate:buildMcpBatchMenu()
+    check("重新进入清空勾选", reentry[2].checked_func() == false)
+    check("重新进入后删除行禁用", reentry[4].enabled_func() == false)
+    reentry[2].callback()
+    local kept = dualtranslate:buildMcpBatchMenu(true)
+    check("原地重建保留勾选", kept[2].checked_func() == true)
+
+    -- 批量删除：确认后目录消失，页面原地刷新（不关菜单）。
+    dualtranslate._mcp_batch_selected = {}
+    local batch2 = dualtranslate:buildMcpBatchMenu(true)
+    batch2[2].callback()
+    local menu = fake_menu(batch2)
+    batch2[4].callback(menu)
+    check("批量删除弹确认", last_dialog and tostring(last_dialog.title):find("1", 1, true) ~= nil,
+        last_dialog and tostring(last_dialog.title))
+    last_dialog.buttons[1][2].callback()
+    check("批量删除后剩一个任务", Mcp.countJobs() == 1, Mcp.countJobs())
+    check("批量删除后原地刷新", menu.updates == 1 and menu.backs == 0)
+    check("刷新后页面不含已删任务", #menu.item_table == 3, #menu.item_table)
+    check("刷新后选择清空", menu.item_table[1].checked_func() == false)
+
+    -- 删掉最后一个：批量页没有可选项，退回到（已刷新的）任务列表。
+    local last_batch = menu.item_table
+    last_batch[2].callback()
+    local menu2 = fake_menu(last_batch)
+    last_batch[3].callback(menu2)
+    last_dialog.buttons[1][2].callback()
+    check("全部删除后计数归零", Mcp.countJobs() == 0)
+    check("批量页空了就退回任务列表", menu2.backs == 1 and menu2.updates == 0)
 end
 
 -- ============================================================

@@ -492,11 +492,15 @@ do
         if item.text == "修复本书译文数据" then repair_row = item end
     end
     check("manage has delete/clear/repair", delete_sub ~= nil and clear_row ~= nil and repair_row ~= nil)
-    check("delete lists providers", #delete_sub.sub_item_table == 2)
+    -- 删除页改为 sub_item_table_func：每次展开重建，删除后菜单留在原页刷新
+    local delete_page = delete_sub.sub_item_table_func()
+    check("delete lists providers", #delete_page == 2, tostring(#delete_page))
+    check("delete rows keep menu open", delete_page[1].keep_menu_open == true
+        and delete_page[2].keep_menu_open == true)
     -- guard: active job blocks delete
     p._translation_queue = { { book_path = BOOK, status = "active", provider = "system" } }
     notifications = {}
-    delete_sub.sub_item_table[1].callback()
+    delete_page[1].callback()
     check("delete opens confirm dialog", last_dialog ~= nil)
     last_dialog.buttons[1][2].callback()
     local blocked = false
@@ -506,7 +510,7 @@ do
     -- no job -> delete succeeds
     p._translation_queue = {}
     notifications = {}
-    delete_sub.sub_item_table[1].callback()
+    delete_page[1].callback()
     last_dialog.buttons[1][2].callback()
     check("delete removes entries", Overlay.loadEntries(Store.bookDir(BOOK, lang), "system") == nil)
     local deleted_notice

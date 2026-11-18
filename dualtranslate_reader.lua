@@ -576,7 +576,53 @@ function dualtranslate:checkExternalReload(force)
     return signal
 end
 
-function dualtranslate:showMcpJob(item)
+------------------------------------------------------------------------
+-- MCP task pages (10.x)
+--
+-- The task list is where the user works, so it must survive a delete.  Rows
+-- therefore set keep_menu_open and hand the menu to the callback; the callback
+-- ends with refreshMcpJobMenu(), which rebuilds the page in place.  Closing
+-- the menu instead would drop the user back into the book and force a reopen
+-- from the top after every single task.
+------------------------------------------------------------------------
+
+local function job_row_text(position, job)
+    return string.format("%d. %s · %s · %d %s", position, job.job_id,
+        tostring(job.status), job.total or 0, _("段"))
+end
+
+-- Rebuild whatever page the menu is currently showing.  Each builder attaches
+-- refresh_func to its own item table, because only it knows how to rebuild
+-- that level (task list vs. batch list).  The page number is kept so a delete
+-- on page 3 does not throw the user back to the top of the list.
+function dualtranslate:refreshMenuPage(menu)
+    if not (menu and menu.updateItems) then return end
+    local page = menu.item_table
+    if page and page.refresh_func then
+        local rebuilt = page.refresh_func()
+        if rebuilt then menu.item_table = rebuilt end
+    else
+        -- A page built without refresh_func is left exactly as it is: the
+        -- delete looks like it did nothing.  Cheap to spot in the log.
+        logger.warn("dualtranslate: menu page has no refresh_func; not rebuilding")
+    end
+    menu:updateItems(menu.page or 1)
+end
+
+function dualtranslate:refreshMcpJobMenu(menu)
+    self._mcp_job_menu_cache = nil
+    if not (menu and menu.updateItems) then return end
+    -- An emptied batch page would leave nothing to tick: step back to the task
+    -- list, which rebuilds itself through its own refresh_func.
+    if menu.item_table and menu.item_table.batch
+        and require("dualtranslate_mcp").countJobs() == 0 then
+        menu:backToUpperMenu()
+        return
+    end
+    self:refreshMenuPage(menu)
+end
+
+function dualtranslate:showMcpJob(item, menu)
     local Mcp = require("dualtranslate_mcp")
     local dialog
     dialog = ButtonDialog:new{
@@ -593,9 +639,16 @@ function dualtranslate:showMcpJob(item)
                 text = _("删除任务"),
                 callback = function()
                     UIManager:close(dialog)
-                    Tools.rmtree(Mcp.jobDir(item.job_id))
-                    self._mcp_job_menu_cache = nil
-                    TranslationUI.showInfo(_("已删除任务"))
+                    local removed = Mcp.validJobId(item.job_id)
+                        and Tools.rmtree(Mcp.jobDir(item.job_id))
+                    if self._mcp_batch_selected then
+                        self._mcp_batch_selected[item.job_id] = nil
+                    end
+                    -- The list underneath is still open: refresh its rows
+                    -- instead of leaving the deleted task on screen.
+                    self:refreshMcpJobMenu(menu)
+                    TranslationUI.showInfo(removed and _("已删除任务")
+                        or _("删除任务失败"))
                 end,
             },
         }},
@@ -603,32 +656,194 @@ function dualtranslate:showMcpJob(item)
     UIManager:show(dialog)
 end
 
-function dualtranslate:buildMcpJobMenu()
+function dualtranslate:buildMcpJobMenu(force)
     local Mcp = require("dualtranslate_mcp")
     -- listJobs() parses every job.json; a 646-chapter book is several MB, and
     -- the menu builder runs twice per open (text_func + sub_item_table_func).
     -- Reuse the result within the same second.
     local now = os.time()
     local cached = self._mcp_job_menu_cache
-    if cached and cached.at == now then return cached.items end
+    if not force and cached and cached.at == now then return cached.items end
     local jobs = Mcp.listJobs()
     local items = {}
     if #jobs == 0 then
-        items = { { text = _("没有任务"), enabled = false } }
+        items[1] = { text = _("没有任务"), enabled = false }
     else
+        -- Batch entry first, so it stays reachable when the list runs over
+        -- more than one screen.
+        items[1] = {
+            text_func = function()
+                return string.format(_("批量管理（%d）"), #jobs)
+            end,
+            sub_item_table_func = function() return self:buildMcpBatchMenu() end,
+        }
         -- Never name the loop variable "_": it shadows gettext, and _("段")
         -- inside the body would then be an attempt to call a number.
         for position, job in ipairs(jobs) do
             local entry = job
             items[#items + 1] = {
-                text = string.format("%d. %s · %s · %d %s", position,
-                    entry.job_id, tostring(entry.status), entry.total or 0, _("段")),
-                callback = function() self:showMcpJob(entry) end,
+                text = job_row_text(position, entry),
+                -- A tap opens the detail dialog over the list; the list is
+                -- what the user comes back to after closing or deleting.
+                keep_menu_open = true,
+                callback = function(menu) self:showMcpJob(entry, menu) end,
             }
         end
     end
+    -- Parent level of the batch page: rebuilt when the user goes back, so a
+    -- deleted task cannot come back from the cached table.
+    items.needs_refresh = true
+    items.refresh_func = function() return self:buildMcpJobMenu(true) end
     self._mcp_job_menu_cache = { at = now, items = items }
     return items
+end
+
+-- Batch mode: the same task list as checkboxes.  Rows carry checked_func, and
+-- TouchMenu re-renders such rows in place instead of closing the menu, which
+-- is what makes ticking several tasks (and then deleting them) one trip.
+--
+-- keep_selection is only set by the rebuild-after-delete path: entering the
+-- page from the task list starts a fresh run, so yesterday's ticks cannot ride
+-- along into a delete the user is not expecting.
+function dualtranslate:buildMcpBatchMenu(keep_selection)
+    local Mcp = require("dualtranslate_mcp")
+    local jobs = Mcp.listJobs()
+    if not (keep_selection and self._mcp_batch_selected) then
+        self._mcp_batch_selected = {}
+    end
+    -- The selection table is captured by every row below, so it is mutated in
+    -- place and never replaced: select-all must not orphan the other closures.
+    local selected = self._mcp_batch_selected
+
+    -- Selections follow the jobs that still exist: one deleted from the detail
+    -- dialog (or by dtctl) must not linger in the delete set.
+    local live = {}
+    for _, job in ipairs(jobs) do live[job.job_id] = true end
+    for job_id in pairs(selected) do
+        if not live[job_id] then selected[job_id] = nil end
+    end
+
+    -- Counted from the live list on every render, not from a build-time
+    -- snapshot: TouchMenu re-renders text_func after each toggle.
+    local function selected_count()
+        local count = 0
+        for _, job in ipairs(jobs) do
+            if selected[job.job_id] then count = count + 1 end
+        end
+        return count
+    end
+
+    local items = {}
+    if #jobs == 0 then
+        items[1] = { text = _("没有任务"), enabled = false }
+    else
+        items[1] = {
+            text_func = function()
+                if selected_count() == #jobs then
+                    return string.format(_("取消全选（%d）"), #jobs)
+                end
+                return string.format(_("全选（%d）"), #jobs)
+            end,
+            checked_func = function() return selected_count() == #jobs end,
+            callback = function()
+                if selected_count() == #jobs then
+                    for job_id in pairs(selected) do selected[job_id] = nil end
+                else
+                    for _, job in ipairs(jobs) do selected[job.job_id] = true end
+                end
+            end,
+        }
+        for position, job in ipairs(jobs) do
+            local entry = job
+            items[#items + 1] = {
+                text = job_row_text(position, entry),
+                checked_func = function() return selected[entry.job_id] == true end,
+                callback = function()
+                    selected[entry.job_id] = not selected[entry.job_id] or nil
+                end,
+            }
+        end
+        items[#items + 1] = {
+            text_func = function()
+                local count = selected_count()
+                if count == 0 then return _("删除所选任务…") end
+                return string.format(_("删除所选（%d）…"), count)
+            end,
+            enabled_func = function() return selected_count() > 0 end,
+            keep_menu_open = true,
+            callback = function(menu) self:confirmDeleteMcpJobs(menu) end,
+        }
+    end
+    items.batch = true
+    items.needs_refresh = true
+    -- Rebuild in place after a delete: keep what is still ticked.
+    items.refresh_func = function() return self:buildMcpBatchMenu(true) end
+    return items
+end
+
+-- Current selection, restricted to jobs that still exist and in list order.
+function dualtranslate:selectedMcpJobIds()
+    local Mcp = require("dualtranslate_mcp")
+    local selected = self._mcp_batch_selected or {}
+    local ids = {}
+    for _, job in ipairs(Mcp.listJobs()) do
+        if selected[job.job_id] then ids[#ids + 1] = job.job_id end
+    end
+    return ids
+end
+
+function dualtranslate:confirmDeleteMcpJobs(menu)
+    local Mcp = require("dualtranslate_mcp")
+    local ids = self:selectedMcpJobIds()
+    if #ids == 0 then
+        TranslationUI.showInfo(_("没有选中的任务"))
+        return
+    end
+    local dialog
+    dialog = ButtonDialog:new{
+        title = string.format(
+            _("删除所选的 %d 个任务？\n任务文件（含原文段落）会从设备删除，"
+                .. "已导入书中的译文不受影响。"), #ids),
+        buttons = {{
+            {
+                text = _("取消"),
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("删除"),
+                callback = function()
+                    UIManager:close(dialog)
+                    -- Removing a few dozen job dirs is one synchronous lfs
+                    -- walk.  Paint the reason first, or a slow eMMC looks like
+                    -- a dead tap.  Under ~8 tasks the pause is not felt.
+                    local notice
+                    if #ids > 8 then
+                        notice = Notification:new{
+                            text = string.format(_("正在删除 %d 个任务…"), #ids),
+                            timeout = 2,
+                        }
+                        UIManager:show(notice)
+                        UIManager:forceRePaint()
+                    end
+                    local removed = 0
+                    for _, job_id in ipairs(ids) do
+                        if Mcp.validJobId(job_id)
+                            and Tools.rmtree(Mcp.jobDir(job_id)) then
+                            if self._mcp_batch_selected then
+                                self._mcp_batch_selected[job_id] = nil
+                            end
+                            removed = removed + 1
+                        end
+                    end
+                    if notice then UIManager:close(notice) end
+                    self:refreshMcpJobMenu(menu)
+                    TranslationUI.showInfo(string.format(
+                        _("已删除 %d 个任务"), removed))
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
 end
 
 -- 12.1: the MCP submenu.  Export reuses the chapter picker so the chapter
