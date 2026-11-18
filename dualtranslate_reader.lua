@@ -596,9 +596,134 @@ end
 -- from the top after every single task.
 ------------------------------------------------------------------------
 
+local MCP_FILTER_KEY = "mcp_only_current_book"
+
+-- state.json is written by dtctl on the PC, so its status words are protocol
+-- identifiers.  The list shows what they mean instead.
+local JOB_STATUS_LABELS = {
+    exported = _("已导出"),
+    confirmed = _("已确认模型"),
+    submitting = _("翻译中"),
+    committed = _("已导入书中"),
+}
+
+local function job_status_text(status)
+    return JOB_STATUS_LABELS[tostring(status)] or tostring(status)
+end
+
+-- Rows are single-line, and a row is how the user picks a book out of the
+-- inbox: the title comes first, the export time last (it separates two exports
+-- of the same book).  The row truncates at its end, which is exactly where the
+-- state and the time sit, so the title is cut first.  The budget is in display
+-- columns, not bytes: 30 bytes is ten CJK characters but thirty Latin ones, and
+-- a 30-character English title would push the time off a 600 px screen.
+local JOB_TITLE_COLUMNS = 22
+
+-- Cut at a UTF-8 boundary; ASCII counts one column, a multi-byte character
+-- (CJK, fullwidth punctuation, emoji) two.
+local function title_head(title, columns)
+    local used, index, length = 0, 1, #title
+    while index <= length do
+        local byte = title:byte(index)
+        local width = byte < 0x80 and 1 or 2
+        if used + width > columns then break end
+        used = used + width
+        if byte < 0x80 then
+            index = index + 1
+        elseif byte < 0xE0 then
+            index = index + 2
+        elseif byte < 0xF0 then
+            index = index + 3
+        else
+            index = index + 4
+        end
+    end
+    if index > length then return title end
+    return title:sub(1, index - 1) .. "…"
+end
+
 local function job_row_text(position, job)
-    return string.format("%d. %s · %s · %d %s", position, job.job_id,
-        tostring(job.status), job.total or 0, _("段"))
+    local title = tostring(job.title or job.job_id)
+    -- Same-year stamps drop the year; an old job keeps it, or two tasks from
+    -- different years would read alike.
+    local created = tonumber(job.created_at) or 0
+    local stamp = "-"
+    if created > 0 then
+        local same_year = os.date("%Y", created) == os.date("%Y")
+        stamp = os.date(same_year and "%m-%d %H:%M" or "%Y-%m-%d", created)
+    end
+    return string.format("%d. %s · %s · %s", position,
+        title_head(title, JOB_TITLE_COLUMNS), job_status_text(job.status), stamp)
+end
+
+local function job_time_text(seconds)
+    local value = tonumber(seconds) or 0
+    -- No timestamp (a job directory whose state.json was lost): leave the
+    -- line out rather than print a dash the user cannot act on.
+    if value <= 0 then return nil end
+    return os.date("%Y-%m-%d %H:%M", value)
+end
+
+-- Body of the detail dialog.  Deliberately plain text: TextViewer paginates
+-- and scrolls it, so a 63-chapter book is readable on a Voyage where a
+-- ButtonDialog title would have run off the screen.
+local function format_job_detail(job)
+    local lines = { string.format(_("任务 %s"), job.job_id), "" }
+    local function field(label, value)
+        if value and value ~= "" then
+            -- tostring: a hand-edited meta.json can hold a table where a
+            -- string belongs, and string.format("%s", table) would throw
+            -- inside the dialog callback.
+            lines[#lines + 1] = string.format("%s：%s", label, tostring(value))
+        end
+    end
+    field(_("书名"), job.title or "-")
+    field(_("作者"), job.author)
+    field(_("路径"), job.book_path)
+    if job.source_lang or job.target_lang then
+        field(_("语言"), string.format("%s → %s", tostring(job.source_lang or "?"),
+            tostring(job.target_lang or "?")))
+    end
+    field(_("创建"), job_time_text(job.created_at))
+    field(_("更新"), job_time_text(job.updated_at))
+    field(_("状态"), job_status_text(job.status))
+    local total = tonumber(job.total) or 0
+    local submitted = tonumber(job.submitted) or 0
+    if total > 0 then
+        -- submitted and total come from different files (state.json vs
+        -- meta.json); a stale meta must not print 108%.
+        local percent = math.min(100, math.floor(submitted * 100 / total))
+        field(_("已回传"), string.format(_("%d / %d 段（%d%%）"), submitted,
+            total, percent))
+    end
+    field(_("引擎"), job.model_name or job.provider_id)
+
+    local chapters = job.chapters or {}
+    lines[#lines + 1] = ""
+    if #chapters == 0 then
+        if (tonumber(job.chapter_count) or 0) > 0 then
+            lines[#lines + 1] = string.format(
+                _("章节：%d 章（任务文件里没有章节标题）"), job.chapter_count)
+        else
+            lines[#lines + 1] = _("章节：任务文件里没有章节记录")
+        end
+    else
+        lines[#lines + 1] = string.format(_("章节（%d）："), #chapters)
+        -- 300 lines is already many screens; past that the exact tail of a
+        -- 646-chapter job is not what the dialog is for.
+        local shown = math.min(#chapters, 300)
+        for position = 1, shown do
+            local chapter = chapters[position]
+            lines[#lines + 1] = string.format("%d. %s",
+                chapter.index or position,
+                chapter.title or string.format(_("第 %d 章"), position))
+        end
+        if shown < #chapters then
+            lines[#lines + 1] = string.format(_("…另有 %d 章未列出"),
+                #chapters - shown)
+        end
+    end
+    return table.concat(lines, "\n")
 end
 
 -- Rebuild whatever page the menu is currently showing.  Each builder attaches
@@ -623,26 +748,68 @@ function dualtranslate:refreshMcpJobMenu(menu)
     self._mcp_job_menu_cache = nil
     if not (menu and menu.updateItems) then return end
     -- An emptied batch page would leave nothing to tick: step back to the task
-    -- list, which rebuilds itself through its own refresh_func.
-    if menu.item_table and menu.item_table.batch
-        and require("dualtranslate_mcp").countJobs() == 0 then
-        menu:backToUpperMenu()
-        return
+    -- list, which rebuilds itself through its own refresh_func.  "Emptied"
+    -- means emptied as shown: with the per-book filter on, another book's
+    -- tasks may still exist without appearing on this page.
+    if menu.item_table and menu.item_table.batch then
+        local visible = self:mcpVisibleJobs()
+        if #visible == 0 then
+            menu:backToUpperMenu()
+            return
+        end
     end
     self:refreshMenuPage(menu)
 end
 
+------------------------------------------------------------------------
+-- Per-book filter
+--
+-- A few books in flight at once is normal, and their rows look alike.  The
+-- switch is a setting, not session state: reopening the list must not silently
+-- change what it shows.
+------------------------------------------------------------------------
+
+function dualtranslate:mcpFiltersToCurrentBook()
+    return self:getSetting(MCP_FILTER_KEY, false) == true
+end
+
+function dualtranslate:setMcpFilterCurrentBook(value)
+    self:saveSetting(MCP_FILTER_KEY, value and true or false)
+    -- The list is cached for the current second; a toggle must not read the
+    -- rows that were built under the old filter.
+    self._mcp_job_menu_cache = nil
+end
+
+-- Jobs in display order, narrowed to the open book when the filter is on.
+-- The second value is the unfiltered total, so the page can say how many rows
+-- the filter hides.
+function dualtranslate:mcpVisibleJobs()
+    local Mcp = require("dualtranslate_mcp")
+    local jobs = Mcp.listJobs()
+    if not self:mcpFiltersToCurrentBook() then return jobs, #jobs end
+    local book_path = self:currentBookPath()
+    if not book_path then return {}, #jobs end
+    local visible = {}
+    for _, job in ipairs(jobs) do
+        if job.book_path == book_path then visible[#visible + 1] = job end
+    end
+    return visible, #jobs
+end
+
 function dualtranslate:showMcpJob(item, menu)
     local Mcp = require("dualtranslate_mcp")
+    -- Read the job again on open: the agent may have submitted or committed
+    -- since the row was built.
+    local job = Mcp.jobDetail(item.job_id, item) or item
+    local TextViewer = require("ui/widget/textviewer")
     local dialog
-    dialog = ButtonDialog:new{
-        title = string.format("%s\n%s：%s\n%s：%d  %s：%d\n%s：%s",
-            item.job_id, _("状态"), tostring(item.status),
-            _("章节"), item.chapter_count or 0, _("段落"), item.total or 0,
-            _("模型"), tostring(item.model_name or "-")),
-        buttons = {{
+    local buttons = {
+        {
             {
                 text = _("关闭"),
+                -- TextViewer repaints its own frame on close
+                -- (onCloseWidget), so no refresh type is needed here; on e-ink
+                -- a forced full refresh would only add a flash.
                 callback = function() UIManager:close(dialog) end,
             },
             {
@@ -661,50 +828,87 @@ function dualtranslate:showMcpJob(item, menu)
                         or _("删除任务失败"))
                 end,
             },
-        }},
+        },
+    }
+    dialog = TextViewer:new{
+        title = _("任务详情"),
+        text = format_job_detail(job),
+        -- Our own close/delete row replaces the default Close/Find buttons;
+        -- the find bar is meaningless for a 40-line summary.
+        buttons_table = buttons,
+        show_menu = false,
     }
     UIManager:show(dialog)
 end
 
 function dualtranslate:buildMcpJobMenu(force)
-    local Mcp = require("dualtranslate_mcp")
-    -- listJobs() parses every job.json; a 646-chapter book is several MB, and
-    -- the menu builder runs twice per open (text_func + sub_item_table_func).
-    -- Reuse the result within the same second.
+    -- listJobs() reads meta.json per job; the menu builder runs twice per open
+    -- (text_func + sub_item_table_func).  Reuse the result within the same
+    -- second, and key the cache by what the filter would change.
     local now = os.time()
+    local cache_key = string.format("%s|%s", tostring(self:mcpFiltersToCurrentBook()),
+        tostring(self:currentBookPath()))
     local cached = self._mcp_job_menu_cache
-    if not force and cached and cached.at == now then return cached.items end
-    local jobs = Mcp.listJobs()
+    if not force and cached and cached.at == now and cached.key == cache_key then
+        return cached.items
+    end
+    local jobs, total = self:mcpVisibleJobs()
     local items = {}
-    if #jobs == 0 then
+    if total == 0 then
         items[1] = { text = _("没有任务"), enabled = false }
     else
-        -- Batch entry first, so it stays reachable when the list runs over
-        -- more than one screen.
-        items[1] = {
+        -- The switch sits above the rows it decides, and stays reachable when
+        -- the filter hides every one of them.
+        items[#items + 1] = {
             text_func = function()
-                return string.format(_("批量管理（%d）"), #jobs)
+                return string.format(_("只显示本书任务（%d/%d）"), #jobs, total)
             end,
-            sub_item_table_func = function() return self:buildMcpBatchMenu() end,
+            checked_func = function() return self:mcpFiltersToCurrentBook() end,
+            -- The callback rebuilds the page and repaints it itself; this only
+            -- saves TouchMenu a second full re-render of the same rows.
+            check_callback_updates_menu = true,
+            callback = function(menu)
+                self:setMcpFilterCurrentBook(not self:mcpFiltersToCurrentBook())
+                if menu and menu.updateItems then
+                    menu.item_table = self:buildMcpJobMenu(true)
+                    menu:updateItems(1)
+                end
+            end,
         }
-        -- Never name the loop variable "_": it shadows gettext, and _("段")
-        -- inside the body would then be an attempt to call a number.
-        for position, job in ipairs(jobs) do
-            local entry = job
+        if #jobs == 0 then
             items[#items + 1] = {
-                text = job_row_text(position, entry),
-                -- A tap opens the detail dialog over the list; the list is
-                -- what the user comes back to after closing or deleting.
-                keep_menu_open = true,
-                callback = function(menu) self:showMcpJob(entry, menu) end,
+                text = string.format(_("本书没有任务（其他书 %d 个）"), total),
+                enabled = false,
             }
+        else
+            -- Batch entry first, so it stays reachable when the list runs over
+            -- more than one screen.  It manages exactly what this page lists:
+            -- with the filter on, another book's tasks are not selected by
+            -- "select all".
+            items[#items + 1] = {
+                text_func = function()
+                    return string.format(_("批量管理（%d）"), #jobs)
+                end,
+                sub_item_table_func = function() return self:buildMcpBatchMenu() end,
+            }
+            -- Never name the loop variable "_": it shadows gettext.
+            for position, job in ipairs(jobs) do
+                local entry = job
+                items[#items + 1] = {
+                    text = job_row_text(position, entry),
+                    -- A tap opens the detail dialog over the list; the list is
+                    -- what the user comes back to after closing or deleting.
+                    keep_menu_open = true,
+                    callback = function(menu) self:showMcpJob(entry, menu) end,
+                }
+            end
         end
     end
     -- Parent level of the batch page: rebuilt when the user goes back, so a
     -- deleted task cannot come back from the cached table.
     items.needs_refresh = true
     items.refresh_func = function() return self:buildMcpJobMenu(true) end
-    self._mcp_job_menu_cache = { at = now, items = items }
+    self._mcp_job_menu_cache = { at = now, items = items, key = cache_key }
     return items
 end
 
@@ -716,8 +920,9 @@ end
 -- page from the task list starts a fresh run, so yesterday's ticks cannot ride
 -- along into a delete the user is not expecting.
 function dualtranslate:buildMcpBatchMenu(keep_selection)
-    local Mcp = require("dualtranslate_mcp")
-    local jobs = Mcp.listJobs()
+    -- Same rows as the task list, so "select all" can never reach a book the
+    -- user has filtered away.
+    local jobs = self:mcpVisibleJobs()
     if not (keep_selection and self._mcp_batch_selected) then
         self._mcp_batch_selected = {}
     end
@@ -791,12 +996,13 @@ function dualtranslate:buildMcpBatchMenu(keep_selection)
     return items
 end
 
--- Current selection, restricted to jobs that still exist and in list order.
+-- Current selection, restricted to jobs that still exist on the page the user
+-- is looking at, in list order.
 function dualtranslate:selectedMcpJobIds()
-    local Mcp = require("dualtranslate_mcp")
     local selected = self._mcp_batch_selected or {}
     local ids = {}
-    for _, job in ipairs(Mcp.listJobs()) do
+    local jobs = self:mcpVisibleJobs()
+    for _, job in ipairs(jobs) do
         if selected[job.job_id] then ids[#ids + 1] = job.job_id end
     end
     return ids

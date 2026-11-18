@@ -20,6 +20,11 @@ Mcp.JOB_SCHEMA = "dualtranslate.job.v1"
 Mcp.RESULT_SCHEMA = "dualtranslate.result.v1"
 Mcp.STATE_SCHEMA = "dualtranslate.state.v1"
 
+-- The segments array starts with this marker on its own line, so the job head
+-- (book + chapters + options) can be read and decoded without touching the
+-- megabytes that follow it.
+local SEGMENTS_MARKER = '"segments":[\n'
+
 local DEFAULT_STYLE_GUIDE = "保留段落结构，不添加解释，不合并段落。"
 
 function Mcp.rootDir()
@@ -124,30 +129,59 @@ function Mcp.saveState(job_id, state)
     return Mcp.writeJson(dir .. "/state.json", state)
 end
 
--- Newest first.  Damaged job directories are skipped instead of aborting the
--- whole listing: one interrupted export must not hide every other job.
+-- Newest first.  A directory with neither a usable meta.json nor a decodable
+-- job.json is skipped instead of aborting the whole listing: one interrupted
+-- export must not hide every other job.
+--
+-- Rows come from meta.json: it carries the book fields and the totals, and
+-- decoding it costs milliseconds where the full job.json costs seconds on a
+-- 646-chapter book.  Directories without a usable meta.json (jobs exported
+-- before the index layout) still take the whole-file path.
 function Mcp.listJobs()
     local jobs = {}
     local ok, iterator, state = pcall(lfs.dir, Mcp.jobsDir())
     if not ok or not iterator then return jobs end
     for name in iterator, state do
         if Mcp.validJobId(name) then
-            local job = Mcp.loadJob(name)
-            if job then
-                local job_state = Mcp.loadState(name) or {}
-                jobs[#jobs + 1] = {
+            local meta = Mcp.loadMeta(name)
+            local row
+            local total = meta and tonumber(meta.total)
+            -- A meta.json whose job.json is gone (half-deleted directory,
+            -- interrupted tooling) must not produce a row that every later
+            -- command fails on.  One stat, no read; a 0-byte file counts as
+            -- missing.
+            local job_size = lfs.attributes(Mcp.jobPath(name), "size")
+            if meta and total and job_size and job_size > 0 then
+                local book = meta.book or {}
+                row = {
                     job_id = name,
-                    created_at = tonumber(job.created_at) or 0,
-                    book_path = job.book and job.book.device_path,
-                    title = job.book and job.book.title,
-                    chapter_count = #(job.chapters or {}),
-                    total = #job.segments,
-                    status = job_state.status or "exported",
-                    provider_id = job_state.provider_id,
-                    model_name = job_state.model_name,
-                    submitted = tonumber(job_state.submitted) or 0,
-                    updated_at = tonumber(job_state.updated_at) or 0,
+                    created_at = tonumber(meta.created_at) or 0,
+                    book_path = book.device_path,
+                    title = book.title,
+                    chapter_count = tonumber(meta.chapter_count) or 0,
+                    total = total,
                 }
+            else
+                local job = Mcp.loadJob(name)
+                if job then
+                    row = {
+                        job_id = name,
+                        created_at = tonumber(job.created_at) or 0,
+                        book_path = job.book and job.book.device_path,
+                        title = job.book and job.book.title,
+                        chapter_count = #(job.chapters or {}),
+                        total = #job.segments,
+                    }
+                end
+            end
+            if row then
+                local job_state = Mcp.loadState(name) or {}
+                row.status = job_state.status or "exported"
+                row.provider_id = job_state.provider_id
+                row.model_name = job_state.model_name
+                row.submitted = tonumber(job_state.submitted) or 0
+                row.updated_at = tonumber(job_state.updated_at) or 0
+                jobs[#jobs + 1] = row
             end
         end
     end
@@ -192,8 +226,6 @@ end
 -- ---------------------------------------------------------------------------
 Mcp.META_SCHEMA = "dualtranslate.job.meta.v1"
 
-local SEGMENTS_MARKER = '"segments":[\n'
-
 function Mcp.slurp(path)
     local file = io.open(path, "rb")
     if not file then return nil end
@@ -207,6 +239,54 @@ local function segments_start(blob)
     local pos = blob:find(SEGMENTS_MARKER, 1, true)
     if not pos then return nil end
     return pos + #SEGMENTS_MARKER
+end
+
+-- Book and chapter titles only: everything above the segments array.  The
+-- task detail dialog needs the chapter list, and a full job.json decode for
+-- that costs ~10 s on a 646-chapter book.  One 64 KB read covers several
+-- thousand chapter titles; the loop stops at the marker, never at the file
+-- end, and gives up past JOB_HEAD_LIMIT.
+Mcp.JOB_HEAD_LIMIT = 1024 * 1024
+
+function Mcp.loadJobShell(job_id)
+    if not Mcp.validJobId(job_id) then return nil end
+    local path = Mcp.jobPath(job_id)
+    local file = path and io.open(path, "rb")
+    if file then
+        local head, marker
+        while true do
+            local chunk = file:read(65536)
+            if not chunk then break end
+            head = head and (head .. chunk) or chunk
+            marker = head:find(SEGMENTS_MARKER, 1, true)
+            if marker or #head >= Mcp.JOB_HEAD_LIMIT then break end
+        end
+        file:close()
+        if marker then
+            -- The head ends with a comma because the segments field follows
+            -- it; close the object there instead of decoding the rest.
+            local shell = head:sub(1, marker - 1):gsub("%s+$", "")
+            if shell:sub(-1) == "," then
+                shell = shell:sub(1, -2) .. "}"
+            else
+                shell = shell .. "}"
+            end
+            local ok, decoded = pcall(JSON.decode, shell)
+            if ok and type(decoded) == "table" then return decoded end
+        end
+    end
+    -- A job written by an older plugin has no index layout: it is one JSON
+    -- object, so the chapters are only reachable through a whole-file parse.
+    -- That costs seconds on a big job and runs on the UI thread, so it is
+    -- limited to small files; a large one opens without a chapter list.
+    local size = path and (lfs.attributes(path, "size") or 0) or 0
+    if size > Mcp.JOB_HEAD_LIMIT then return nil end
+    local job = Mcp.loadJob(job_id)
+    if not job then return nil end
+    return {
+        schema = job.schema, job_id = job.job_id, created_at = job.created_at,
+        book = job.book, chapters = job.chapters, options = job.options,
+    }
 end
 
 -- Byte offset of every SEGMENT_ANCHOR-th line, stored in meta.json so a page
@@ -302,6 +382,38 @@ function Mcp.loadMeta(job_id)
     local data = Mcp.readJson(Mcp.jobDir(job_id) .. "/meta.json")
     if type(data) ~= "table" or data.schema ~= Mcp.META_SCHEMA then return nil end
     return data
+end
+
+-- One task as the detail dialog shows it: which book, which chapters, how far
+-- the agent got.  base is the list row, used only for the totals of a job
+-- directory old enough to have no meta.json.
+function Mcp.jobDetail(job_id, base)
+    if not Mcp.validJobId(job_id) then return nil end
+    local meta = Mcp.loadMeta(job_id)
+    local shell = Mcp.loadJobShell(job_id)
+    if not meta and not shell then return nil end
+    local book = (meta and meta.book) or (shell and shell.book)
+    if type(book) ~= "table" then book = {} end
+    local job_state = Mcp.loadState(job_id) or {}
+    local chapters = (shell and shell.chapters) or {}
+    return {
+        job_id = job_id,
+        created_at = tonumber(meta and meta.created_at)
+            or tonumber(shell and shell.created_at) or 0,
+        updated_at = tonumber(job_state.updated_at) or 0,
+        book_path = book.device_path,
+        title = book.title,
+        author = book.author,
+        source_lang = book.source_lang,
+        target_lang = book.target_lang,
+        chapter_count = tonumber(meta and meta.chapter_count) or #chapters,
+        total = tonumber(meta and meta.total) or tonumber(base and base.total) or 0,
+        chapters = chapters,
+        status = job_state.status or "exported",
+        provider_id = job_state.provider_id,
+        model_name = job_state.model_name,
+        submitted = tonumber(job_state.submitted) or 0,
+    }
 end
 
 function Mcp.readSegmentPage(job_id, offset, limit, with_context)

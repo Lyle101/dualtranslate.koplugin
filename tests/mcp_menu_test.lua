@@ -28,7 +28,7 @@ os.execute('mkdir -p "' .. ROOT .. '"')
 local data_dir = ROOT .. "/data"
 os.execute('mkdir -p "' .. data_dir .. '"')
 
-local notifications, last_dialog, style_calls = {}, {}, 0
+local notifications, last_dialog, last_viewer, style_calls = {}, {}, nil, 0
 package.preload["lua-ljsqlite3/init"] = function() return SQ3 end
 package.preload["libs/libkoreader-lfs"] = function() return lfs end
 package.preload["json"] = function() return JSON end
@@ -95,6 +95,10 @@ end
 package.preload["ui/widget/buttondialog"] = function()
     return { new = function(_, o) last_dialog = o return o end }
 end
+-- Task detail: a scrollable viewer with our own close/delete row.
+package.preload["ui/widget/textviewer"] = function()
+    return { new = function(_, o) last_viewer = o return o end }
+end
 package.preload["ui/widget/progressbardialog"] = function()
     return { new = function() return {} end }
 end
@@ -127,6 +131,23 @@ local Overlay = require("dualtranslate_overlay")
 local Store = require("dualtranslate_store")
 local Mcp = require("dualtranslate_mcp")
 local dualtranslate = dofile(script_dir .. "/../main.lua")
+
+-- TouchMenu stand-in: enough of the widget for the rebuild-in-place paths.
+local function fake_menu(item_table)
+    local menu = { item_table = item_table, updates = 0, backs = 0 }
+    function menu:updateItems(page) self.updates = self.updates + 1; self.page = page end
+    function menu:backToUpperMenu() self.backs = self.backs + 1 end
+    return menu
+end
+
+-- TextViewer options carry the buttons as rows of {text, callback}.
+local function viewer_button(viewer, label)
+    for _, row in ipairs(viewer and viewer.buttons_table or {}) do
+        for _, button in ipairs(row) do
+            if button.text == label then return button end
+        end
+    end
+end
 
 local BOOK = ROOT .. "/book.epub"
 do local f = assert(io.open(BOOK, "wb")); f:write(string.rep("x", 1234)); f:close() end
@@ -209,8 +230,9 @@ end
 -- ============================================================
 print("== 2b. 有任务时构建列表项 ==")
 do
-    -- Regression: the row text calls _("段") inside the loop.  Naming the loop
-    -- variable "_" shadowed gettext and crashed the reader on menu open.
+    -- Regression guard: the row builder and the detail formatter both loop
+    -- with a variable named position, never "_" -- shadowing gettext crashed
+    -- the reader on menu open once.
     local job_id = "20261116_000000_0001"
     local job_dir = Mcp.jobDir(job_id)
     os.execute('mkdir -p "' .. job_dir .. '"')
@@ -230,32 +252,39 @@ do
     dualtranslate._mcp_job_menu_cache = nil
 
     local ok, items = pcall(function() return dualtranslate:buildMcpJobMenu() end)
-    check("有任务时列表可构建", ok and #items == 2, tostring(items))
-    check("首行是批量管理", ok and items[1].text_func() == "批量管理（1）")
-    check("任务行含段数", ok and items[2].text:find("段") ~= nil,
-        ok and items[2].text or "")
-    check("任务行带序号", ok and items[2].text:find("^1%. ") ~= nil,
-        ok and items[2].text or "")
+    check("有任务时列表可构建", ok and #items == 3, ok and #items or items)
+    -- 第一行是「只显示本书任务」开关，第二行才是批量管理。
+    check("首行是过滤开关", ok and items[1].text_func() == "只显示本书任务（1/1）",
+        ok and items[1].text_func() or "")
+    check("过滤默认关闭", ok and items[1].checked_func() == false)
+    -- 本轮唯一依赖 TouchMenu 内部行为的标志：回调自己 updateItems。
+    check("过滤行自行刷新", ok and items[1].check_callback_updates_menu == true)
+    check("第二行是批量管理", ok and items[2].text_func() == "批量管理（1）")
+    check("任务行含书名", ok and items[3].text:find("T", 1, true) ~= nil,
+        ok and items[3].text or "")
+    check("任务行状态是中文", ok and items[3].text:find("已导出", 1, true) ~= nil,
+        ok and items[3].text or "")
+    check("任务行带序号", ok and items[3].text:find("^1%. ") ~= nil,
+        ok and items[3].text or "")
     -- 删除任务后菜单要留着：任务行的点击不能关菜单。
-    check("任务行保持菜单", ok and items[2].keep_menu_open == true)
+    check("任务行保持菜单", ok and items[3].keep_menu_open == true)
     check("列表可自刷新", ok and items.needs_refresh == true
         and type(items.refresh_func) == "function")
     check("标题计数来自目录名", Mcp.countJobs() == 1)
 
     -- 2b-1: 打开详情 → 删除任务，列表原地刷新而不是消失。
-    local function fake_menu(item_table)
-        local menu = { item_table = item_table, updates = 0, backs = 0 }
-        function menu:updateItems(page) self.updates = self.updates + 1; self.page = page end
-        function menu:backToUpperMenu() self.backs = self.backs + 1 end
-        return menu
-    end
-
     local menu = fake_menu(items)
-    items[2].callback(menu)
-    check("点任务弹出详情", last_dialog ~= nil
-        and tostring(last_dialog.title):find(job_id, 1, true) ~= nil,
-        last_dialog and tostring(last_dialog.title))
-    last_dialog.buttons[1][2].callback()
+    items[3].callback(menu)
+    check("点任务弹出详情", last_viewer ~= nil
+        and tostring(last_viewer.text):find(job_id, 1, true) ~= nil,
+        last_viewer and tostring(last_viewer.text))
+    local detail = last_viewer and last_viewer.text or ""
+    check("详情含书名", detail:find("书名：T", 1, true) ~= nil, detail)
+    check("详情含章节标题", detail:find("1. One", 1, true) ~= nil, detail)
+    check("详情含进度", detail:find("0 / 1 段", 1, true) ~= nil, detail)
+    check("详情含状态", detail:find("已导出", 1, true) ~= nil, detail)
+    check("详情有删除按钮", viewer_button(last_viewer, "删除任务") ~= nil)
+    viewer_button(last_viewer, "删除任务").callback()
     check("删除后任务目录消失", Mcp.countJobs() == 0)
     check("删除后原地刷新菜单", menu.updates == 1 and menu.backs == 0)
     check("删除后列表只剩占位行", #menu.item_table == 1
@@ -284,13 +313,6 @@ do
         local file = assert(io.open(dir .. "/job.json", "wb"))
         file:write(JSON.encode(job)); file:close()
     end
-    local function fake_menu(item_table)
-        local menu = { item_table = item_table, updates = 0, backs = 0 }
-        function menu:updateItems(page) self.updates = self.updates + 1; self.page = page end
-        function menu:backToUpperMenu() self.backs = self.backs + 1 end
-        return menu
-    end
-
     add_job("20261117_100000_0001")
     add_job("20261117_090000_0002")
     dualtranslate._mcp_job_menu_cache = nil
@@ -352,6 +374,126 @@ do
     last_dialog.buttons[1][2].callback()
     check("全部删除后计数归零", Mcp.countJobs() == 0)
     check("批量页空了就退回任务列表", menu2.backs == 1 and menu2.updates == 0)
+end
+
+-- ============================================================
+print("== 2d. 只显示本书任务 ==")
+do
+    local OTHER = ROOT .. "/other.epub"
+    do local f = assert(io.open(OTHER, "wb")); f:write(string.rep("y", 64)); f:close() end
+
+    -- writeJobFiles 走真实布局（meta.json + 逐行 job.json），详情读的是文件头
+    -- created_at is passed in so the two rows have a fixed order.
+    local function add_job(job_id, book_path, title, created_at)
+        local job = {
+            schema = "dualtranslate.job.v1", job_id = job_id, created_at = created_at,
+            book = { device_path = book_path, title = title, source_lang = "en",
+                target_lang = "zh-Hans", spine_count = 1, file_size = 1234, file_mtime = 0 },
+            chapters = { { index = 1, title = "One" }, { index = 2, title = "Two" } },
+            segments = {
+                { id = "s000001", parent_id = "s000001", part = 1, parent_total = 1,
+                    chapter_index = 1, chapter_title = "One", selector = "p[1]",
+                    xpointer = "/body/p[1]", source = "Hello" },
+                { id = "s000002", parent_id = "s000002", part = 1, parent_total = 1,
+                    chapter_index = 2, chapter_title = "Two", selector = "p[2]",
+                    xpointer = "/body/p[2]", source = "World" },
+            },
+            options = { max_chars_per_segment = 4500 },
+        }
+        assert(Mcp.writeJobFiles(Mcp.jobDir(job_id), job))
+    end
+
+    local now = os.time()
+    add_job("20261118_100000_0001", BOOK, "本书", now - 60)
+    add_job("20261118_090000_0002", OTHER, "别的书", now - 3600)
+    dualtranslate:saveSetting("mcp_only_current_book", false)
+    dualtranslate._mcp_job_menu_cache = nil
+
+    local items = dualtranslate:buildMcpJobMenu(true)
+    check("不过滤时 4 行（开关 + 批量 + 2 任务）", #items == 4, #items)
+    check("过滤计数 2/2", items[1].text_func() == "只显示本书任务（2/2）",
+        items[1].text_func())
+    check("任务行显示各自书名", items[3].text:find("本书", 1, true) ~= nil
+        and items[4].text:find("别的书", 1, true) ~= nil)
+
+    local menu = fake_menu(items)
+    items[1].callback(menu)
+    check("过滤状态写入设置",
+        dualtranslate:getSetting("mcp_only_current_book", false) == true)
+    check("过滤开关已勾上", menu.item_table[1].checked_func() == true)
+    check("过滤后只剩本书任务", #menu.item_table == 3, #menu.item_table)
+    check("过滤后计数 1/2", menu.item_table[1].text_func() == "只显示本书任务（1/2）",
+        menu.item_table[1].text_func())
+    check("过滤后任务行是本书", menu.item_table[3].text:find("本书", 1, true) ~= nil,
+        menu.item_table[3].text)
+
+    -- 批量页与任务页看同一批行：全选不会碰到被过滤掉的书。
+    local batch = dualtranslate:buildMcpBatchMenu()
+    check("批量页只用本书任务", #batch == 3 and batch.batch == true, #batch)
+    check("批量页计数是本页行数", batch[1].text_func() == "全选（1）",
+        batch[1].text_func())
+    check("批量页不含别的书", batch[2].text:find("本书", 1, true) ~= nil
+        and batch[2].text:find("别的书", 1, true) == nil, batch[2].text)
+
+    -- 隐藏书的任务即使残留在选中集里，也不会被这次删除带上。
+    dualtranslate._mcp_batch_selected = { ["20261118_090000_0002"] = true }
+    check("隐藏任务不进删除集", #dualtranslate:selectedMcpJobIds() == 0)
+    dualtranslate._mcp_batch_selected = nil
+
+    -- 本书没有任务：给出提示，而不是空页
+    dualtranslate.ui.document.file = ROOT .. "/third.epub"
+    dualtranslate._mcp_job_menu_cache = nil
+    local none = dualtranslate:buildMcpJobMenu(true)
+    check("本书无任务有提示", #none == 2
+        and none[2].text:find("本书没有任务", 1, true) ~= nil,
+        #none .. " / " .. tostring(none[2] and none[2].text))
+    dualtranslate.ui.document.file = BOOK
+
+    -- 再点一次关掉过滤，两本书的任务都回来
+    dualtranslate._mcp_job_menu_cache = nil
+    local reopened = fake_menu(dualtranslate:buildMcpJobMenu(true))
+    reopened.item_table[1].callback(reopened)
+    check("关闭过滤", dualtranslate:getSetting("mcp_only_current_book", false) == false)
+    check("关闭后回到 4 行", #reopened.item_table == 4, #reopened.item_table)
+end
+
+-- ============================================================
+print("== 2e. 长书名不挤掉时间 ==")
+do
+    -- 行是单行、末尾截断；书名必须先截，否则「同一本书导两次」靠时间区分
+    -- 这件事在最需要它的长书名场景下失效。
+    local job_id = "20261118_120000_0003"
+    local job = {
+        schema = "dualtranslate.job.v1", job_id = job_id, created_at = os.time(),
+        book = { device_path = BOOK, title = string.rep("很长的书名", 5),
+            source_lang = "en", target_lang = "zh-Hans", spine_count = 1,
+            file_size = 1234, file_mtime = 0 },
+        chapters = { { index = 1, title = "One" } },
+        segments = { { id = "s000001", parent_id = "s000001", part = 1,
+            parent_total = 1, chapter_index = 1, chapter_title = "One",
+            selector = "p[1]", xpointer = "/body/p[1]", source = "Hello" } },
+        options = { max_chars_per_segment = 4500 },
+    }
+    assert(Mcp.writeJobFiles(Mcp.jobDir(job_id), job))
+    dualtranslate._mcp_job_menu_cache = nil
+    local items = dualtranslate:buildMcpJobMenu(true)
+    local row = items[3]
+    check("长书名被截断", row.text:find("…", 1, true) ~= nil, row.text)
+    check("时间仍留在行内", row.text:find("%d%d%-%d%d %d%d:%d%d") ~= nil, row.text)
+    os.execute('rm -rf "' .. Mcp.jobDir(job_id) .. '"')
+
+    -- 同一预算对拉丁书名同样成立：按列宽（ASCII 1 / 汉字 2）而不是字节。
+    local english_id = "20261118_120500_0004"
+    job.job_id = english_id
+    job.book.title = "Pride and Prejudice - Jane Austen"
+    assert(Mcp.writeJobFiles(Mcp.jobDir(english_id), job))
+    dualtranslate._mcp_job_menu_cache = nil
+    local english = dualtranslate:buildMcpJobMenu(true)
+    check("长英文书名也被截断", english[3].text:find("…", 1, true) ~= nil,
+        english[3].text)
+    check("英文行时间仍在", english[3].text:find("%d%d%-%d%d %d%d:%d%d") ~= nil,
+        english[3].text)
+    os.execute('rm -rf "' .. Mcp.jobDir(english_id) .. '"')
 end
 
 -- ============================================================

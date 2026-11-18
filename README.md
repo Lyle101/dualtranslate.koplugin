@@ -110,7 +110,7 @@ PC（只读 key）                 PC（写 key）
 2. **电脑端**：安装 `mcp-server/`（`pip install -e mcp-server`），按 `mcp-server/config.example.toml` 配置 SSH 双 key，在 MCP 客户端里使用 `dt_list_jobs` / `dt_get_segments` / `dt_confirm_model` / `dt_submit_translations` / `dt_commit_job`。模型名称必须由用户确认。
 3. **回传**：`dt_commit_job` 经 `tools/dtctl.sh rpc` 直接写入设备（SQLite + entries + manifest），设备端不再有「导入结果」这一步；写不进去时工具会明确报错，而不是把结果丢在一个没人读的目录里。
 4. **显示**：翻页会自动读取 `reload.signal` 刷新；想换看另一个服务的译文，用「管理译文 → 显示译文」。
-5. **任务**：「MCP 外部翻译 → 任务列表（N）」，点某个任务看详情或删除；首行的「批量管理（N）」进入勾选页，可全选或逐条勾选后一次删除。删除任务、删除译文都不会关掉菜单——当前页原地重建，删掉的那行消失，可以接着处理下一个。
+5. **任务**：「MCP 外部翻译 → 任务列表（N）」。首行是「只显示本书任务」开关（打开后只列出当前这本书导出的任务，批量页也只看这批行）；点在任务行上弹出详情页——书名、路径、语言、创建/更新时间、状态、已回传段数与百分比、引擎，以及这个任务包含的章节标题。详情页底部可以「删除任务」。「批量管理（N）」进入勾选页，可全选或逐条勾选后一次删除。删除任务、删除译文都不会关掉菜单——当前页原地重建，删掉的那行消失，可以接着处理下一个。
 
 **SSH 双 key 的边界**：Kindle 的 `/mnt/us` 是 world-writable 的 FUSE 挂载，`ChrootDirectory` 不可用，所以「只读」不靠 chroot，而靠 authorized_keys 的强制命令：
 

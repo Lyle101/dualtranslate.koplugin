@@ -420,6 +420,47 @@ do
     check("listJobs 字段", list[1].total == 8 and list[1].status == "exported"
         and list[1].book_path == BOOK and list[1].chapter_count == 2)
 
+    -- 3b. 任务详情只读文件头：章节标题和书信息可用，不需要解析整份 job.json
+    local shell = Mcp.loadJobShell(result.job_id)
+    check("shell 读到章节", shell and #shell.chapters == 2
+        and shell.chapters[1].title == "第一章", shell and tostring(#shell.chapters))
+    check("shell 不含段落", shell and shell.segments == nil)
+    check("shell 带书信息", shell and shell.book.device_path == BOOK)
+    local detail = Mcp.jobDetail(result.job_id)
+    check("detail 书与进度", detail and detail.total == 8 and detail.chapter_count == 2
+        and detail.status == "exported" and detail.title == "job")
+    check("detail 章节标题", detail and #detail.chapters == 2
+        and detail.chapters[2].title == "第二章")
+
+    -- 3c. 没有 meta.json 的老任务：列表回退整份解码，任务行不能消失
+    local legacy_id = "20260101_000000_0001"
+    local legacy_dir = Mcp.jobDir(legacy_id)
+    Tools.mkdir_p(legacy_dir)
+    local legacy_src = assert(io.open(result.dir .. "/job.json", "rb"))
+    local legacy_blob = legacy_src:read("*a"); legacy_src:close()
+    local legacy_file = assert(io.open(legacy_dir .. "/job.json", "wb"))
+    legacy_file:write(legacy_blob); legacy_file:close()
+    local found_legacy
+    for _, row in ipairs(Mcp.listJobs()) do
+        if row.job_id == legacy_id then found_legacy = row end
+    end
+    check("无 meta 任务仍可列出", found_legacy ~= nil and found_legacy.total == 8
+        and found_legacy.chapter_count == 2)
+    Tools.rmtree(legacy_dir)
+
+    -- 3d. 只有 meta.json、job.json 不见了的半删目录：不能出现在列表里
+    local ghost_id = "20260101_000000_0002"
+    local ghost_dir = Mcp.jobDir(ghost_id)
+    Tools.mkdir_p(ghost_dir)
+    Mcp.writeJson(ghost_dir .. "/meta.json", { schema = Mcp.META_SCHEMA,
+        job_id = ghost_id, book = { device_path = BOOK }, chapter_count = 1, total = 1 })
+    local ghost_found = false
+    for _, row in ipairs(Mcp.listJobs()) do
+        if row.job_id == ghost_id then ghost_found = true end
+    end
+    check("没有 job.json 的目录不列出", ghost_found == false)
+    Tools.rmtree(ghost_dir)
+
     -- 索引：meta.json + job.json 里 segments 逐行，供 get-segments/job-status
     check("meta.json 写入", lfs.attributes(result.dir .. "/meta.json", "mode") ~= nil)
     local job_blob = Mcp.slurp(result.dir .. "/job.json")
