@@ -286,13 +286,14 @@ do
     check("batch hit stores only miss", #stores == 1 and stores[1].source == "bb")
     hit_text = nil
 
-    -- 2f. non-microsoft batch falls back to singles with contexts
+    -- 2f. 没有批量端点的引擎（system）不在包装层串行循环：直接回 nil，让
+    -- translate_overlay 的逐段路径去翻、去数连续失败。否则 48 段 × 5 s 会把
+    -- 界面卡在 0% 四分钟，引擎降级永远看不到第一次失败。
     plugin.getMode = function() return "system" end
     stores = {}
-    local r2 = plugin:translateTextBatchForEpub({ "cc" }, { { selector = "c[1]", chapter_index = 2 } })
-    check("single-mode batch result", r2 and r2[1] == "T:cc")
-    check("single-mode batch meta", #stores == 1 and stores[1].meta.selector == "c[1]"
-        and stores[1].meta.chapter_index == 2)
+    local r2, b2 = plugin:translateTextBatchForEpub({ "cc" }, { { selector = "c[1]", chapter_index = 2 } })
+    check("无批量端点回 nil", r2 == nil and b2 ~= nil, tostring(b2))
+    check("包装层没有偷偷逐段翻译", #stores == 0, tostring(#stores))
 end
 
 print(string.format("\n==== context 结果：%d 通过，%d 失败 ====", passed, failed))
