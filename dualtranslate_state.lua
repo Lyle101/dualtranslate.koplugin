@@ -193,9 +193,17 @@ function State.enqueue(plugin, opts)
             and existing.book_path == book_path
             and (existing.status == "queued" or existing.status == "active") then
             if not silent then
-                if plugin._translation_progress and plugin._translation_progress.dialog then
-                    plugin:reopenTranslationProgress()
-                else
+                local progress = plugin._translation_progress
+                -- Only reopen the card when it belongs to THIS book: a job for
+                -- another book can still hold its dialog open, and showing
+                -- that one here would report the wrong book's progress.  When
+                -- there is nothing to reopen (the watchdog just released it,
+                -- or the reopen itself failed) the tap must still say
+                -- something, or it looks like the command did nothing.
+                local reopened = progress and progress.dialog
+                    and progress.book_path == book_path
+                    and plugin:reopenTranslationProgress()
+                if not reopened then
                     plugin.TranslationUI.showInfo("这本书已经在翻译队列中")
                 end
             end

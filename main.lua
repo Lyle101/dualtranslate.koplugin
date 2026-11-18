@@ -216,7 +216,11 @@ function dualtranslate:buildMenuTable()
                     callback = function()
                         -- 7.4: whole-book translation is unconditional and
                         -- never consults the 逐章模式 preference.
-                        self:translateWholeBook(true)
+                        -- silent=false: a menu tap is a manual start, so the
+                        -- reader must show the progress dialog.  Before the
+                        -- scope split this flag was all_chapters, and passing
+                        -- true here silently muted every run.
+                        self:translateWholeBook(false)
                     end,
                 },
                 {
@@ -224,7 +228,11 @@ function dualtranslate:buildMenuTable()
                     enabled_func = book_enabled,
                     keep_menu_open = true,
                     callback = function()
-                        self:translateCurrentChapter(true)
+                        -- silent=false for the same reason as 翻译整本: a
+                        -- manual start must show the progress dialog.  Only
+                        -- background jobs (queue resume of an old item) may
+                        -- set it.
+                        self:translateCurrentChapter(false)
                     end,
                 },
                 {
@@ -239,8 +247,9 @@ function dualtranslate:buildMenuTable()
         },
         {
             -- "逐章模式" preference: only governs whether "翻译当前章节" arms
-            -- page-turn follow (turning pages silently translates newly
-            -- reached chapters).  Whole-book translation is unaffected.
+            -- page-turn follow (turning pages then translates each newly
+            -- reached chapter, progress dialog included, minus the per-chapter
+            -- completion notice).  Whole-book translation is unaffected.
             text = "逐章模式（翻页自动续译）",
             checkbox = true,
             checked_func = function() return self:isPageTranslationEnabled() end,

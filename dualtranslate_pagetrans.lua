@@ -9,11 +9,13 @@
 -- across reopens, no line limit.
 --
 -- Exposed as the "逐章模式" checkbox next to "翻译本书": checking it is a
--- preference only.  Tapping "翻译本书" while it is checked translates the
+-- preference only.  Tapping "翻译当前章节" while it is checked translates the
 -- current chapter (with the normal progress dialog) and arms the follow
 -- mode; turning pages then keeps translating each newly reached chapter
--- silently through the serial queue.  Already translated paragraphs are
--- reused by the overlay merge and never re-requested.
+-- through the serial queue — same progress dialog, but the job is flagged
+-- `auto` so the per-chapter completion notice stays quiet.  Already
+-- translated paragraphs are reused by the overlay merge and never requested
+-- again.
 local UIManager = require("ui/uimanager")
 local Overlay = require("dualtranslate_overlay")
 
@@ -38,10 +40,11 @@ function PageTrans.attach(plugin)
         if menu and menu.updateItems then menu:updateItems() end
     end
 
-    -- Called from onPageUpdate / onPosUpdate / onDocumentRerendered (silent,
-    -- auto-continue) and after translateCurrentChapter when follow mode was
-    -- armed (silent=false, so the initial chapter translation shows its
-    -- progress dialog).
+    -- Called from onPageUpdate / onPosUpdate / onDocumentRerendered with
+    -- silent=false (auto-continue keeps the progress dialog), and after
+    -- translateCurrentChapter when follow mode was armed.  The `auto` flag
+    -- passed on to the job is what keeps the per-chapter completion notice
+    -- quiet — not `silent`.
     -- Queues the current chapter when this book has no complete overlay yet.
     -- The serial queue deduplicates by book, and the overlay merge is
     -- idempotent, so repeated page turns never re-translate already-covered
@@ -52,7 +55,7 @@ function PageTrans.attach(plugin)
         if self:getMode() == "mcp_external" then return end
         if not self:isPageTranslationEnabled() then return end
         -- Only auto-continue while a follow session was explicitly started
-        -- from "翻译本书" (or its chapter-mode variant).
+        -- from "翻译当前章节" (or its chapter-mode variant).
         if not self._page_translation_follow_active then return end
         if not self:isEpub() then return end
         -- Never compete with a running full-book/chapter worker writing
@@ -103,10 +106,11 @@ function PageTrans.attach(plugin)
                 end
             end
         end
-        -- Queue the current chapter; silent only for auto-continue page turns.
-        -- auto marks the job as page-turn driven so the completion toast is
-        -- suppressed (the progress dialog is still shown — that was an
-        -- explicit user request — but a toast on every chapter is noise).
+        -- Queue the current chapter.  `silent` is forwarded as-is (every
+        -- production caller passes false, so auto-continue shows the same
+        -- progress dialog); `auto` marks the job as page-turn driven and only
+        -- suppresses the completion toast — a toast on every chapter would be
+        -- noise.
         self._page_translation_last_fragment = fragment_key
         self:translateCurrentChapter(silent == true, true)
     end

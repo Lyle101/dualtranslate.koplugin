@@ -346,6 +346,12 @@ end
 -- 7.4: the three chapter scopes are decoupled.  Whole-book translation is
 -- unconditional and never consults the 逐章模式 preference; that preference
 -- only governs whether the current-chapter entry arms page-turn follow.
+--
+-- The first positional argument of every entry below is `silent`, NOT the
+-- scope: `silent=true` suppresses the progress dialog and every user-facing
+-- notice (only a job resumed from an old queue item should carry it).  These
+-- signatures used to start with `all_chapters`, so a leftover `true` there
+-- silently muted a run — pass `false` (or nothing) from any menu action.
 function dualtranslate:translateWholeBook(silent, auto)
     if not self:isEpub() then return end
     -- 7.4: with the MCP engine there is no device-side request path; the
@@ -370,10 +376,12 @@ function dualtranslate:translateCurrentChapter(silent, auto)
     local fragment = self:getCurrentFragment()
     if fragment then self._page_translation_last_fragment = fragment end
     -- 逐章模式: translating the current chapter arms follow so page turns keep
-    -- scheduling newly reached chapters silently.  The overlay complete flag
-    -- must not gate this: chapter runs never write complete, and a stale flag
-    -- from an earlier whole-book run (possibly another language) would block
-    -- re-translating the current chapter forever.
+    -- scheduling the newly reached chapters (each one still shows the progress
+    -- dialog; `auto` only silences the per-chapter completion notice).  The
+    -- overlay complete flag must not gate this: chapter runs never write
+    -- complete, and a stale flag from an earlier whole-book run (possibly
+    -- another language) would block re-translating the current chapter
+    -- forever.
     if self:isPageTranslationEnabled() then
         self._page_translation_follow_active = true
     end
@@ -1197,6 +1205,11 @@ function dualtranslate:_runTranslation(item)
         started_at = os.time(),
     }
     item.progress_path = progress_path
+    -- This run's entry.  Every later write goes through this reference: the
+    -- watchdog can release it early and the next job then replaces
+    -- self._translation_progress, so a late-returning worker must not clear
+    -- the *new* job's active flag (that would let a third job start too).
+    local own_progress = self._translation_progress
     self:saveTranslationQueue()
 
     UIManager:scheduleIn(0.1, function()
@@ -1216,7 +1229,7 @@ function dualtranslate:_runTranslation(item)
                 dismissable = true,
             }
         end
-        self._translation_progress.dialog = progress_dialog
+        own_progress.dialog = progress_dialog
         -- Closing this status dialog must only hide it.  The worker keeps
         -- running and the queue can show the same dialog again later.
         if progress_dialog then
@@ -1275,8 +1288,25 @@ function dualtranslate:_runTranslation(item)
         local progress_active = true
         local function update_progress()
             if not progress_active then return end
+            -- Stop as soon as this run's entry is gone (the next job replaced
+            -- it) or released (watchdog): a live chain would otherwise write
+            -- this run's percentage into the next job's entry, and would
+            -- outlive its own dialog.
+            if self._translation_progress ~= own_progress or not own_progress.active then
+                progress_active = false
+                return
+            end
             if not progress_dialog then return end
-            if progress_dialog._dualtranslate_hidden then return end
+            if progress_dialog._dualtranslate_hidden then
+                -- Keep the chain alive while the card is hidden.  Hiding only
+                -- flips this flag, and reopening it (queue row, or tapping
+                -- the same command again) re-runs the native init(), which
+                -- rebuilds the bar at 0%: a dead chain would leave the
+                -- reopened dialog frozen at 0% for the rest of the run.
+                -- Nothing is read from disk on these ticks.
+                UIManager:scheduleIn(1, update_progress)
+                return
+            end
             local file = io.open(progress_path, "r")
             local line = file and file:read("*l") or nil
             if file then file:close() end
@@ -1290,6 +1320,9 @@ function dualtranslate:_runTranslation(item)
                     item.translated = tonumber(translated) or 0
                     item.failed = tonumber(failed) or 0
                     local percentage = total > 0 and math.floor(current * 100 / total + 0.5) or 0
+                    -- Remembered so reopenTranslationProgress can restore the
+                    -- bar instead of showing init()'s 0% until the next tick.
+                    own_progress.last_percentage = percentage
                     progress_dialog.title = string.format("%s  %d%%",
                         progress_title(), percentage)
                     progress_dialog.subtitle = string.format(
@@ -1383,7 +1416,7 @@ function dualtranslate:_runTranslation(item)
             if not completed then
                 local was_hidden = progress_dialog and progress_dialog._dualtranslate_hidden
                 progress_active = false
-                self._translation_progress.active = false
+                own_progress.active = false
                 -- The cancel flag file is only meaningful while the worker is
                 -- alive; drop it so a later job never sees a stale flag.
                 os.remove(progress_path .. ".cancel")
@@ -1427,7 +1460,7 @@ function dualtranslate:_runTranslation(item)
             end
             if not result or not result.output then
                 progress_active = false
-                self._translation_progress.active = false
+                own_progress.active = false
                 -- A killed translation subprocess can return no serialized
                 -- value at all (most often after a transient memory spike
                 -- from a previous interrupted job). Give a whole-book job
@@ -1467,7 +1500,7 @@ function dualtranslate:_runTranslation(item)
                 return
             end
             progress_active = false
-            self._translation_progress.active = false
+            own_progress.active = false
             if result.cancelled then
                 -- The user asked the queue to cancel this job.  Keep the
                 -- checkpoint already written, drop the task, and move on.
@@ -1501,7 +1534,7 @@ function dualtranslate:_runTranslation(item)
                 -- needs no proxy instead of grinding through the remaining
                 -- chapters at one timeout each.
                 progress_active = false
-                self._translation_progress.active = false
+                own_progress.active = false
                 self._page_translation_follow_active = nil
                 pcall(function() UIManager:close(progress_dialog, "partial") end)
                 self:offerEngineFallback(item, result)
@@ -1578,9 +1611,7 @@ function dualtranslate:_runTranslation(item)
         -- translation queue forever without ever starting.  Recover here.
         if resume_ok == false or wrapped_ok == false then
             progress_active = false
-            if self._translation_progress then
-                self._translation_progress.active = false
-            end
+            own_progress.active = false
             item.status = "failed"
             item.error = "翻译进程异常退出，请查看日志后重试"
             self:saveTranslationQueue()
@@ -1604,11 +1635,28 @@ function dualtranslate:reopenTranslationProgress()
     -- Already on screen (the queue menu was merely covering it): nothing to
     -- reopen, the caller has closed the menu.
     if not dialog._dualtranslate_hidden then return true end
-    pcall(function()
+    local ok, err = pcall(function()
         dialog._dualtranslate_hidden = false
         dialog:init()
-        UIManager:show(dialog)
+        -- "ui": init() rebuilt the widget tree, so the show itself has to
+        -- repaint; the dialog had been removed from the stack when hidden.
+        UIManager:show(dialog, "ui")
     end)
+    if not ok then
+        -- Otherwise the flag says "visible" while nothing is on screen, and
+        -- every later call would report success without reopening anything.
+        dialog._dualtranslate_hidden = true
+        logger.warn("dualtranslate: reopening the progress dialog failed:", tostring(err))
+        return false
+    end
+    -- init() rebuilt the bar at 0%; put the last known percentage back (same
+    -- 0-100 scale as progress_max) so the reopened card matches the numbers in
+    -- its own title instead of showing an empty bar.  A failure here only
+    -- skips that restore: the card is already up and the next poll, half a
+    -- second away, writes the real value anyway.
+    if progress.last_percentage then
+        pcall(function() dialog:reportProgress(progress.last_percentage) end)
+    end
     return true
 end
 

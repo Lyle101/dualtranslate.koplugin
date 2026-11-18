@@ -6,6 +6,8 @@ local function template(fmt, ...)
     for i = 1, n do out = out:gsub("%%" .. i, tostring(select(i, ...) or "")) end
     return out
 end
+local scheduled_calls = {}
+local ui_shows = {}
 local stubs = {
     ["logger"] = { warn = function() end, err = function() end, info = function() end, dbg = function() end },
     ["gettext"] = gettext,
@@ -37,7 +39,16 @@ local stubs = {
             }
         end,
     },
-    ["ui/uimanager"] = { show = function() end, close = function() end, setDirty = function() end, scheduleIn = function() end, nextTick = function() end },
+    ["ui/uimanager"] = { show = function(_, widget, refresh)
+            ui_shows[#ui_shows + 1] = { widget = widget, refresh = refresh }
+        end,
+        close = function() end, setDirty = function() end,
+        -- Recorded so a test can drive the deferred callbacks itself
+        -- (_runTranslation's progress poller is a local closure).
+        scheduleIn = function(_, delay, fn)
+            scheduled_calls[#scheduled_calls + 1] = { delay = delay, fn = fn }
+        end,
+        nextTick = function() end },
     ["ui/widget/notification"] = { Notification = {} },
     ["ui/widget/textviewer"] = {}, ["ui/widget/buttondialog"] = {}, ["ui/widget/menu"] = {},
     ["ui/widget/progressbardialog"] = {}, ["ui/widget/inputdialog"] = {}, ["ui/widget/spinwidget"] = {},
@@ -109,3 +120,115 @@ for _, item in ipairs(translate_entry.sub_item_table) do labels[#labels + 1] = i
 assert(labels[1] == "翻译整本" and labels[2] == "翻译当前章节" and labels[3] == "选择章节…",
     "translate submenu labels: " .. table.concat(labels, ","))
 print("translate submenu: true")
+
+-- A menu tap is a manual start, so the reader must put the progress dialog up
+-- (_runTranslation only builds one when item.silent is falsy).  The flag kept
+-- its old all_chapters value through the scope split, which muted the dialog
+-- for 翻译整本 and 翻译当前章节 while 选择章节… still showed it.
+local started = {}
+local real_whole, real_chapter =
+    dualtranslate.translateWholeBook, dualtranslate.translateCurrentChapter
+dualtranslate.translateWholeBook = function(_, silent, auto)
+    started.whole = { silent = silent, auto = auto }
+end
+dualtranslate.translateCurrentChapter = function(_, silent, auto)
+    started.chapter = { silent = silent, auto = auto }
+end
+for _, item in ipairs(translate_entry.sub_item_table) do
+    if item.text == "翻译整本" or item.text == "翻译当前章节" then item.callback() end
+end
+dualtranslate.translateWholeBook = real_whole
+dualtranslate.translateCurrentChapter = real_chapter
+assert(started.whole and started.whole.silent == false,
+    "翻译整本 silent: " .. tostring(started.whole and started.whole.silent))
+assert(started.chapter and started.chapter.silent == false,
+    "翻译当前章节 silent: " .. tostring(started.chapter and started.chapter.silent))
+-- A menu tap is one job, not a page-turn follow: auto must stay unset or the
+-- completion notice would be suppressed (see _runTranslation).
+assert(not started.whole.auto and not started.chapter.auto,
+    "menu entries must not pass auto")
+print("translate entries start non-silent: true")
+
+-- Reopening a hidden progress dialog (queue row, or the same command again)
+-- must put the bar back: the native init() rebuilds it at 0%, so the reader
+-- replays the last reported percentage instead of leaving an empty bar.
+local fake_dialog = {
+    _dualtranslate_hidden = true,
+    init = function(self) self.inited = true end,
+    reportProgress = function(self, value) self.reported = value end,
+}
+dualtranslate._translation_progress = {
+    active = true, dialog = fake_dialog, last_percentage = 42,
+}
+ui_shows = {}
+assert(dualtranslate:reopenTranslationProgress() == true, "reopen should succeed")
+assert(fake_dialog.inited, "reopen should re-init the dialog")
+assert(fake_dialog.reported == 42,
+    "reopen should restore the last percentage, got " .. tostring(fake_dialog.reported))
+-- init() rebuilt the tree, so the re-show must carry a refresh type or the
+-- card stays invisible until something else repaints the screen.
+local last_show = ui_shows[#ui_shows]
+assert(last_show and last_show.widget == fake_dialog and last_show.refresh == "ui",
+    "reopen must re-show the dialog with the \"ui\" refresh")
+dualtranslate._translation_progress = nil
+print("reopen progress restores the bar: true")
+
+-- The bar is driven by a poller defined inside _runTranslation, so it can only
+-- be exercised by running a job: a manual span start must build the dialog,
+-- and a tick that lands while the card is hidden must re-arm the chain without
+-- reading the progress file (that is what lets the reopen above keep updating).
+-- The ticks are addressed by index because _runTranslation schedules them in a
+-- fixed order (0.1 s show, then 0.5 s polls); Trapper.wrap is stubbed to a
+-- no-op, so no worker ever runs.
+local SpanBook = "/tmp/dt_span.epub"
+local ProgressbarDialog = require("ui/widget/progressbardialog")
+local real_new, real_save = ProgressbarDialog.new, dualtranslate.saveTranslationQueue
+ProgressbarDialog.new = function(_, opts)
+    local dialog = { title = opts.title, subtitle = opts.subtitle }
+    function dialog:show() self.shown = true end
+    function dialog:onCloseWidget() end
+    function dialog:reportProgress(value) self.percentage = value end
+    return dialog
+end
+dualtranslate.saveTranslationQueue = function() end
+dualtranslate.ui.document = { file = SpanBook }
+scheduled_calls = {}
+dualtranslate:_runTranslation({ book_path = SpanBook, mode = "span",
+    status = "queued", fragment = "1", span = 1 })
+assert(#scheduled_calls == 1 and scheduled_calls[1].delay == 0.1,
+    "expected the deferred show callback, got " .. #scheduled_calls)
+scheduled_calls[1].fn()
+local dialog = dualtranslate._translation_progress
+    and dualtranslate._translation_progress.dialog
+assert(dialog and dialog.shown, "a manual span job must create the progress dialog")
+assert(tostring(dialog.title):find("当前章节", 1, true) ~= nil,
+    "span dialog title: " .. tostring(dialog.title))
+assert(scheduled_calls[2] and scheduled_calls[2].delay == 0.5,
+    "the poller should be armed at 0.5s")
+dialog._dualtranslate_hidden = true
+local reads = 0
+local real_open = io.open
+io.open = function(...) reads = reads + 1 return real_open(...) end
+scheduled_calls[2].fn()
+io.open = real_open
+assert(reads == 0, "a hidden tick must not read the progress file, got " .. reads)
+assert(scheduled_calls[3] and scheduled_calls[3].delay == 1,
+    "a hidden tick must re-arm the poller, or the reopened bar freezes")
+-- A late tick must never leak into the next job: once the watchdog releases
+-- this entry and the next job installs its own table, the old chain stops
+-- instead of writing this run's percentage into it.
+local next_job = { active = true }
+dualtranslate._translation_progress = next_job
+local before = #scheduled_calls
+scheduled_calls[3].fn()
+assert(#scheduled_calls == before, "a stale poller must stop once its entry is replaced")
+assert(next_job.last_percentage == nil, "a stale poller must not write the next job's entry")
+-- Leave nothing running.
+next_job.active = false
+dualtranslate._translation_progress = nil
+dualtranslate._active_translation_book = nil
+dualtranslate.ui.document = nil
+dualtranslate.saveTranslationQueue = real_save
+ProgressbarDialog.new = real_new
+scheduled_calls = {}
+print("hidden poller stays alive: true")
