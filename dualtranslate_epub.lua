@@ -1339,8 +1339,111 @@ end
 -- Long paragraphs are split at max_chars so no agent receives a 10k-character
 -- segment; every part keeps the parent's selector/xpointer and carries
 -- part/parent_total so the importer can stitch them back in order (10.2).
+--
+-- 3.2.0: the walk is a session (begin_segment_export + step + finish) because a
+-- whole book is ~600 chapters / 16k segments.  Doing it in one call froze the
+-- UI thread for tens of seconds with no progress and no way to cancel;
+-- collect_segments keeps the one-shot contract for dtctl and the tests by
+-- driving the same session to completion.
 -- ---------------------------------------------------------------------------
-function Epub.collect_segments(opts)
+local ExportSession = {}
+ExportSession.__index = ExportSession
+
+function ExportSession:chapter_count()
+    return #self.chapter_indexes
+end
+
+function ExportSession:processed()
+    return self.position
+end
+
+-- Parse chapters until the CPU budget is spent (or the selection is done) and
+-- return how many chapters are processed.  The budget is CPU time, not wall
+-- time: a slow SD card must not stretch one slice into a visible freeze.
+function ExportSession:step(seconds)
+    local budget = tonumber(seconds) or 0.2
+    local started = os.clock()
+    local total = #self.chapter_indexes
+    while self.position < total do
+        self:_next_chapter()
+        if os.clock() - started >= budget then break end
+    end
+    return self.position
+end
+
+function ExportSession:_next_chapter()
+    self.position = self.position + 1
+    local index = self.chapter_indexes[self.position]
+    local relative = self.spine[index]
+    local document = relative and self.third[relative] and read_file(self.third[relative])
+    if not document then
+        self.unreadable = self.unreadable + 1
+        return
+    end
+    local candidates = collect_overlay_candidates(document, relative, index, false, self.sheet)
+    if #candidates == 0 then
+        candidates = collect_overlay_candidates(document, relative, index, true, self.sheet)
+    end
+    local title = self.titles[index] or string.format("第 %d 章", index)
+    self.chapters[#self.chapters + 1] = { index = index, title = title }
+    for _, candidate in ipairs(candidates) do
+        local parts = Tools.split_text(candidate.source, self.max_chars)
+        if #parts == 0 then parts = { candidate.source } end
+        local parent_id = string.format("s%06d", #self.segments + 1)
+        for part_index, part_text in ipairs(parts) do
+            self.segments[#self.segments + 1] = {
+                id = string.format("s%06d", #self.segments + 1),
+                parent_id = parent_id,
+                part = part_index,
+                parent_total = #parts,
+                chapter_index = index,
+                chapter_title = title,
+                selector = candidate.selector,
+                xpointer = candidate.xpointer,
+                list_indent = candidate.list_indent,
+                source = part_text,
+            }
+        end
+    end
+end
+
+-- Release the extraction directory.  Safe to call twice.
+function ExportSession:cleanup()
+    if self.work_dir then
+        Tools.rmtree(self.work_dir)
+        self.work_dir = nil
+    end
+end
+
+function ExportSession:abort()
+    self:cleanup()
+    self.aborted = true
+end
+
+-- The table collect_segments used to build directly, assembled from the
+-- chapters this session actually walked (a cancelled run never gets here).
+function ExportSession:finish()
+    self:cleanup()
+    if #self.segments == 0 then
+        if self.unreadable > 0 then
+            return nil, "无法读取所选章节内容（EPUB 文本可能已损坏）"
+        end
+        return nil, "所选章节没有可导出的段落"
+    end
+    return {
+        book_path = self.book_path,
+        spine_count = self.spine_count,
+        chapters = self.chapters,
+        segments = self.segments,
+        unreadable = self.unreadable,
+        max_chars_per_segment = self.max_chars,
+    }
+end
+
+-- Open the archive, resolve the spine and extract the selected chapters.  This
+-- is the only blocking part of an export (three archive passes); everything
+-- after it is sliced by ExportSession:step.
+function Epub.begin_segment_export(opts)
     opts = opts or {}
     local book_path = opts.book_path
     if type(book_path) ~= "string" or book_path == "" then return nil, "缺少书路径" end
@@ -1404,59 +1507,29 @@ function Epub.collect_segments(opts)
             if text and text ~= "" then styles[#styles + 1] = text end
         end
     end
-    local sheet = ListIndent.compile(styles)
-
-    local chapters, segments = {}, {}
-    local unreadable = 0
-    for _, index in ipairs(chapter_indexes) do
-        local relative = spine[index]
-        local document = relative and third[relative] and read_file(third[relative])
-        if not document then
-            unreadable = unreadable + 1
-        else
-            local candidates = collect_overlay_candidates(document, relative, index, false, sheet)
-            if #candidates == 0 then
-                candidates = collect_overlay_candidates(document, relative, index, true, sheet)
-            end
-            local title = (type(opts.titles) == "table" and opts.titles[index])
-                or string.format("第 %d 章", index)
-            chapters[#chapters + 1] = { index = index, title = title }
-            for _, candidate in ipairs(candidates) do
-                local parts = Tools.split_text(candidate.source, max_chars)
-                if #parts == 0 then parts = { candidate.source } end
-                local parent_id = string.format("s%06d", #segments + 1)
-                for part_index, part_text in ipairs(parts) do
-                    segments[#segments + 1] = {
-                        id = string.format("s%06d", #segments + 1),
-                        parent_id = parent_id,
-                        part = part_index,
-                        parent_total = #parts,
-                        chapter_index = index,
-                        chapter_title = title,
-                        selector = candidate.selector,
-                        xpointer = candidate.xpointer,
-                        list_indent = candidate.list_indent,
-                        source = part_text,
-                    }
-                end
-            end
-        end
-    end
-    cleanup()
-    if #segments == 0 then
-        if unreadable > 0 then
-            return nil, "无法读取所选章节内容（EPUB 文本可能已损坏）"
-        end
-        return nil, "所选章节没有可导出的段落"
-    end
-    return {
+    return setmetatable({
         book_path = book_path,
         spine_count = #spine,
-        chapters = chapters,
-        segments = segments,
-        unreadable = unreadable,
-        max_chars_per_segment = max_chars,
-    }
+        spine = spine,
+        third = third,
+        sheet = ListIndent.compile(styles),
+        max_chars = max_chars,
+        titles = type(opts.titles) == "table" and opts.titles or {},
+        chapter_indexes = chapter_indexes,
+        chapters = {},
+        segments = {},
+        unreadable = 0,
+        position = 0,
+        work_dir = work_dir,
+    }, ExportSession)
+end
+
+function Epub.collect_segments(opts)
+    local session, err = Epub.begin_segment_export(opts)
+    if not session then return nil, err end
+    -- One slice, no yielding: headless callers have no event loop to feed.
+    session:step(math.huge)
+    return session:finish()
 end
 
 return Epub

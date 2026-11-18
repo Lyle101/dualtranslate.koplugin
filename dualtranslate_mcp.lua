@@ -390,14 +390,21 @@ function Mcp.exportJob(opts)
     -- Required lazily: Epub is also required by the reader, and the MCP
     -- module must stay loadable from dtctl without UI modules.  The reader
     -- passes its own instance so the plugin never ends up with two engines.
-    local Epub = opts.epub or require("dualtranslate_epub")
-    if type(Epub) ~= "table" then return nil, "EPUB 模块未加载" end
-    local extracted, err = Epub.collect_segments{
-        book_path = book_path,
-        chapter_indexes = opts.chapter_indexes,
-        titles = opts.titles,
-        max_chars = opts.max_chars,
-    }
+    --
+    -- 3.2.0: the reader already walked the book in slices and hands the
+    -- finished table in as opts.collected.  Re-collecting here would take the
+    -- whole export back onto the UI thread.
+    local extracted, err = opts.collected
+    if not extracted then
+        local Epub = opts.epub or require("dualtranslate_epub")
+        if type(Epub) ~= "table" then return nil, "EPUB 模块未加载" end
+        extracted, err = Epub.collect_segments{
+            book_path = book_path,
+            chapter_indexes = opts.chapter_indexes,
+            titles = opts.titles,
+            max_chars = opts.max_chars,
+        }
+    end
     if not extracted then return nil, err end
 
     local job_id, id_err = Mcp.newJobId()

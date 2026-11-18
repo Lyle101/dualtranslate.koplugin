@@ -156,6 +156,7 @@ end
 
 -- ============================================================
 print("== 1. 翻译入口在 mcp_external 时改导出 ==")
+local real_export_mcp_job = dualtranslate.exportMcpJob
 do
     local finish = translations_to_epub_calls()
     dualtranslate:translateWholeBook(true)
@@ -258,6 +259,66 @@ do
         if text:find("没有待导入", 1, true) then found = true end
     end
     check("提示没有待导入", found, table.concat(notifications, " | "))
+end
+
+-- ============================================================
+print("== 5. exportMcpJob 分片驱动（3.2.0）==")
+do
+    -- 真机路径：begin_segment_export 开一次会话，事件循环每轮走一片，
+    -- 进度框跟着更新，完成后再把结果交给 exportJob。这里用假会话 +
+    -- 立即执行的 scheduleIn 把整条链路跑一遍，任何 UI API 用错都会报错。
+    local UIManager = require("ui/uimanager")
+    local ProgressbarDialog = require("ui/widget/progressbardialog")
+    local real_schedule, real_new = UIManager.scheduleIn, ProgressbarDialog.new
+    local dialogs = {}
+    UIManager.scheduleIn = function(_, _, fn) fn() end
+    ProgressbarDialog.new = function(_, opts)
+        local widget = { title = opts.title, subtitle = opts.subtitle }
+        function widget:show() self.shown = true; dialogs[#dialogs + 1] = self end
+        function widget:reportProgress(percent) self.percent = percent end
+        function widget:onCloseWidget() end
+        return widget
+    end
+
+    local slices = 0
+    local fake_epub = { begin_segment_export = function(opts)
+        local session = { position = 0, total = 3 }
+        function session:chapter_count() return self.total end
+        function session:processed() return self.position end
+        function session:step(budget) self.position = self.position + 1; slices = slices + 1; return self.position end
+        function session:finish()
+            return {
+                book_path = opts.book_path, spine_count = 3,
+                chapters = { { index = 1, title = "第一章" } },
+                segments = { { id = "s000001", parent_id = "s000001", part = 1,
+                    parent_total = 1, chapter_index = 1, chapter_title = "第一章",
+                    selector = 'body > p:nth-of-type(1)', xpointer = "/body/p[1]",
+                    source = "hello world" } },
+                unreadable = 0, max_chars_per_segment = 4500,
+            }
+        end
+        return session
+    end }
+    local real_outline, real_epub = dualtranslate.getBookOutline, dualtranslate.epub
+    dualtranslate.getBookOutline = function() return { chapters = {} } end
+    dualtranslate.epub = fake_epub
+    dualtranslate.exportMcpJob = real_export_mcp_job
+
+    notifications = {}
+    dualtranslate:exportMcpJob(nil)
+    check("分片次数等于章节数", slices == 3, tostring(slices))
+    check("进度框显示过", #dialogs == 1 and dialogs[1].shown == true)
+    check("进度跑到 100%", dialogs[1] and dialogs[1].percent == 100,
+        dialogs[1] and tostring(dialogs[1].percent))
+    local done
+    for _, text in ipairs(notifications) do
+        if text:find("已导出 MCP 任务", 1, true) then done = text end
+    end
+    check("导出完成提示", done ~= nil, table.concat(notifications, " | "))
+    check("结果来自 collected（1 段）", done and done:find("1 段", 1, true) ~= nil, tostring(done))
+
+    dualtranslate.getBookOutline, dualtranslate.epub = real_outline, real_epub
+    UIManager.scheduleIn, ProgressbarDialog.new = real_schedule, real_new
 end
 
 print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))

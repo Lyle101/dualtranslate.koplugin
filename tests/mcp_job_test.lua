@@ -333,6 +333,66 @@ do
 end
 
 -- ============================================================
+print("== 2b. 分片导出会话（3.2.0）==")
+do
+    local session, open_err = Epub.begin_segment_export{
+        book_path = BOOK, chapter_indexes = { 1, 2, 3 }, max_chars = 200,
+        titles = { [1] = "第一章" },
+    }
+    check("会话打开成功", session ~= nil, tostring(open_err))
+    check("章节总数", session and session:chapter_count() == 3)
+    check("初始进度为 0", session and session:processed() == 0)
+    -- 预算 0 让每次调用都在第一章之后返回：reader 靠这一点把整本书切成
+    -- 每轮事件循环一片，界面才有机会重绘、用户才有机会取消。
+    local first = session:step(0)
+    check("一次只走一章", first == 1, tostring(first))
+    check("未完成时进度小于总数", session:processed() < session:chapter_count())
+    session:step(0)
+    session:step(0)
+    check("走完所选章节", session:processed() == 3)
+    local collected, finish_err = session:finish()
+    check("finish 成功", collected ~= nil, tostring(finish_err))
+
+    local one_shot = Epub.collect_segments{
+        book_path = BOOK, chapter_indexes = { 1, 2, 3 }, max_chars = 200,
+        titles = { [1] = "第一章" },
+    }
+    check("分片与一次性段数一致", collected and one_shot
+        and #collected.segments == #one_shot.segments,
+        collected and tostring(#collected.segments))
+    local same = collected ~= nil and one_shot ~= nil
+    for index = 1, #(one_shot and one_shot.segments or {}) do
+        local sliced, whole = collected.segments[index], one_shot.segments[index]
+        if not sliced or sliced.id ~= whole.id or sliced.selector ~= whole.selector
+            or sliced.source ~= whole.source or sliced.parent_total ~= whole.parent_total
+            or sliced.list_indent ~= whole.list_indent then
+            same = false
+        end
+    end
+    check("分片与一次性逐段一致", same)
+    check("章节标题沿用", collected and collected.chapters[1].title == "第一章")
+
+    -- abort：临时目录必须清掉（reader 中途取消时不留 job_ 目录）
+    local cancelled = Epub.begin_segment_export{ book_path = BOOK, chapter_indexes = { 1 } }
+    local work_dir = cancelled and cancelled.work_dir
+    check("会话持有临时目录", work_dir ~= nil
+        and lfs.attributes(work_dir, "mode") == "directory", tostring(work_dir))
+    cancelled:abort()
+    check("abort 后临时目录已删", lfs.attributes(work_dir, "mode") == nil)
+    check("abort 打标", cancelled.aborted == true)
+
+    -- reader 走的就是这条：把会话结果交给 exportJob，不再重新解包
+    local job, job_err = Mcp.exportJob{
+        book_path = BOOK, collected = one_shot, source_lang = "en", target_lang = "zh-Hans",
+    }
+    check("exportJob 接受已抽取结果", job ~= nil, tostring(job_err))
+    check("段数来自 collected", job and job.segments == #one_shot.segments,
+        job and tostring(job.segments))
+    -- 这个任务只为本节而建：后面 listJobs 断言「恰好 N 个任务」，留着会干扰
+    if job and job.dir then os.execute('rm -rf "' .. job.dir .. '"') end
+end
+
+-- ============================================================
 print("== 3. Mcp.exportJob ==")
 do
     local result, err = Mcp.exportJob{

@@ -433,18 +433,100 @@ function dualtranslate:exportMcpJob(indexes)
         titles[chapter.index] = chapter.title
     end
     local Mcp = require("dualtranslate_mcp")
-    UIManager:show(Notification:new{ text = _("正在导出 MCP 任务…"), timeout = 30 })
-    -- Paint the notice first: extraction parses every selected XHTML file and
-    -- would otherwise freeze the screen with no feedback.
-    UIManager:scheduleIn(0.2, function()
+    local Epub = self.epub or require("dualtranslate_epub")
+    if type(Epub) ~= "table" or type(Epub.begin_segment_export) ~= "function" then
+        TranslationUI.showInfo(_("导出失败：EPUB 模块未加载"))
+        return
+    end
+    -- Opening the archive is the one blocking step left (three passes over the
+    -- EPUB).  The chapter walk itself is sliced below: a whole book is ~600
+    -- chapters / 16k segments, and doing it in one call froze the screen for
+    -- tens of seconds with no progress and no way out (3.2.0).
+    local session, open_err = Epub.begin_segment_export{
+        book_path = book_path,
+        chapter_indexes = indexes,
+        titles = titles,
+    }
+    if not session then
+        TranslationUI.showInfo(_("导出失败：") .. tostring(open_err))
+        return
+    end
+    local total_chapters = session:chapter_count()
+    local progress_dialog = ProgressbarDialog:new{
+        title = _("正在导出 MCP 任务…"),
+        subtitle = string.format("章节：0/%d", total_chapters),
+        progress_max = 100,
+        refresh_time_seconds = 0.5,
+        dismissable = true,
+    }
+    -- Hiding the dialog (tap outside) must only hide it; the export keeps
+    -- running and its result still lands in the job list.
+    local progress_on_close = progress_dialog.onCloseWidget
+    function progress_dialog:onCloseWidget()
+        self._dualtranslate_hidden = true
+        return progress_on_close(self)
+    end
+    progress_dialog:show()
+
+    local function report(percentage, subtitle)
+        if progress_dialog._dualtranslate_hidden then return end
+        progress_dialog.title = string.format("%s  %d%%", _("正在导出 MCP 任务…"), percentage)
+        progress_dialog.subtitle = subtitle
+        pcall(function()
+            -- Update the TextWidgets in place; rebuilding the dialog tree on
+            -- every slice would allocate a new layout each turn.
+            local group = progress_dialog[1] and progress_dialog[1][1]
+            if group and group[1] and group[1].setText then
+                group[1]:setText(progress_dialog.title)
+            end
+            if group and group[2] and group[2].setText then
+                group[2]:setText(progress_dialog.subtitle)
+            end
+            progress_dialog:reportProgress(percentage)
+            UIManager:setDirty(progress_dialog, "ui")
+        end)
+    end
+
+    local function finish_with_error(message)
+        UIManager:close(progress_dialog)
+        TranslationUI.showInfo(message)
+    end
+
+    local step
+    step = function()
+        if session.aborted then return end
+        -- A malformed chapter must not leave a job_ directory behind, and must
+        -- not surface as an unhandled error inside a scheduled task.
+        local ok, step_err = pcall(session.step, session, 0.2)
+        if not ok then
+            session:abort()
+            finish_with_error(_("导出失败：") .. tostring(step_err))
+            return
+        end
+        local done = session:processed()
+        local percentage = total_chapters > 0
+            and math.floor(done * 100 / total_chapters + 0.5) or 0
+        if done < total_chapters then
+            report(percentage, string.format("章节：%d/%d", done, total_chapters))
+            UIManager:scheduleIn(0.01, step)
+            return
+        end
+        local collected, collect_err = session:finish()
+        if not collected then
+            finish_with_error(_("导出失败：") .. tostring(collect_err))
+            return
+        end
+        -- Encoding job.json walks every segment; label it so the last frame of
+        -- the bar does not look like a hang.
+        report(100, _("写入任务文件…"))
+        if UIManager.forceRePaint then UIManager:forceRePaint() end
         local result, err = Mcp.exportJob{
             book_path = book_path,
-            chapter_indexes = indexes,
-            titles = titles,
+            collected = collected,
             source_lang = self:getSourceLang(),
             target_lang = self:getTargetLang(),
-            epub = self.epub,
         }
+        UIManager:close(progress_dialog)
         if not result then
             TranslationUI.showInfo(_("导出失败：") .. tostring(err))
             return
@@ -455,7 +537,8 @@ function dualtranslate:exportMcpJob(indexes)
         TranslationUI.showInfo(string.format(
             _("已导出 MCP 任务 %s\n%d 章 · %d 段\n电脑端可读取 cache/dualtranslate/mcp/jobs/"),
             result.job_id, result.chapters, result.segments), 6)
-    end)
+    end
+    UIManager:scheduleIn(0.1, step)
 end
 
 function dualtranslate:importMcpResults()
