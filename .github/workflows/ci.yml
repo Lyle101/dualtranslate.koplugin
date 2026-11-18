@@ -21,14 +21,22 @@ jobs:
       # CI fetches the same runtime the device uses instead of stubbing them.
       # The Linux asset is a .tar.xz and unpacks to lib/koreader, not koreader/.
       - name: Download KOReader runtime
+        env:
+          # Authenticated API calls are allowed 5000/h instead of 60/h.  The
+          # unauthenticated limit is shared by every runner on the same egress
+          # address, and a 403 there failed the job before a single test ran.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          url=$(curl -sSf https://api.github.com/repos/koreader/koreader/releases/latest \
+          url=$(curl -sSf --retry 3 --retry-connrefused \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/koreader/koreader/releases/latest \
             | jq -r '.assets[] | select(.name | test("^koreader-linux-x86_64-.*\\.tar\\.xz$")) | .browser_download_url' \
             | head -1)
           echo "asset: $url"
           test -n "$url"
-          curl -sSfL -o koreader.tar.xz "$url"
+          curl -sSfL --retry 3 -o koreader.tar.xz "$url"
           mkdir -p runtime
           tar -xJf koreader.tar.xz -C runtime
           test -x runtime/lib/koreader/luajit
