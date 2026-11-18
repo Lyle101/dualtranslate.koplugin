@@ -438,23 +438,16 @@ function dualtranslate:exportMcpJob(indexes)
         TranslationUI.showInfo(_("导出失败：EPUB 模块未加载"))
         return
     end
-    -- Opening the archive is the one blocking step left (three passes over the
-    -- EPUB).  The chapter walk itself is sliced below: a whole book is ~600
-    -- chapters / 16k segments, and doing it in one call froze the screen for
-    -- tens of seconds with no progress and no way out (3.2.0).
-    local session, open_err = Epub.begin_segment_export{
-        book_path = book_path,
-        chapter_indexes = indexes,
-        titles = titles,
-    }
-    if not session then
-        TranslationUI.showInfo(_("导出失败：") .. tostring(open_err))
-        return
-    end
-    local total_chapters = session:chapter_count()
+    -- Opening the archive is the one blocking step left (three to four passes
+    -- over the EPUB; 2.6 s on the 646-chapter book).  The dialog goes up before
+    -- it, otherwise the tap looks dead until the first slice is scheduled.  The
+    -- chapter walk itself is sliced below: a whole book is ~600 chapters /
+    -- 16k segments, and doing it in one call froze the screen for tens of
+    -- seconds with no progress and no way out (3.2.0).
+    local total_chapters = 0
     local progress_dialog = ProgressbarDialog:new{
         title = _("正在导出 MCP 任务…"),
-        subtitle = string.format("章节：0/%d", total_chapters),
+        subtitle = _("正在打开 EPUB…"),
         progress_max = 100,
         refresh_time_seconds = 0.5,
         dismissable = true,
@@ -467,6 +460,20 @@ function dualtranslate:exportMcpJob(indexes)
         return progress_on_close(self)
     end
     progress_dialog:show()
+    if UIManager.forceRePaint then UIManager:forceRePaint() end
+
+    local session, open_err = Epub.begin_segment_export{
+        book_path = book_path,
+        chapter_indexes = indexes,
+        titles = titles,
+    }
+    if not session then
+        UIManager:close(progress_dialog)
+        TranslationUI.showInfo(_("导出失败：") .. tostring(open_err))
+        return
+    end
+    total_chapters = session:chapter_count()
+    progress_dialog.subtitle = string.format("章节：0/%d", total_chapters)
 
     local function report(percentage, subtitle)
         if progress_dialog._dualtranslate_hidden then return end
