@@ -46,6 +46,11 @@ reader 进程，macOS 的 SDL 版连 `socketutil → device` 都过不去（`SDL
 
 注意：
 - 测试读写 /tmp 下临时目录（/tmp/dt_data、/tmp/dt_state_test、/tmp/dualtranslate_epub_test 等）。
+- 用真实 KO_ROOT 的套件会在仓库根留下八个空目录（cache/ clipboard/ data/ ota/ plugins/
+  screenshots/ settings/ styletweaks/）：KOReader 的 `datastorage` 一被 require 就执行
+  `initDataDir()`，而测试里没有把数据目录指到别处的 reader 设置，解析出来就是 "."。
+  它们已收进 `.gitignore`（不进 `git status`）；想跑完连目录都不留，先在 shell 里
+  `export KO_HOME=/tmp/dt_kohome`（datastorage 优先读这个变量）。
 - migration_test.lua / store_delete_test.lua / p1c_switch_test.lua 用真实 SQLite；lock_test.lua /
   overlay_v3_test.lua / overlay_revision_test.lua / outline_test.lua 用真实 lfs + json。
   均依赖 KOReader 自带库（默认 /Applications/KOReader.app/Contents/koreader，可用 KO_ROOT 覆盖），

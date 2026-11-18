@@ -12,3 +12,15 @@ INLINE_EPUB.md
 # 系统与编辑器
 .DS_Store
 *.swp
+
+# KOReader 的 datastorage 在 require 时就 initDataDir()，数据目录解析成 "."
+# 时会在 cwd（仓库根）建出这些空目录。测试用 KO_ROOT 里的真实运行时就必然触发，
+# CI 是临时 checkout 看不出问题，本机跑过一遍就脏目录。
+/cache/
+/clipboard/
+/data/
+/ota/
+/plugins/
+/screenshots/
+/settings/
+/styletweaks/
