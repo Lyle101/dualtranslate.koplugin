@@ -457,6 +457,9 @@ function dualtranslate:exportMcpJob(indexes)
     local progress_on_close = progress_dialog.onCloseWidget
     function progress_dialog:onCloseWidget()
         self._dualtranslate_hidden = true
+        -- Same reason as in _runTranslation: a hide-by-tap must repaint the
+        -- page, or the bar stays on screen while the export keeps running.
+        UIManager:setDirty(nil, "ui")
         return progress_on_close(self)
     end
     progress_dialog:show()
@@ -779,6 +782,10 @@ function dualtranslate:_runTranslation(item)
             local progress_on_close = progress_dialog.onCloseWidget
             function progress_dialog:onCloseWidget()
                 self._dualtranslate_hidden = true
+                -- Tapping outside hides the dialog through UIManager:close()
+                -- without a refresh type, which enqueues nothing: the bar
+                -- would stay painted over the page for the whole run.
+                UIManager:setDirty(nil, "ui")
                 return progress_on_close(self)
             end
             -- Tap on the dialog body opens the cancel-actions dialog; tap
@@ -803,7 +810,7 @@ function dualtranslate:_runTranslation(item)
                                 is_enter_default = true,
                                 callback = function()
                                     UIManager:close(action_dialog)
-                                    UIManager:close(progress_dialog, "ui")
+                                    UIManager:close(progress_dialog, "partial")
                                     dualtranslate:cancelTranslation(item)
                                     UIManager:show(Notification:new{
                                         text = "正在停止翻译…\n（当前批次完成后停止）",
@@ -942,7 +949,7 @@ function dualtranslate:_runTranslation(item)
                 item.status = "failed"
                 item.error = "翻译已中断"
                 self:saveTranslationQueue()
-                pcall(function() UIManager:close(progress_dialog, "ui") end)
+                pcall(function() UIManager:close(progress_dialog, "partial") end)
                 if was_hidden and not self._translation_retry_after_hide then
                     -- A dismissed status widget must not turn into a false
                     -- interruption.  Retry once in the background because
@@ -991,7 +998,7 @@ function dualtranslate:_runTranslation(item)
                     item.status = "queued"
                     item.error = nil
                     self:saveTranslationQueue()
-                    pcall(function() UIManager:close(progress_dialog, "ui") end)
+                    pcall(function() UIManager:close(progress_dialog, "partial") end)
                     logger.warn("dualtranslate: full-book worker returned no result; retrying once")
                     UIManager:scheduleIn(1, function()
                         self:startNextQueuedTranslation()
@@ -1002,7 +1009,7 @@ function dualtranslate:_runTranslation(item)
                 item.error = (result and result.error)
                     or "翻译进程未返回结果（可能内存不足或进程被终止），请查看日志后重试"
                 self:saveTranslationQueue()
-                pcall(function() UIManager:close(progress_dialog, "ui") end)
+                pcall(function() UIManager:close(progress_dialog, "partial") end)
                 if mode == "all" then
                     -- Do not interrupt reading for a background full-book
                     -- failure.  The queue entry keeps the error and can be
@@ -1031,7 +1038,7 @@ function dualtranslate:_runTranslation(item)
                     end
                 end
                 self:saveTranslationQueue()
-                pcall(function() UIManager:close(progress_dialog, "ui") end)
+                pcall(function() UIManager:close(progress_dialog, "partial") end)
                 if not item.silent then
                     UIManager:show(Notification:new{ text = "已取消翻译。", timeout = 2 })
                 end
@@ -1055,7 +1062,7 @@ function dualtranslate:_runTranslation(item)
                 progress_active = false
                 self._translation_progress.active = false
                 self._page_translation_follow_active = nil
-                pcall(function() UIManager:close(progress_dialog, "ui") end)
+                pcall(function() UIManager:close(progress_dialog, "partial") end)
                 self:offerEngineFallback(item, result)
                 return
             end
@@ -1069,7 +1076,7 @@ function dualtranslate:_runTranslation(item)
                     item.status = "queued"
                     item.error = "有段落翻译失败，正在自动续跑"
                     self:saveTranslationQueue()
-                    pcall(function() UIManager:close(progress_dialog, "ui") end)
+                    pcall(function() UIManager:close(progress_dialog, "partial") end)
                     UIManager:scheduleIn(1, function()
                         self:startNextQueuedTranslation()
                     end)
@@ -1078,7 +1085,7 @@ function dualtranslate:_runTranslation(item)
                 item.status = "failed"
                 item.error = string.format("仍有 %d 个段落未翻译，可从队列重试", result_failed)
                 self:saveTranslationQueue()
-                pcall(function() UIManager:close(progress_dialog, "ui") end)
+                pcall(function() UIManager:close(progress_dialog, "partial") end)
                 self:startNextQueuedTranslation()
                 return
             end
@@ -1105,7 +1112,7 @@ function dualtranslate:_runTranslation(item)
                     break
                 end
             end
-            pcall(function() UIManager:close(progress_dialog, "ui") end)
+            pcall(function() UIManager:close(progress_dialog, "partial") end)
             if not item.silent and not item.auto then
                 local done_text = string.format("翻译完成\n已翻译段落：%d\n失败段落：%d",
                     result.translated or 0, result.failed or 0)
@@ -1136,7 +1143,7 @@ function dualtranslate:_runTranslation(item)
             item.status = "failed"
             item.error = "翻译进程异常退出，请查看日志后重试"
             self:saveTranslationQueue()
-            pcall(function() UIManager:close(progress_dialog, "ui") end)
+            pcall(function() UIManager:close(progress_dialog, "partial") end)
             logger.warn("dualtranslate: translation worker failed:", wrapped_ok)
             if not item.silent then
                 UIManager:show(Notification:new{
@@ -1330,7 +1337,11 @@ function dualtranslate:translateTextBatchForEpub(texts, contexts)
     -- per request is four minutes of "0%" before the engine failover could
     -- even see the first error.
     if not Providers.has_batch(mode) then
-        return nil, _("该引擎不支持批量翻译")
+        -- No second value on purpose: translate_overlay keeps the first error
+        -- it sees (first_error = first_error or ...), so returning a string
+        -- here would replace the real per-paragraph failure (timeout, 429)
+        -- with "this engine has no batch endpoint" in the failover dialog.
+        return nil
     end
 
     local results = {}

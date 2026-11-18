@@ -291,9 +291,21 @@ do
     -- 界面卡在 0% 四分钟，引擎降级永远看不到第一次失败。
     plugin.getMode = function() return "system" end
     stores = {}
+    -- Wrap the per-paragraph path so "did the wrapper translate anything"
+    -- is measured directly, not inferred from the absence of DB writes.
+    local single_calls = 0
+    local real_single = plugin.translateTextForEpub
+    plugin.translateTextForEpub = function(first, ...)
+        single_calls = single_calls + 1
+        return real_single(first, ...)
+    end
     local r2, b2 = plugin:translateTextBatchForEpub({ "cc" }, { { selector = "c[1]", chapter_index = 2 } })
-    check("无批量端点回 nil", r2 == nil and b2 ~= nil, tostring(b2))
-    check("包装层没有偷偷逐段翻译", #stores == 0, tostring(#stores))
+    plugin.translateTextForEpub = real_single
+    -- 也不返回错误串：translate_overlay 只保留第一个错误，这里编一条
+    -- 「该引擎不支持批量翻译」会盖掉真正的逐段失败（超时 / 429）。
+    check("无批量端点回 nil 且不伪造错误", r2 == nil and b2 == nil, tostring(b2))
+    check("包装层没有偷偷逐段翻译", single_calls == 0, tostring(single_calls))
+    check("也没有写库", #stores == 0, tostring(#stores))
 end
 
 print(string.format("\n==== context 结果：%d 通过，%d 失败 ====", passed, failed))
