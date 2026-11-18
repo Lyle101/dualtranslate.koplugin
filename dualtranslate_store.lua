@@ -635,6 +635,10 @@ function Store.importResult(job, result, opts)
                 entry_index[entry.selector] = #entries
             end
         end
+        -- Same rule as the checkpoint path: an import may bring the 3.2.0
+        -- child-list anchor while the file still holds the 3.1.0 shape, and the
+        -- manifest count below must not see both.
+        entries = Overlay.dedupeEntries(entries)
         if not Overlay.saveEntries(dir, provider_id, {
             target_lang = target_lang, entries = entries,
         }) then
@@ -875,6 +879,9 @@ local function rebuild_entries_from_db(cache, dir, book_path, target_lang, provi
         end
     end
     if #entries == 0 then return nil end
+    -- Rows written by 3.1.x carry the old <li>/::before selector for a list
+    -- parent; collapse them so the rebuilt file and its count agree.
+    entries = Overlay.dedupeEntries(entries)
     if not Overlay.saveEntries(dir, provider_id, {
         target_lang = target_lang, entries = entries,
     }) then

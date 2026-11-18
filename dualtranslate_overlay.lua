@@ -109,6 +109,45 @@ local function count_unique_selectors(entries)
     return count
 end
 
+-- A list parent's translation has been anchored on three different nodes
+-- across releases: the <li> itself (3.0.x), its ::before (3.1.0) and the
+-- child <ol>/<ul> (3.2.0, the only point that sits between the parent's text
+-- and its first child).  All three describe the same paragraph, so an entry
+-- written by an older build would render the same translation a second time
+-- once a re-translation merges the new shape next to it.  The identity is the
+-- element that owns the text: strip the pseudo-element, and for a child-list
+-- anchor also the list step itself.
+local function entry_identity(selector)
+    local base = selector:gsub("::[%a%-]+$", "")
+    return (base:gsub(" > [ou]l:nth%-of%-type%(%d+%)$", ""))
+end
+
+-- Collapse the stale shapes of one paragraph into the newest one.  Writers
+-- append the newer shape after the older one (disk before this run, existing
+-- rows before the import), so the last entry seen wins; it keeps the position
+-- of the first so re-translating a chapter updates entries in place instead of
+-- shifting the whole file.
+function Overlay.dedupeEntries(entries)
+    if type(entries) ~= "table" then return entries end
+    local position, out = {}, {}
+    for _, entry in ipairs(entries) do
+        local selector = type(entry) == "table" and entry.selector or nil
+        if type(selector) ~= "string" or selector == "" then
+            out[#out + 1] = entry
+        else
+            local key = entry_identity(selector)
+            local at = position[key]
+            if at then
+                out[at] = entry
+            else
+                out[#out + 1] = entry
+                position[key] = #out
+            end
+        end
+    end
+    return out
+end
+
 local function css_string(value)
     value = tostring(value or "")
     value = value:gsub("\\", "\\\\"):gsub('"', '\\"')
@@ -187,6 +226,10 @@ function Overlay.loadEntries(dir, provider_id)
     if not data or data.version ~= 3 or type(data.entries) ~= "table" then
         return nil
     end
+    -- Entries written before 3.2.0 may hold two shapes of the same paragraph;
+    -- reading through the same rule as the writers means an upgraded book stops
+    -- drawing both layers before it is ever re-translated.
+    data.entries = Overlay.dedupeEntries(data.entries)
     return data
 end
 
@@ -199,6 +242,7 @@ function Overlay.saveEntries(dir, provider_id, entries_doc)
     end
     local entries = entries_doc.entries
     if type(entries) ~= "table" then entries = entries_doc end
+    entries = Overlay.dedupeEntries(entries)
     local manifest = Overlay.loadManifest(dir)
     local doc = {
         version = 3,

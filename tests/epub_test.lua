@@ -259,6 +259,9 @@ do
             load = function(path) return nil end,
             loadManifest = function() return nil end,
             loadEntries = function() return nil end,
+            -- 3.2.0: checkpoint 按「归属元素」去重后才计数；本测试的样例没有
+            -- 重复形态，桩直接原样返回（去重规则本身在 overlay_v3_test 覆盖）。
+            dedupeEntries = function(entries) return entries end,
         }
     end
     -- 重新加载 Epub（Tools mock 变了；require 缓存也要清）

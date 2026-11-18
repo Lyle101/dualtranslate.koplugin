@@ -74,6 +74,8 @@ do
             exists = function() return false end,
             saveEntries = function(_, pid, doc) saved_entries = doc.entries return true end,
             saveManifest = function(_, m) saved_manifest = m return true end,
+            -- 3.2.0: checkpoint 去重后计数；样例无重复形态，桩原样返回
+            dedupeEntries = function(entries) return entries end,
         }
     end
     package.preload["dualtranslate_lock"] = function()

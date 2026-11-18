@@ -259,6 +259,49 @@ do
 end
 
 -- ============================================================
+print("== 1b. 同一段落的旧 selector 形态去重（3.2.0）==")
+do
+    local dir = newDir("dedupe")
+    makeManifest(dir)
+    local li = 'DocFragment[Source="a.xhtml"] > body > ol:nth-of-type(1) > li:nth-of-type(2)'
+    -- 三代形态：3.0.x 的裸 li、3.1.0 的 li::before、3.2.0 的子列表 ::before。
+    -- 同一个段落在升级后重译时会被追加成三条，渲染就是三份译文。
+    local deduped = Overlay.dedupeEntries({
+        entry(li, "旧一"),
+        entry(li .. "::before", "旧二"),
+        entry(li .. " > ol:nth-of-type(1)::before", "新"),
+        entry(li .. " > ol:nth-of-type(1) > li:nth-of-type(1)", "子项"),
+    })
+    check("同一父项只留一条", #deduped == 2, tostring(#deduped))
+    check("保留最新形态", deduped[1].selector == li .. " > ol:nth-of-type(1)::before",
+        deduped[1] and deduped[1].selector)
+    check("最新译文的正文", deduped[1].translation == "新")
+    check("保留首次出现的位置", deduped[2].translation == "子项")
+    check("子项与父项不互相吞并", deduped[2].selector:find("> li:nth%-of%-type%(1%)$") ~= nil)
+
+    -- 普通段落只按自身去重（伪元素剥离后仍是同一段）
+    local p = 'DocFragment[Source="a.xhtml"] > body > p:nth-of-type(3)'
+    local plain = Overlay.dedupeEntries({ entry(p, "甲"), entry(p, "乙") })
+    check("同 selector 覆盖", #plain == 1 and plain[1].translation == "乙")
+
+    -- 读路径也要收敛：3.1.x 写下的双形态文件，升级后一打开就该只剩一份
+    Overlay.saveEntries(dir, "system", {
+        target_lang = "zh-Hans",
+        entries = { entry(li, "旧"), entry(li .. " > ol:nth-of-type(1)::before", "新") },
+    })
+    local doc = Overlay.loadEntries(dir, "system")
+    check("loadEntries 收敛旧形态", doc and #doc.entries == 1, doc and tostring(#doc.entries))
+    check("loadEntries 取最新形态", doc and doc.entries[1].translation == "新")
+    local css = Overlay.buildCss(dir .. "/manifest.json", {
+        translation_visible = true, provider = "system" })
+    check("CSS 只画一条", select(2, css:gsub("content:", "")) == 1,
+        tostring(select(2, css:gsub("content:", ""))))
+
+    check("非表输入原样返回", Overlay.dedupeEntries(nil) == nil)
+    check("缺 selector 的条目保留", #Overlay.dedupeEntries({ { translation = "x" } }) == 1)
+end
+
+-- ============================================================
 print("== 2. slug 文件名 / deleteEntries / intent ==")
 do
     local dir = newDir("slug")
@@ -596,7 +639,11 @@ do
     check("translated_count 唯一 selector", manifest and manifest.providers.system.translated_count == 2,
         manifest and tostring(manifest.providers.system.translated_count))
     local doc = Overlay.loadEntries(dir, "system")
-    check("空 selector 条目被过滤", #doc.entries == 3)
+    -- v2 里同 selector 出现两次是历史遗留（3.2.0 起按形态去重），
+    -- 空 selector 的两个条目一个被过滤、一个只有 selector="" 也在迁移时丢掉。
+    check("空 selector 条目被过滤", #doc.entries == 2, doc and tostring(#doc.entries))
+    check("遗留重复 selector 收敛为最后一条", doc.entries[1].translation == "重复",
+        doc.entries[1] and doc.entries[1].translation)
     check("条目保留 source/xpointer 字段形状", doc.entries[1].source == "src")
 end
 

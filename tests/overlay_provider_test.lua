@@ -75,6 +75,8 @@ package.preload["dualtranslate_overlay"] = function()
             end
             return true
         end,
+        -- 3.2.0: checkpoint 合并后按「归属元素」去重；样例无重复形态
+        dedupeEntries = function(entries) return entries end,
     }
 end
 package.preload["dualtranslate_lock"] = function()

@@ -726,6 +726,11 @@ function Epub.translate_overlay(opts, ...)
                 end
             end
             if #merged == 0 and not allow_empty then return true end
+            -- One paragraph, one entry: an overlay written by 3.1.x still holds
+            -- the <li>/::before shape next to this run's child-list anchor, and
+            -- both would be drawn (3.2.0).  Dedupe before counting so the
+            -- manifest's translated_count matches the file.
+            merged = Overlay.dedupeEntries(merged)
             local manifest = Overlay.loadManifest(output_dir) or fresh_manifest()
             manifest.providers = manifest.providers or {}
             local existing = manifest.providers[provider]
@@ -754,6 +759,7 @@ function Epub.translate_overlay(opts, ...)
                 local ldisk = Overlay.loadEntries(output_dir, legacy_pid)
                 merge_entries(lmerged, lindex, ldisk and ldisk.entries)
                 merge_entries(lmerged, lindex, legacy_doc.entries)
+                lmerged = Overlay.dedupeEntries(lmerged)
                 if #lmerged > 0 then
                     local lexisting = manifest.providers[legacy_pid]
                     local legacy_chapters = legacy_pid ~= "legacy"
