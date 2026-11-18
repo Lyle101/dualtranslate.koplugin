@@ -5,7 +5,7 @@ stdin, so a book path with spaces or quotes never goes through shell splitting
 or an SSH command string.  The read key is locked to a read-only command
 whitelist by its forced command; the write key may run everything.  A transport
 that cannot execute dtctl (a USB mount) raises HeadlessUnavailable, and the job
-layer falls back to the inbox.
+layer is a local directory instead.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from .models import validate_job
 
 JOB_ID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
 CAT_NAMES = {"job.json", "state.json", "result.json", "result.partial.json"}
-CM_FLAGS = {"context", "inbox", "allow-partial"}
+CM_FLAGS = {"context", "allow-partial"}
 # list-providers opens the cache DB, and opening a v2 DB migrates it (a
 # write), so that command needs the write key (design 10.3).
 READ_COMMANDS = frozenset({"list-jobs", "job-status", "get-segments", "cat"})
@@ -36,13 +36,11 @@ class TransportError(RuntimeError):
 
 
 class HeadlessUnavailable(TransportError):
-    """This transport cannot execute dtctl; callers must use the inbox."""
+    """This transport cannot execute dtctl, so it cannot commit a job."""
 
 
 class Transport(Protocol):
     def rpc(self, argv: list[str], stdin: bytes | None = None) -> dict: ...
-
-    def write_inbox(self, job_id: str, payload: bytes) -> str: ...
 
 
 def parse_command_options(argv: list[str]) -> dict:
@@ -68,15 +66,14 @@ def parse_command_options(argv: list[str]) -> dict:
 class LocalTransport:
     """A directory that looks like the device's data dir (tests, USB mount).
 
-    Reads and writes work; ``dtctl`` raises HeadlessUnavailable, which is
-    exactly the USB case the inbox fallback exists for.
+    Reads and writes work; ``dtctl`` raises HeadlessUnavailable, so a job can
+    be inspected but never committed through this transport.
     """
 
     def __init__(self, ko_root: str, local_root: str):
         self.ko_root = ko_root.rstrip("/")
         self.root = Path(local_root).resolve()
         self.jobs_root = f"{self.ko_root}/cache/dualtranslate/mcp/jobs"
-        self.inbox_root = f"{self.ko_root}/cache/dualtranslate/mcp/inbox"
 
     def _path(self, remote_path: str) -> Path:
         # Device-absolute paths are rebased under local_root: the caller can use
@@ -226,14 +223,6 @@ class LocalTransport:
             "bytes": len(content.encode("utf-8")), "content": content,
         }
 
-    def write_inbox(self, job_id: str, payload: bytes) -> str:
-        device_path = f"{self.ko_root}/cache/dualtranslate/mcp/inbox/{job_id}.json"
-        path = self._path(device_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
-        return device_path
-
-
 def parse_sftp_ls(output: str) -> list[str]:
     """Parse the stdout of `sftp -b -`.
 
@@ -326,17 +315,6 @@ class SshTransport:
                 f"ssh command timed out after {limit}s; the device may still be "
                 "writing — check dt_list_providers before retrying"
             ) from error
-
-    def write_inbox(self, job_id: str, payload: bytes) -> str:
-        device_path = f"{self.config.inbox_root}/{job_id}.json"
-        reply = self.rpc(
-            ["put", "--job", f"{self.config.jobs_root}/{job_id}/job.json", "--inbox"],
-            stdin=payload,
-        )
-        # dtctl answers with the path it actually wrote; fall back only when an
-        # older device build omits it.
-        return reply.get("path") or device_path
-
 
 def _parse_dtctl_reply(result: subprocess.CompletedProcess) -> dict:
     stdout = result.stdout.decode(errors="replace").strip()

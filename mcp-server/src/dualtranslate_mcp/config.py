@@ -63,10 +63,6 @@ class Config:
         # same job path works for a mounted Kindle and a test directory.
         return f"{self.ko_root}{JOBS_SUBDIR}"
 
-    @property
-    def inbox_root(self) -> str:
-        return self.jobs_root.rsplit("/", 1)[0] + "/inbox"
-
     @classmethod
     def load(cls) -> "Config":
         config = cls()

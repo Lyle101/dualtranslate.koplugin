@@ -5,8 +5,8 @@ translations (a small working copy) and never downloads the whole job: the
 device paginates segments and reports the id list, so a ten-thousand segment
 book costs kilobytes per page instead of megabytes.
 
-When the transport cannot execute dtctl (a USB mount), commit falls back to
-writing the result into the inbox, which the plugin imports on its next open.
+A transport that cannot execute dtctl (a USB mount) can inspect a job but
+cannot commit it: the plugin has no device-side import any more.
 """
 
 from __future__ import annotations
@@ -297,16 +297,18 @@ class JobService:
 
         upload = self._upload(job_id, "result.json", result)
         if upload != "uploaded":
-            # No dtctl: park the result in the inbox and let the plugin import
-            # it on the next open (design 10.5 fallback).
-            inbox_id = self.transport.write_inbox(
-                job_id, json.dumps(result, ensure_ascii=False).encode("utf-8")
-            )
+            # There is no device-side inbox any more: a job is only committed
+            # through dtctl over SSH.  Saying so beats parking the file where
+            # nothing will ever read it.
             return {
-                "ok": True,
-                "status": "pending_import",
+                "ok": False,
+                "status": "import_unavailable",
                 "job_id": job_id,
-                "inbox": inbox_id,
+                "message": (
+                    "this transport cannot run dtctl on the device, so the result "
+                    "cannot be imported; configure the ssh transport "
+                    "(read_key/write_key) or run dtctl import by hand"
+                ),
                 "translated": len(result["translations"]),
             }
 

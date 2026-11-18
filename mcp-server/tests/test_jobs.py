@@ -163,7 +163,8 @@ def test_commit_rejects_incomplete_job(service: JobService) -> None:
     assert reply["remaining"] == 2
 
 
-def test_commit_falls_back_to_inbox(service: JobService, tmp_path: Path) -> None:
+def test_commit_without_dtctl_reports_error(service: JobService) -> None:
+    """A transport that cannot run dtctl must say so, not park the result."""
     state = service.confirm_model(JOB_ID, "GPT-5")
     assert state["provider_id"] == "mcp:gpt-5"
     service.submit(
@@ -175,13 +176,10 @@ def test_commit_falls_back_to_inbox(service: JobService, tmp_path: Path) -> None
         ],
     )
     reply = service.commit(JOB_ID)
-    assert reply["ok"] is True
-    assert reply["status"] == "pending_import"
-    inbox = tmp_path / "device/cache/dualtranslate/mcp/inbox" / f"{JOB_ID}.json"
-    assert inbox.exists()
-    document = json.loads(inbox.read_text(encoding="utf-8"))
-    assert document["provider"]["provider_id"] == "mcp:gpt-5"
-    assert len(document["translations"]) == 3
+    assert reply["ok"] is False
+    assert reply["status"] == "import_unavailable"
+    assert "dtctl" in reply["message"]
+    assert reply["translated"] == 3
 
 
 def test_build_result_keeps_job_order(service: JobService) -> None:
