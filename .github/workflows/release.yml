@@ -1,0 +1,70 @@
+name: Release
+
+# A plugin release is a tag plus one zip: users unzip it into plugins/ and
+# restart KOReader.  Building it here keeps the artifact in step with the tag
+# (the workflow refuses a tag that disagrees with _meta.lua) and saves every
+# contributor from hand-rolling the same tar command.
+on:
+  push:
+    tags: ["v*"]
+  # Backfill path: tags pushed before this workflow existed (v3.2.0) can be
+  # published from the Actions tab without re-tagging the commit.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v3.2.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          set -eu
+          tag="${{ inputs.tag || github.ref_name }}"
+          test -n "$tag"
+          echo "name=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      # A zip that says 3.2.0 while the tag says 3.2.1 is the kind of mistake
+      # nobody notices until a user reports the wrong version.
+      - name: Tag and _meta.lua must agree
+        run: |
+          set -eu
+          version=$(sed -n 's/.*version = "\([^"]*\)".*/\1/p' _meta.lua | head -1)
+          echo "tag=${{ steps.tag.outputs.name }} _meta=$version"
+          test "v$version" = "${{ steps.tag.outputs.name }}"
+
+      # Same contents the README's packaging command lists: the runtime plugin
+      # only (no tests/, no mcp-server/, no migration config).
+      - name: Build dualtranslate.koplugin.zip
+        run: |
+          set -eu
+          rm -rf build
+          mkdir -p build/dualtranslate.koplugin
+          cp ./*.lua README.md LICENSE XPLATFORM.md CHANGELOG.md build/dualtranslate.koplugin/
+          cp -r tools build/dualtranslate.koplugin/tools
+          (cd build && zip -qr dualtranslate.koplugin.zip dualtranslate.koplugin)
+          unzip -l build/dualtranslate.koplugin.zip | tail -3
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${{ steps.tag.outputs.name }}"
+          asset=build/dualtranslate.koplugin.zip
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" --title "$tag" --generate-notes
+          fi

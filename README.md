@@ -91,7 +91,7 @@ KOReader 的插件目录是安装根目录下的 `plugins/` 文件夹，目录�
 
 ### MCP 外部翻译（可选）
 
-设备端只负责导出与导入，翻译由电脑端完成：
+设备端只负责导出，翻译与回传都由电脑端完成：
 
 ```
 设备：导出所选章节
@@ -108,8 +108,8 @@ PC（只读 key）                 PC（写 key）
 
 1. **导出**：「MCP 外部翻译 → 导出所选章节…」，确认隐私提示后任务写入 `cache/dualtranslate/mcp/jobs/<job_id>/job.json`（含原文，供电脑端读取）。
 2. **电脑端**：安装 `mcp-server/`（`pip install -e mcp-server`），按 `mcp-server/config.example.toml` 配置 SSH 双 key，在 MCP 客户端里使用 `dt_list_jobs` / `dt_get_segments` / `dt_confirm_model` / `dt_submit_translations` / `dt_commit_job`。模型名称必须由用户确认。
-3. **回传**：`dt_commit_job` 经 `tools/dtctl.sh rpc` 写入设备；设备上没有 SSH 时把 `result.json` 放进 `cache/dualtranslate/mcp/inbox/<job_id>.json`，再用「MCP 外部翻译 → 导入结果」。
-4. **显示**：导入后书页可选是否切换显示；翻页会自动读取 `reload.signal` 刷新。
+3. **回传**：`dt_commit_job` 经 `tools/dtctl.sh rpc` 直接写入设备（SQLite + entries + manifest），设备端不再有「导入结果」这一步；写不进去时工具会明确报错，而不是把结果丢在一个没人读的目录里。
+4. **显示**：翻页会自动读取 `reload.signal` 刷新；想换看另一个服务的译文，用「管理译文 → 显示译文」。
 
 **SSH 双 key 的边界**：Kindle 的 `/mnt/us` 是 world-writable 的 FUSE 挂载，`ChrootDirectory` 不可用，所以「只读」不靠 chroot，而靠 authorized_keys 的强制命令：
 
@@ -128,7 +128,7 @@ command=".../tools/dtctl.sh rpc",no-pty,...            ssh-ed25519 AAAA... dualt
 
 - 译文数据：KOReader 数据目录 `cache/dualtranslate/books/<hash>/` 下的 `manifest.json`（服务列表、完成度、显示选择）与 `entries/<provider>.json`（各服务的译文条目）；旧版 `overlay.json` 迁移后保留为 `overlay.v2.bak`
 - 译文数据库：KOReader 数据目录 `dualtranslate_cache.sqlite3`（WAL 模式）
-- MCP 任务：`cache/dualtranslate/mcp/jobs/<job_id>/`（`job.json` 含原文、`state.json`、`result.json`）与 `cache/dualtranslate/mcp/inbox/`
+- MCP 任务：`cache/dualtranslate/mcp/jobs/<job_id>/`（`job.json` 含原文、`state.json`、`result.json`）
 - 进度文件：`cache/dualtranslate/progress_*.txt`
 - 配置：KOReader 原生 `settings/dualtranslate.lua`（`dualtranslate_` 前缀键），旧版 `dualtranslate_configuration.lua` 自动迁移
 
@@ -155,7 +155,7 @@ lua tests/callcheck.lua
 lua tests/queueui_test.lua
 lua tests/clear_test.lua
 lua tests/mcp_job_test.lua      # MCP 任务导出（需 KO_ROOT）
-lua tests/mcp_import_test.lua   # MCP 收件箱导入（需真实 SQLite）
+lua tests/mcp_import_test.lua   # MCP 结果导入（需真实 SQLite）
 lua tests/mcp_menu_test.lua     # MCP 菜单与 reload seq
 lua tests/dtctl_test.lua        # headless CLI（真实子进程）
 
