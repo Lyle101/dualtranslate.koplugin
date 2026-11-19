@@ -1,6 +1,10 @@
--- ChapterPickerDialog (design 7.1 / 12.3): multi-select over the EPUB spine.
--- Selection is per book, lives only in this dialog's state and is handed to
--- the queue as `mode = "selection"` (7.3); nothing is persisted as a setting.
+-- ChapterPickerDialog (design 7.1 / 12.3): multi-select over the EPUB outline.
+-- Rows are TOC entries when several chapters live in one XHTML (each entry
+-- keeps its anchor), otherwise spine files.  Selection is per book, lives
+-- only in this dialog's state and is handed to the queue as `mode =
+-- "selection"` (7.3); nothing is persisted as a setting.  A job still
+-- translates whole files, so the row selection resolves to the distinct
+-- spine indexes behind it.
 --
 -- Layout note: the chapter list uses the native Menu pagination instead of a
 -- hard 30-per-page slice.  Menu's per-page count also drives its item font
@@ -39,30 +43,86 @@ function Picker.truncate_title(title, max_chars)
 end
 
 -- 7.2: TOC entries map onto spine indexes, but a TOC rarely covers every
--- spine item (cover, title page, colophon).  The picker must still offer every
--- chapter, so gaps fall back to "第 N 节" instead of disappearing from the list.
+-- spine item (cover, title page, colophon).  Without a TOC the picker falls
+-- back to one row per spine file so nothing disappears from the list.
 --
--- `toc_entries` is how many TOC labels landed on this spine item (1 = just the
--- title, >1 = the file holds several chapters).  Scanned/PDF-derived EPUBs put
--- dozens of chapters in one XHTML and anchor every NCX navPoint inside it, so
--- the list legitimately shows fewer rows than the reader's own TOC; the status
--- line uses this sum to say so instead of looking truncated.
+-- Two granularities.  When the TOC puts several chapters in one XHTML (the
+-- scanned / PDF-converted shape: 790 entries over 331 files) each entry gets
+-- its own row, numbered `file.sub`, instead of 331 merged rows.  A TOC with
+-- one entry per file is already the file list, and a coarse TOC must not hide
+-- the chapters between its few entries, so those books keep one row per spine
+-- file with gaps filled by "第 N 节".
+--
+-- In entry mode files no TOC entry points at get no row.  In a book of this
+-- shape they are assumed to be the continuation of a chapter anchored earlier
+-- (the reader's TOC hides them too); an unlisted standalone file (cover,
+-- colophon) is therefore also unreachable from this dialog, while whole-book
+-- translation still covers it.
+--
+-- `key` is the row's position and the only thing `state.selected` is keyed
+-- by; `index` is the spine file the selection resolves to.  `toc_entries` is
+-- how many TOC labels landed on that file (1 = just the title, >1 = the file
+-- holds several chapters).
 function Picker.chapters(outline)
     if type(outline) ~= "table" then return {} end
-    local by_index = {}
+    local entries = type(outline.entries) == "table" and outline.entries or {}
+    local chapters = {}
+    -- Group by file so the rows that share one translation unit sit
+    -- together, and walk the files in spine order.
+    local by_index, order, entry_count, has_anchor = {}, {}, 0, false
+    for _, entry in ipairs(entries) do
+        local index = tonumber(entry.index)
+        if index and index >= 1 and index == math.floor(index) then
+            entry_count = entry_count + 1
+            if entry.anchor then has_anchor = true end
+            local bucket = by_index[index]
+            if not bucket then
+                bucket = { entries = {} }
+                by_index[index] = bucket
+                order[#order + 1] = index
+            end
+            bucket.entries[#bucket.entries + 1] = entry
+        end
+    end
+    -- Only a TOC that puts several chapters in one file needs the entry view,
+    -- and only if it can say where inside the file each one starts.  A
+    -- one-entry-per-file TOC is already the file list, a coarse TOC (a few
+    -- parts over a hundred files) must not hide the chapters between them,
+    -- and repeated entries without anchors would just drop every other file.
+    if #order < entry_count and has_anchor then
+        table.sort(order)
+        for _, index in ipairs(order) do
+            local bucket = by_index[index]
+            local total = #bucket.entries
+            for sub, entry in ipairs(bucket.entries) do
+                chapters[#chapters + 1] = {
+                    key = #chapters + 1,
+                    index = index,
+                    -- A single-entry file keeps the plain "12." numbering.
+                    sub = total > 1 and sub or nil,
+                    toc_entries = total,
+                    anchor = entry.anchor,
+                    title = entry.title,
+                    level = tonumber(entry.level) or 0,
+                }
+            end
+        end
+        return chapters
+    end
+    local by_chapter = {}
     local count = tonumber(outline.spine_count) or 0
     for _, chapter in ipairs(outline.chapters or {}) do
         local index = tonumber(chapter.index)
         if index and index >= 1 and index == math.floor(index) then
-            if not by_index[index] then by_index[index] = chapter end
+            if not by_chapter[index] then by_chapter[index] = chapter end
             if index > count then count = index end
         end
     end
-    local chapters = {}
     for index = 1, count do
-        local chapter = by_index[index]
+        local chapter = by_chapter[index]
         local aliases = chapter and chapter.aliases
         chapters[#chapters + 1] = {
+            key = #chapters + 1,
             index = index,
             title = chapter and chapter.title or string.format(_("第 %d 节"), index),
             level = chapter and chapter.level or 0,
@@ -74,9 +134,23 @@ end
 
 function Picker.new_state(outline, coverage)
     local chapters = Picker.chapters(outline)
-    local toc_total = 0
-    for _, chapter in ipairs(chapters) do toc_total = toc_total + (chapter.toc_entries or 0) end
-    local state = { chapters = chapters, selected = {}, toc_total = toc_total }
+    -- Count TOC labels per file, not per row: in entry mode every row of a
+    -- file repeats its `toc_entries`, and summing rows would report 790
+    -- chapters as 1976.
+    local toc_total, files = 0, {}
+    local file_count = 0
+    for _, chapter in ipairs(chapters) do
+        if not files[chapter.index] then
+            files[chapter.index] = true
+            file_count = file_count + 1
+            toc_total = toc_total + (chapter.toc_entries or 0)
+        end
+    end
+    local state = { chapters = chapters, selected = {}, toc_total = toc_total,
+        file_count = file_count,
+        -- One row per TOC entry rather than per file; the label and status
+        -- wording switch on this instead of re-deriving it from the numbers.
+        entry_mode = file_count > 0 and file_count < #chapters }
     -- Coverage comes from the engine selected in the menu (12.2), not from
     -- whatever happens to be displayed on the page.
     if coverage then
@@ -85,6 +159,20 @@ function Picker.new_state(outline, coverage)
         state.engine_label = coverage.label
     end
     return state
+end
+
+-- How many spine files carry a finished translation.  In entry mode one file
+-- contributes several rows, so counting rows would report a single translated
+-- file as a dozen translated chapters.
+function Picker.translated_files(state)
+    local seen, total = {}, 0
+    for _, chapter in ipairs(state.chapters or {}) do
+        if state.full and state.full[chapter.index] and not seen[chapter.index] then
+            seen[chapter.index] = true
+            total = total + 1
+        end
+    end
+    return total
 end
 
 -- Which chapters already carry a translation from the engine the menu has
@@ -165,23 +253,23 @@ end
 function Picker.count(state)
     local total = 0
     for _, chapter in ipairs(state.chapters or {}) do
-        if state.selected[chapter.index] then total = total + 1 end
+        if state.selected[chapter.key] then total = total + 1 end
     end
     return total
 end
 
-function Picker.toggle(state, index)
-    if not index then return end
-    if state.selected[index] then
-        state.selected[index] = nil
+function Picker.toggle(state, key)
+    if not key then return end
+    if state.selected[key] then
+        state.selected[key] = nil
     else
-        state.selected[index] = true
+        state.selected[key] = true
     end
 end
 
 function Picker.select_all(state)
     for _, chapter in ipairs(state.chapters or {}) do
-        state.selected[chapter.index] = true
+        state.selected[chapter.key] = true
     end
 end
 
@@ -192,24 +280,50 @@ end
 function Picker.invert(state)
     local inverted = {}
     for _, chapter in ipairs(state.chapters or {}) do
-        if not state.selected[chapter.index] then inverted[chapter.index] = true end
+        if not state.selected[chapter.key] then inverted[chapter.key] = true end
     end
     state.selected = inverted
 end
 
-function Picker.select_indexes(state, indexes)
-    for _, index in ipairs(indexes or {}) do
-        state.selected[index] = true
+-- Row keys are list positions; keys that do not exist (a page size that
+-- changed between frames) are dropped rather than stored as phantom rows.
+function Picker.select_rows(state, keys)
+    local valid = {}
+    for _, chapter in ipairs(state.chapters or {}) do valid[chapter.key] = true end
+    for _, key in ipairs(keys or {}) do
+        if valid[key] then state.selected[key] = true end
     end
 end
 
--- Ascending spine order, which is what the worker expects for a job.
+-- Ascending spine order with each file once, which is what the worker
+-- expects for a job: selecting five chapters of one XHTML still asks for that
+-- file once.
 function Picker.selected_indexes(state)
-    local indexes = {}
+    local indexes, seen = {}, {}
     for _, chapter in ipairs(state.chapters or {}) do
-        if state.selected[chapter.index] then indexes[#indexes + 1] = chapter.index end
+        if state.selected[chapter.key] and not seen[chapter.index] then
+            seen[chapter.index] = true
+            indexes[#indexes + 1] = chapter.index
+        end
     end
     return indexes
+end
+
+-- Files the selection covers only partly.  The job is still per file, so the
+-- dialog has to warn that the rest of those files will be translated too.
+function Picker.partial_files(state)
+    local totals, picked, list = {}, {}, {}
+    for _, chapter in ipairs(state.chapters or {}) do
+        totals[chapter.index] = (totals[chapter.index] or 0) + 1
+        if state.selected[chapter.key] then
+            picked[chapter.index] = (picked[chapter.index] or 0) + 1
+        end
+    end
+    for index, total in pairs(totals) do
+        if picked[index] and picked[index] < total then list[#list + 1] = index end
+    end
+    table.sort(list)
+    return list
 end
 
 function Picker.page_count(state, page_size)
@@ -230,17 +344,17 @@ end
 
 -- "全选本页" with native pagination: the visible chapters are the rows that
 -- fall inside the menu's current page, not a fixed 30-chapter slice.
-function Picker.visible_chapter_indexes(item_table, page, perpage)
-    local indexes = {}
+function Picker.visible_row_keys(item_table, page, perpage)
+    local keys = {}
     perpage = math.max(1, tonumber(perpage) or 1)
     local first = (math.max(1, tonumber(page) or 1) - 1) * perpage + 1
     for position = first, first + perpage - 1 do
         local item = item_table and item_table[position]
-        if item and item.chapter_index then
-            indexes[#indexes + 1] = item.chapter_index
+        if item and item.row_key then
+            keys[#keys + 1] = item.row_key
         end
     end
-    return indexes
+    return keys
 end
 
 -- 7.1: the row carries the spine index as well as the (truncated) title, or
@@ -248,8 +362,12 @@ end
 -- the item for the long-press detail.  The checkbox is a geometric-shape
 -- glyph rather than "[x]"/"[ ]": on a 758 px screen the ASCII pair collapses
 -- into "[]", and an empty box stops reading as a box.
+--
+-- A file holding several chapters is numbered `file.sub` so the rows that
+-- share one translation unit stay grouped ("5.2" is the second chapter of
+-- spine file 5); a plain repeat of "5." would read as a bug.
 function Picker.chapter_label(state, chapter)
-    local prefix = state.selected[chapter.index] and "▣ " or "▢ "
+    local prefix = state.selected[chapter.key] and "▣ " or "▢ "
     -- The mark sits right after the index: appending it to the title would
     -- put it exactly where the row truncates on a 600 px screen.
     local mark = ""
@@ -258,7 +376,9 @@ function Picker.chapter_label(state, chapter)
     elseif state.partial and state.partial[chapter.index] then
         mark = _("（部分）")
     end
-    return string.format("%s%d.%s %s", prefix, chapter.index, mark,
+    local number = chapter.sub and string.format("%d.%d.", chapter.index, chapter.sub)
+        or string.format("%d.", chapter.index)
+    return string.format("%s%s%s %s", prefix, number, mark,
         Picker.truncate_title(chapter.title))
 end
 
@@ -266,34 +386,49 @@ function Picker.build_item_table(state, handlers, opts)
     handlers = handlers or {}
     opts = opts or {}
     local selected = Picker.count(state)
-    local translated = 0
-    for _, chapter in ipairs(state.chapters or {}) do
-        if state.full and state.full[chapter.index] then translated = translated + 1 end
-    end
-    -- When several TOC labels share one spine item the list is shorter than the
-    -- TOC the reader shows, which reads as missing chapters.  Say both numbers
-    -- instead of silently listing fewer rows.  The translated count sits before
-    -- the selected count: the tail of a long status line is what gets cut.
-    local status_text
-    local toc_total = state.toc_total or 0
-    if toc_total > #state.chapters then
+    local translated = Picker.translated_files(state)
+    -- Rows are TOC entries in entry mode, but the confirm row counts what the
+    -- job will touch: the distinct spine files behind the selection.  Say
+    -- "文件" there, or "开始翻译（331 章）" would contradict the "790 条"
+    -- right above it.
+    local units = #Picker.selected_indexes(state)
+    local files = state.file_count or 0
+    local entry_mode = state.entry_mode == true
+    -- When several TOC labels share one spine item and the list shows them
+    -- separately, say both numbers instead of looking like a wrong count.
+    -- The translated count sits before the selected count: the tail of a long
+    -- status line is what gets cut.
+    local status_text, unit_word
+    if entry_mode then
+        status_text = string.format(_("共 %d 条 · %d 文件"), #state.chapters, files)
+        unit_word = _("条")
+    elseif (state.toc_total or 0) > #state.chapters then
         status_text = string.format(_("共 %d 段 · 目录 %d 条"),
-            #state.chapters, toc_total)
+            #state.chapters, state.toc_total)
+        unit_word = _("章")
     else
         status_text = string.format(_("共 %d 章"), #state.chapters)
+        unit_word = _("章")
     end
     if translated > 0 then
         status_text = status_text .. string.format(_(" · 已译 %d"), translated)
     end
-    status_text = status_text .. string.format(_(" · 已选 %d 章"), selected)
+    status_text = status_text .. string.format(_(" · 已选 %d %s"), selected, unit_word)
     -- P3: the same picker exports an MCP job, so the confirm row's wording
-    -- comes from the caller; the default stays the translation one.
-    local start_label = opts.start_text or _("开始翻译（%d 章）")
+    -- comes from the caller; the default stays the translation one.  The
+    -- caller may supply a separate "per file" template for entry mode.
+    local start_label
+    if entry_mode then
+        start_label = opts.start_text_files or opts.start_text
+            or _("开始翻译（%d 个文件）")
+    else
+        start_label = opts.start_text or _("开始翻译（%d 章）")
+    end
     local items = {
         {
-            text = string.format(start_label, selected),
+            text = string.format(start_label, units),
             bold = true,
-            select_enabled = selected > 0,
+            select_enabled = units > 0,
             callback = handlers.on_start,
         },
         { text = _("全选本书"), callback = handlers.on_select_all },
@@ -312,11 +447,14 @@ function Picker.build_item_table(state, handlers, opts)
     for _, chapter in ipairs(state.chapters) do
         items[#items + 1] = {
             text = Picker.chapter_label(state, chapter),
+            row_key = chapter.key,
             chapter_index = chapter.index,
+            sub_index = chapter.sub,
             full_title = chapter.title,
             toc_entries = chapter.toc_entries,
+            anchor = chapter.anchor,
             callback = function()
-                if handlers.on_toggle then handlers.on_toggle(chapter.index) end
+                if handlers.on_toggle then handlers.on_toggle(chapter.key) end
             end,
         }
     end
@@ -326,9 +464,9 @@ function Picker.build_item_table(state, handlers, opts)
     -- identical buttons sit on screen at the same time.
     if opts.trailing then
         items[#items + 1] = {
-            text = string.format(start_label, selected),
+            text = string.format(start_label, units),
             bold = true,
-            select_enabled = selected > 0,
+            select_enabled = units > 0,
             callback = handlers.on_start,
         }
     end
@@ -341,7 +479,8 @@ local function book_display_name(book_path)
 end
 
 -- opts.on_start(indexes) overrides the default translate action; opts.start_text
--- changes the confirm row (e.g. "导出任务（%d 章）").  MCP export reuses the
+-- changes the confirm row (e.g. "导出任务（%d 章）"), and opts.start_text_files
+-- its entry-mode variant ("导出任务（%d 个文件）").  MCP export reuses the
 -- picker unchanged so chapter identity is chosen by exactly one implementation.
 function Picker.show(plugin, opts)
     opts = opts or {}
@@ -368,6 +507,7 @@ function Picker.show(plugin, opts)
         return Picker.build_item_table(state, handlers, {
             trailing = state.trailing_confirm == true,
             start_text = opts.start_text,
+            start_text_files = opts.start_text_files,
         })
     end
 
@@ -380,8 +520,8 @@ function Picker.show(plugin, opts)
     end
 
     handlers = {
-        on_toggle = function(index)
-            Picker.toggle(state, index)
+        on_toggle = function(key)
+            Picker.toggle(state, key)
             rebuild()
         end,
         on_select_all = function()
@@ -389,8 +529,8 @@ function Picker.show(plugin, opts)
             rebuild()
         end,
         on_select_page = function()
-            Picker.select_indexes(state,
-                Picker.visible_chapter_indexes(menu.item_table, menu.page, menu.perpage))
+            Picker.select_rows(state,
+                Picker.visible_row_keys(menu.item_table, menu.page, menu.perpage))
             rebuild()
         end,
         on_select_none = function()
@@ -404,12 +544,43 @@ function Picker.show(plugin, opts)
         on_start = function()
             local indexes = Picker.selected_indexes(state)
             if #indexes == 0 then return end
-            UIManager:close(menu)
-            if opts.on_start then
-                opts.on_start(indexes)
-            else
-                plugin:translateSelectedChapters(indexes)
+            local function start()
+                UIManager:close(menu)
+                if opts.on_start then
+                    opts.on_start(indexes)
+                else
+                    plugin:translateSelectedChapters(indexes)
+                end
             end
+            -- Rows are TOC entries, but a job still translates whole files.
+            -- Picking one section out of a 23-chapter XHTML therefore queues
+            -- all 23; say that before spending a long run on them.
+            local partial = Picker.partial_files(state)
+            if #partial == 0 then
+                start()
+                return
+            end
+            local ButtonDialog = require("ui/widget/buttondialog")
+            local dialog
+            dialog = ButtonDialog:new{
+                title = string.format(
+                    _("所选条目中，有 %d 个文件只选了一部分；这一版以文件为单位，这些文件的其余章节也会一并处理。"),
+                    #partial),
+                buttons = {{
+                    {
+                        text = _("取消"),
+                        callback = function() UIManager:close(dialog) end,
+                    },
+                    {
+                        text = _("继续"),
+                        callback = function()
+                            UIManager:close(dialog)
+                            start()
+                        end,
+                    },
+                }},
+            }
+            UIManager:show(dialog)
         end,
     }
 
@@ -417,7 +588,7 @@ function Picker.show(plugin, opts)
         title = _("选择章节"),
         subtitle = book_display_name(book_path),
         item_table = Picker.build_item_table(state, handlers,
-            { start_text = opts.start_text }),
+            { start_text = opts.start_text, start_text_files = opts.start_text_files }),
         is_borderless = true,
         is_popout = false,
     }
@@ -433,23 +604,37 @@ function Picker.show(plugin, opts)
 
     -- Separator-like rows and long titles: hold shows the untruncated title
     -- plus the spine index, which is also the job's chapter id (6.5).  For a
-    -- file that holds several chapters, say how many TOC labels were merged
-    -- into this row, so a short list is explainable rather than suspicious.
+    -- file that holds several chapters, say which file the row belongs to and
+    -- how many entries share it; the anchor is shown too, because it is what
+    -- a chapter-granular job will eventually slice on.
     function menu:onMenuHold(item)
         if type(item) == "table" and item.chapter_index then
-            local text = string.format(_("第 %d 章：%s"),
-                item.chapter_index, item.full_title or "")
-            if (item.toc_entries or 0) > 1 then
+            local text
+            if item.sub_index then
+                text = string.format(_("第 %d 个文件 · 第 %d 条目录：%s"),
+                    item.chapter_index, item.sub_index, item.full_title or "")
                 text = text .. string.format(
-                    _("\n目录在此文件内有 %d 条，合并为一个可翻译单元"), item.toc_entries)
+                    _("\n该文件共有 %d 条目录，本版按文件翻译"), item.toc_entries or 0)
+            else
+                text = string.format(_("第 %d 章：%s"),
+                    item.chapter_index, item.full_title or "")
+                if (item.toc_entries or 0) > 1 then
+                    text = text .. string.format(
+                        _("\n目录在此文件内有 %d 条，合并为一个可翻译单元"), item.toc_entries)
+                end
+            end
+            if item.anchor then
+                text = text .. string.format(_("\n锚点：%s"), item.anchor)
             end
             -- Say which engine the （已翻译） mark came from: the menu's engine
-            -- selector and this list must agree on what "已翻译" means.
+            -- selector and this list must agree on what "已翻译" means.  The
+            -- mark is per file, so a row sharing its file says 该文件.
             local engine = state.engine_label
+            local subject = item.sub_index and _("该文件") or _("本章")
             if engine and state.full and state.full[item.chapter_index] then
-                text = text .. string.format(_("\n本章已有「%s」的译文"), engine)
+                text = text .. string.format(_("\n%s已有「%s」的译文"), subject, engine)
             elseif engine and state.partial and state.partial[item.chapter_index] then
-                text = text .. string.format(_("\n本章已有「%s」的部分译文"), engine)
+                text = text .. string.format(_("\n%s已有「%s」的部分译文"), subject, engine)
             end
             TranslationUI.showInfo(text, 5)
         end

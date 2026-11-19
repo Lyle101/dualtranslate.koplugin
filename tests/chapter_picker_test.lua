@@ -60,7 +60,15 @@ local stubs = {
         end,
     },
     ["ui/widget/progressbardialog"] = {},
-    ["ui/widget/buttondialog"] = {},
+    -- The picker asks before translating files a partial selection only
+    -- covers in part; the fake keeps the title and buttons so the test can
+    -- press them like the user would.
+    ["ui/widget/buttondialog"] = {
+        new = function(_, opts)
+            opts.is_dialog = true
+            return opts
+        end,
+    },
     ["ui/widget/inputdialog"] = {},
     ["ui/widget/spinwidget"] = {},
     ["ui/event"] = { new = function() return {} end },
@@ -215,7 +223,7 @@ do
     check("全选本书", Picker.count(state) == 3)
     Picker.select_none(state)
     check("全不选", Picker.count(state) == 0)
-    Picker.select_indexes(state, { 3, 1, 9 })
+    Picker.select_rows(state, { 3, 1, 9 })
     check("按页选择忽略越界并保持升序",
         #Picker.selected_indexes(state) == 2
         and Picker.selected_indexes(state)[1] == 1
@@ -227,9 +235,9 @@ do
     local last_page = Picker.page_chapters(big, 2, 30)
     check("末页剩余 1 章", #last_page == 1 and last_page[1].index == 31)
 
-    local visible = Picker.visible_chapter_indexes({
+    local visible = Picker.visible_row_keys({
         { text = "开始翻译" }, { text = "全选本书" },
-        { chapter_index = 1 }, { chapter_index = 2 }, { chapter_index = 3 },
+        { row_key = 1 }, { row_key = 2 }, { row_key = 3 },
     }, 1, 5)
     check("本页可见章节", #visible == 3 and visible[1] == 1 and visible[3] == 3)
 
@@ -283,6 +291,155 @@ do
         selected_items[7].text == "▣ 1. 第 1 节"
         and selected_items[1].select_enabled == true
         and selected_items[1].text == "开始翻译（1 章）")
+end
+
+-- ============================================================
+print("== 2c. 按目录条目出行（锚点粒度） ==")
+local section_outline
+do
+    -- 一个 XHTML 里有三章（扫描/PDF 转换书的典型形态），另一个文件只有一章。
+    section_outline = {
+        spine_count = 3,
+        chapters = {
+            { index = 1, title = "第一章", level = 0, aliases = { "第一节", "第二节" } },
+            { index = 2, title = "第二章", level = 0 },
+        },
+        entries = {
+            { index = 1, title = "第一章", level = 0, href = "OEBPS/a.xhtml" },
+            { index = 1, anchor = "s1", title = "第一节", level = 1, href = "OEBPS/a.xhtml" },
+            { index = 1, anchor = "s2", title = "第二节", level = 1, href = "OEBPS/a.xhtml" },
+            { index = 2, anchor = "start", title = "第二章", level = 0,
+              href = "OEBPS/b.xhtml" },
+        },
+    }
+    local rows = Picker.chapters(section_outline)
+    check("每条目录一行", #rows == 4, tostring(#rows))
+    check("同文件条目连续并按 file.sub 编号",
+        rows[1].index == 1 and rows[1].sub == 1
+        and rows[2].sub == 2 and rows[3].sub == 3)
+    check("单条目文件不加子号", rows[4].sub == nil and rows[4].index == 2)
+    check("锚点随条目保留", rows[1].anchor == nil and rows[2].anchor == "s1"
+        and rows[4].anchor == "start")
+    check("行键唯一", rows[2].key == 2 and rows[1].key ~= rows[2].key)
+    check("未列入目录的 spine 不再补行", #rows == #section_outline.entries)
+
+    -- 稀疏目录（几个部分跨 100 个 spine 文件）不能把中间的章节藏起来
+    local coarse = Picker.chapters({
+        spine_count = 100,
+        chapters = { { index = 1, title = "第一部分" }, { index = 40, title = "第二部分" } },
+        entries = {
+            { index = 1, title = "第一部分", href = "a" },
+            { index = 40, title = "第二部分", href = "b" },
+        },
+    })
+    check("一文件一条目时仍按文件出行", #coarse == 100, tostring(#coarse))
+    check("稀疏目录保留标题并补齐空档",
+        coarse[1].title == "第一部分" and coarse[2].title == "第 2 节")
+
+    -- 同一个文件重复列出、但一条锚点都没有：定位不到章内位置，别把整本
+    -- 切成两条（其余文件会跟着消失），继续按文件出行。
+    local no_anchor = Picker.chapters({
+        spine_count = 3,
+        chapters = { { index = 1, title = "正文" }, { index = 2, title = "第二章" } },
+        entries = {
+            { index = 1, title = "正文", href = "a" },
+            { index = 1, title = "正文（续）", href = "a" },
+            { index = 2, title = "第二章", href = "b" },
+        },
+    })
+    check("同文件重复但没有锚点时仍按文件出行", #no_anchor == 3, tostring(#no_anchor))
+
+    local state = Picker.new_state(section_outline)
+    check("状态区分条目与文件", state.file_count == 2 and #state.chapters == 4)
+    check("toc_total 按文件累加，不随行重复", state.toc_total == 4,
+        tostring(state.toc_total))
+    local items = Picker.build_item_table(state, {})
+    check("状态行给条数与文件数", items[6].text == "共 4 条 · 2 文件 · 已选 0 条",
+        items[6].text)
+    check("行标题按 file.sub 编号", items[7].text == "▢ 1.1. 第一章", items[7].text)
+    check("子条目行带 sub 与锚点", items[8].sub_index == 2 and items[8].anchor == "s1")
+
+    -- 同一文件里只选一条：交付给 job 的仍是唯一文件号，开始按钮按文件计数
+    Picker.toggle(state, 2)
+    local picked = Picker.build_item_table(state, {})
+    check("选中同文件一条仍只交付一个文件",
+        #Picker.selected_indexes(state) == 1 and Picker.selected_indexes(state)[1] == 1)
+    check("开始按钮按文件计数", picked[1].text == "开始翻译（1 个文件）", picked[1].text)
+    local export_items = Picker.build_item_table(state, {}, {
+        start_text = "导出任务（%d 章）",
+        start_text_files = "导出任务（%d 个文件）",
+    })
+    check("导出路径用文件措辞", export_items[1].text == "导出任务（1 个文件）",
+        export_items[1].text)
+    check("部分覆盖的文件被标出", #Picker.partial_files(state) == 1
+        and Picker.partial_files(state)[1] == 1)
+    Picker.select_all(state)
+    check("全选后不再有部分覆盖", #Picker.partial_files(state) == 0)
+    Picker.select_none(state)
+end
+
+print("== 2d. 部分选择先确认（锚点行仍按文件翻译） ==")
+do
+    local plugin = {
+        currentBookPath = function() return "/books/sections.epub" end,
+        getBookOutline = function() return section_outline end,
+    }
+    local started
+    plugin.translateSelectedChapters = function(_, indexes) started = indexes end
+    opened_menus, closed_widgets, notifications = {}, {}, {}
+
+    local function last_dialog()
+        for index = #opened_menus, 1, -1 do
+            if opened_menus[index].is_dialog then return opened_menus[index] end
+        end
+        return nil
+    end
+
+    Picker.show(plugin)
+    local menu = opened_menus[1]
+    menu.perpage = 14
+    -- 只选「1.2 第一节」：文件 1 还有另两条没选
+    menu:onMenuSelect(menu.item_table[8])
+    menu:onMenuSelect(menu.item_table[1])
+    local dialog = last_dialog()
+    check("部分选择先弹确认框", dialog ~= nil and #closed_widgets == 0,
+        tostring(dialog and dialog.title))
+    check("确认框说明会连带翻译其余章节", dialog ~= nil
+        and tostring(dialog.title):find("其余章节", 1, true) ~= nil,
+        dialog and dialog.title)
+    dialog.buttons[1][1].callback()
+    check("取消后不开始", started == nil)
+
+    -- 再次点开始并确认：菜单关闭，交付唯一文件号
+    menu:onMenuSelect(menu.item_table[1])
+    dialog = last_dialog()
+    dialog.buttons[1][2].callback()
+    check("确认后开始翻译", started ~= nil and #started == 1 and started[1] == 1,
+        started and table.concat(started, ","))
+    check("确认后关闭菜单", #closed_widgets == 3 and closed_widgets[3] == menu)
+
+    -- 选中文件内全部条目：不需要确认
+    opened_menus, closed_widgets, started = {}, {}, nil
+    Picker.show(plugin)
+    menu = opened_menus[1]
+    menu.perpage = 14
+    menu:onMenuSelect(menu.item_table[7])
+    menu:onMenuSelect(menu.item_table[8])
+    menu:onMenuSelect(menu.item_table[9])
+    menu:onMenuSelect(menu.item_table[1])
+    check("整文件选中时不弹确认框", last_dialog() == nil)
+    check("整文件选中直接开始", started ~= nil and #started == 1 and started[1] == 1)
+
+    -- 长按说明所属文件、条目数与锚点
+    opened_menus, notifications = {}, {}
+    Picker.show(plugin)
+    menu = opened_menus[1]
+    menu:onMenuHold(menu.item_table[8])
+    local text = tostring(notifications[1] and notifications[1].text)
+    check("长按给出文件、条目数与锚点",
+        text:find("第 1 个文件", 1, true) ~= nil
+        and text:find("共有 3 条目录", 1, true) ~= nil
+        and text:find("锚点：s1", 1, true) ~= nil, text)
 end
 
 -- ============================================================

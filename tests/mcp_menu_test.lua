@@ -194,7 +194,8 @@ do
     dualtranslate.exportMcpJob = function(_, indexes) exported = indexes end
     dualtranslate:translateSelectedChapters({ 2, 5 })
     local dialog = last_dialog
-    check("选章弹出导出确认", dialog and dialog.title:find("2 章", 1, true) ~= nil,
+    -- 选择任务的计数单位是文件：一个 XHTML 里可能装好几章
+    check("选章弹出导出确认", dialog and dialog.title:find("2 个文件", 1, true) ~= nil,
         dialog and dialog.title)
     dialog.buttons[1][2].callback()
     check("确认后按所选章节导出", exported and #exported == 2

@@ -984,8 +984,10 @@ function Epub.translate_overlay(opts, ...)
     }
 end
 
--- EPUB outline (design 7.2): the chapter list behind the picker.  Identity is
--- the spine index, titles are display-only (design 6.5).
+-- EPUB outline (design 7.2): the chapter list behind the picker.  A job's
+-- identity is the spine index (the file it translates); `entries` adds the
+-- anchor of every TOC entry so a file that holds several chapters can still
+-- be listed chapter by chapter (design 6.5, titles are display-only).
 
 local function parse_elements(text)
     local root = { name = "#root", children = {} }
@@ -1111,13 +1113,19 @@ local function nav_toc(tree)
     return entries
 end
 
+-- The file path and the in-file anchor are returned separately: the path
+-- identifies the spine file (the translation unit), the fragment identifies
+-- the chapter inside it.  `file.xhtml#` and `file.xhtml` mean the same thing,
+-- so an empty fragment is not an anchor.
 local function toc_href(base, href)
     if not href or href == "" then return nil end
-    local path = href:gsub("#.*$", "")
-    if path == "" then return nil end
+    local path, fragment = href:match("^([^#]*)#?(.*)$")
+    if fragment == "" then fragment = nil end
+    if path == "" then return nil, fragment end
     path = socket_url.unescape(path)
-    if path:sub(1, 1) == "/" then return normalize_path(path) end
-    return normalize_path(base .. "/" .. path)
+    if fragment then fragment = socket_url.unescape(fragment) end
+    if path:sub(1, 1) == "/" then return normalize_path(path), fragment end
+    return normalize_path(base .. "/" .. path), fragment
 end
 
 local function build_spine_lookup(spine)
@@ -1163,31 +1171,55 @@ local function remember_alias(chapter, title)
     chapter.aliases[#chapter.aliases + 1] = title
 end
 
-local function toc_chapters(entries, base, spine, exact, lowered, logger)
-    local chapters, by_index = {}, {}
+-- Per-entry view of the TOC (7.2): one record per TOC entry, keeping the
+-- anchor that locates the chapter inside its spine file.  Scanned and
+-- PDF-converted EPUBs put dozens of chapters in one XHTML and anchor every
+-- navPoint inside it; without the anchor the picker can only show the file.
+-- Entries whose file is not in the spine are skipped exactly once here.
+local function toc_entries(entries, base, spine, exact, lowered, logger)
+    local list = {}
     for _, entry in ipairs(entries) do
-        local href = toc_href(base, entry.href)
+        local href, fragment = toc_href(base, entry.href)
         local index, original
         if href then index, original = map_to_spine(href, spine, exact, lowered) end
         if not index then
             logger.warn("dualtranslate: outline entry not in spine, skipped:",
                 tostring(entry.href))
         else
-            local level = tonumber(entry.level) or 0
             local title = entry.title
             if not title or title == "" then title = string.format("第 %d 节", index) end
-            local kept = by_index[index]
-            if not kept then
-                kept = { index = index, title = title, href = original, level = level }
-                by_index[index] = kept
-                chapters[#chapters + 1] = kept
-            elseif level < kept.level then
-                local previous = kept.title
-                kept.title, kept.level = title, level
-                remember_alias(kept, previous)
-            else
-                remember_alias(kept, title)
-            end
+            list[#list + 1] = {
+                index = index,
+                href = original,
+                anchor = fragment,
+                title = title,
+                level = tonumber(entry.level) or 0,
+            }
+        end
+    end
+    return list
+end
+
+-- One row per spine file, which stays the unit of work for a translation
+-- job.  Several TOC entries on one file collapse into the shallowest title,
+-- the rest become aliases.  Derived from the entry list above so the two
+-- views can never disagree about which file an entry belongs to.
+local function toc_chapters(entries)
+    local chapters, by_index = {}, {}
+    for _, entry in ipairs(entries) do
+        local index = entry.index
+        local title, level = entry.title, entry.level
+        local kept = by_index[index]
+        if not kept then
+            kept = { index = index, title = title, href = entry.href, level = level }
+            by_index[index] = kept
+            chapters[#chapters + 1] = kept
+        elseif level < kept.level then
+            local previous = kept.title
+            kept.title, kept.level = title, level
+            remember_alias(kept, previous)
+        else
+            remember_alias(kept, title)
         end
     end
     return chapters
@@ -1252,15 +1284,18 @@ local function parse_outline(book_path, work_dir)
             if not entries or #entries == 0 then
                 entries, source = nav_toc(tree), "nav"
             end
-            local chapters = entries
-                and toc_chapters(entries, base, package.spine, exact, lowered, logger) or {}
+            local chapters = {}
+            local entry_list = entries
+                and toc_entries(entries, base, package.spine, exact, lowered, logger) or {}
+            if #entry_list > 0 then chapters = toc_chapters(entry_list) end
             if #chapters > 0 then
-                return { source = source, spine_count = #package.spine, chapters = chapters }
+                return { source = source, spine_count = #package.spine,
+                    chapters = chapters, entries = entry_list }
             end
         end
     end
     return { source = "spine", spine_count = #package.spine,
-        chapters = spine_chapters(package.spine) }
+        chapters = spine_chapters(package.spine), entries = {} }
 end
 
 local function outline_cache_file(book_path)
@@ -1268,12 +1303,19 @@ local function outline_cache_file(book_path)
         .. Tools.stable_path_hash(book_path) .. ".json"
 end
 
+-- v2 stores the per-entry `entries` list next to the file-level chapters.
+-- A v1 cache has no anchors, so it is rejected and reparsed once: keeping it
+-- would silently show the old file-granularity list for every cached book.
+local OUTLINE_CACHE_VERSION = 2
+
 local function load_outline_cache(book_path, size, mtime)
     local raw = read_file(outline_cache_file(book_path))
     if not raw then return nil end
     local JSON = require("json")
     local ok, doc = pcall(JSON.decode, raw)
-    if not ok or type(doc) ~= "table" or doc.version ~= 1 then return nil end
+    if not ok or type(doc) ~= "table" or doc.version ~= OUTLINE_CACHE_VERSION then
+        return nil
+    end
     -- size/mtime are part of the key: a replaced or edited book must reparse.
     if doc.book_path ~= book_path or doc.book_size ~= size or doc.book_mtime ~= mtime then
         return nil
@@ -1283,7 +1325,8 @@ local function load_outline_cache(book_path, size, mtime)
     local chapters = {}
     for _, chapter in ipairs(doc.chapters) do
         if type(chapter) ~= "table" or type(chapter.index) ~= "number"
-            or type(chapter.title) ~= "string" or type(chapter.href) ~= "string" then
+            or type(chapter.title) ~= "string" or type(chapter.href) ~= "string"
+            or chapter.index < 1 or chapter.index > doc.spine_count then
             return nil
         end
         chapters[#chapters + 1] = {
@@ -1295,7 +1338,27 @@ local function load_outline_cache(book_path, size, mtime)
         }
     end
     if #chapters == 0 then return nil end
-    return { source = doc.source, spine_count = doc.spine_count, chapters = chapters }
+    -- Entries are optional only in the sense that a spine-only outline has
+    -- none; a v2 cache without the list is malformed, not a valid old file.
+    if type(doc.entries) ~= "table" then return nil end
+    local entries = {}
+    for _, entry in ipairs(doc.entries) do
+        if type(entry) ~= "table" or type(entry.index) ~= "number"
+            or type(entry.title) ~= "string" or type(entry.href) ~= "string"
+            or entry.index < 1 or entry.index > doc.spine_count then
+            return nil
+        end
+        entries[#entries + 1] = {
+            index = entry.index,
+            title = entry.title,
+            href = entry.href,
+            level = tonumber(entry.level) or 0,
+            anchor = type(entry.anchor) == "string" and entry.anchor ~= ""
+                and entry.anchor or nil,
+        }
+    end
+    return { source = doc.source, spine_count = doc.spine_count,
+        chapters = chapters, entries = entries }
 end
 
 local function save_outline_cache(book_path, size, mtime, outline)
@@ -1303,9 +1366,10 @@ local function save_outline_cache(book_path, size, mtime, outline)
     local JSON = require("json")
     local path = outline_cache_file(book_path)
     local ok, encoded = pcall(JSON.encode, {
-        version = 1, book_path = book_path, book_size = size, book_mtime = mtime,
+        version = OUTLINE_CACHE_VERSION, book_path = book_path,
+        book_size = size, book_mtime = mtime,
         source = outline.source, spine_count = outline.spine_count,
-        chapters = outline.chapters,
+        chapters = outline.chapters, entries = outline.entries or {},
     })
     if not ok then
         logger.warn("dualtranslate: outline cache encode failed:", tostring(encoded))

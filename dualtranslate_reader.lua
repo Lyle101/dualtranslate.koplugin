@@ -413,7 +413,10 @@ end
 
 -- privacy notice required before the book text leaves the device (10.10).
 function dualtranslate:confirmMcpExport(indexes, menu)
-    local scope = indexes and string.format(_("所选 %d 章"), #indexes) or _("整本书")
+    -- A selection job holds spine files, not TOC entries: in entry mode a
+    -- file can carry a dozen chapters, and counting entries here would
+    -- promise 790 chapters while 331 files are queued.
+    local scope = indexes and string.format(_("所选 %d 个文件"), #indexes) or _("整本书")
     local dialog
     dialog = ButtonDialog:new{
         title = string.format(
@@ -487,7 +490,7 @@ function dualtranslate:exportMcpJob(indexes, menu)
         return
     end
     total_chapters = session:chapter_count()
-    progress_dialog.subtitle = string.format("章节：0/%d", total_chapters)
+    progress_dialog.subtitle = string.format("文件：0/%d", total_chapters)
 
     local function report(percentage, subtitle)
         if progress_dialog._dualtranslate_hidden then return end
@@ -536,7 +539,7 @@ function dualtranslate:exportMcpJob(indexes, menu)
         local percentage = total_chapters > 0
             and math.floor(done * 100 / total_chapters + 0.5) or 0
         if done < total_chapters then
-            report(percentage, string.format("章节：%d/%d", done, total_chapters))
+            report(percentage, string.format("文件：%d/%d", done, total_chapters))
             UIManager:scheduleIn(0.01, step)
             return
         end
@@ -572,7 +575,7 @@ function dualtranslate:exportMcpJob(indexes, menu)
         -- A whole-book export takes a minute; a 6-second toast is easy to miss
         -- while the screen repaints, so this one waits for a tap.
         TranslationUI.showPersistent((_(
-            "导出完成\n\n任务：%s\n%d 章 · %d 段\n"
+            "导出完成\n\n任务：%s\n%d 个文件 · %d 段\n"
             .. "电脑端可读取 cache/dualtranslate/mcp/jobs/\n\n"
             .. "请轻触屏幕以关闭此消息")):format(
             result.job_id, result.chapters, result.segments))
@@ -1088,6 +1091,9 @@ function dualtranslate:buildMcpMenu()
             callback = function(menu)
                 self:showChapterPicker({
                     start_text = _("导出任务（%d 章）"),
+                    -- Entry-mode rows (several chapters in one XHTML) still
+                    -- export whole files, so that label counts files.
+                    start_text_files = _("导出任务（%d 个文件）"),
                     -- The export runs on the MCP engine whatever 翻译引擎 is
                     -- set to, so the picker's 已翻译 marks must reflect the
                     -- MCP providers (one per model), not the current engine.
@@ -1200,7 +1206,7 @@ function dualtranslate:_runTranslation(item)
     local function progress_title()
         if mode == "all" then return "正在翻译整本书…" end
         if mode == "selection" then
-            return string.format("正在翻译所选 %d 章…", selection_count)
+            return string.format("正在翻译所选 %d 个文件…", selection_count)
         end
         return "正在翻译当前章节…"
     end

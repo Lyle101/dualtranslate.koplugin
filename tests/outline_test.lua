@@ -357,6 +357,17 @@ do
     check("临时目录已清理", #temp_outline_dirs() == 0, join_list(temp_outline_dirs()))
     check("未告警（全部命中 spine）", warn_count("not in spine") == 0)
 
+    -- 条目视图：同一文件的多个 TOC 条目各自保留锚点，供选择器按章出行
+    local entries = outline and outline.entries or {}
+    check("每条目录一条 entries", #entries == 5, tostring(#entries))
+    check("无 fragment 的条目 anchor 为空", entries[1] and entries[1].anchor == nil)
+    check("条目保留锚点", entries[2] and entries[2].anchor == "start",
+        tostring(entries[2] and entries[2].anchor))
+    check("条目锚点互不覆盖", entries[3] and entries[3].anchor == "sec2"
+        and entries[3].index == 2)
+    check("条目与文件视图同 index", entries[2] and entries[2].index == 2
+        and entries[1].index == 1)
+
     -- 层级最浅者优先：深项先出现，浅项后出现
     local book2 = stub_book(ROOT .. "/books/ncx_shallow.epub", {
         { "META-INF/container.xml", CONTAINER },
@@ -784,6 +795,8 @@ do
     check("缓存记录 size", doc.book_size == lfs.attributes(book, "size"))
     check("缓存记录 mtime", doc.book_mtime == lfs.attributes(book, "modification"))
     check("缓存记录 source/spine_count", doc.source == "ncx" and doc.spine_count == 2)
+    check("缓存写入条目与锚点", type(doc.entries) == "table" and #doc.entries == 3
+        and doc.entries[2].anchor == "b", tostring(doc.entries and #doc.entries))
 
     reset_stats()
     local second = Epub.outline(book)
@@ -795,6 +808,9 @@ do
     check("缓存保留 level", second and second.chapters[1].level == 0)
     check("缓存保留 aliases", second and second.chapters[1].aliases
         and second.chapters[1].aliases[1] == "One alias")
+    check("缓存保留 entries 与锚点", second and second.entries and #second.entries == 3
+        and second.entries[2].anchor == "b", tostring(second and second.entries
+        and #second.entries))
     check("缓存命中不建临时目录", #temp_outline_dirs() == 0)
 
     -- size 变化 -> 失效
@@ -833,6 +849,16 @@ do
     reset_stats()
     check("缓存版本不符则失效", Epub.outline(book) ~= nil and stats.passes == 3)
 
+    -- v1 缓存没有 entries：必须重解析，否则旧书永远只有文件粒度的列表
+    local doc_old = JSON.decode(read_real(path))
+    doc_old.version = 1
+    doc_old.entries = nil
+    write_real(path, JSON.encode(doc_old))
+    reset_stats()
+    local upgraded = Epub.outline(book)
+    check("v1 缓存失效并补齐 entries", upgraded ~= nil and stats.passes == 3
+        and #(upgraded.entries or {}) == 3, tostring(stats.passes))
+
     -- 章节形状非法 -> 失效
     local doc4 = JSON.decode(read_real(path))
     doc4.chapters = { { index = "bad", title = 1, href = false } }
@@ -849,6 +875,14 @@ do
     local other_outline = Epub.outline(other)
     check("不同书各自解析", other_outline and other_outline.spine_count == 1 and stats.passes == 2)
     check("不同书缓存文件不同", cache_path(other) ~= path)
+
+    -- spine 降级书没有 TOC：entries 是空表，v2 缓存必须能原样读回，
+    -- 不能因为"缺 entries"又重解析一遍。
+    reset_stats()
+    local other_again = Epub.outline(other)
+    check("spine 降级书 v2 缓存可读回", other_again ~= nil
+        and type(other_again.entries) == "table" and #other_again.entries == 0
+        and stats.passes == 0, tostring(stats.passes))
 end
 
 -- ============================================================
