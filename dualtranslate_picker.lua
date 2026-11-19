@@ -641,7 +641,7 @@ function Picker.show(plugin, opts)
             elseif engine and state.partial and state.partial[item.chapter_index] then
                 text = text .. string.format(_("\n%s已有「%s」的部分译文"), subject, engine)
             end
-            TranslationUI.showDetail(text, 5)
+            TranslationUI.showDetail(text)
         end
         return true
     end

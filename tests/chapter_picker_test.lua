@@ -50,10 +50,28 @@ local stubs = {
         end,
     },
     -- 长按详情走 InfoMessage（会换行，不截断）；测试里和通知一起计数。
+    -- 详情还要被塞进顶对齐容器（见 dualtranslate_ui），所以这里造一个 [1]。
     ["ui/widget/infomessage"] = {
         new = function(_, opts)
             opts.is_notification = true
+            opts[1] = { { text = opts.text } }
             return opts
+        end,
+    },
+    ["device"] = {
+        screen = {
+            getSize = function() return { w = 600, h = 800 } end,
+        },
+    },
+    ["ui/size"] = { margin = { default = 5 } },
+    ["ui/widget/container/widgetcontainer"] = {
+        extend = function(_, fields)
+            local class = fields or {}
+            class.new = function(self, opts)
+                opts = opts or {}
+                return setmetatable(opts, { __index = self })
+            end
+            return class
         end,
     },
     ["ui/widget/menu"] = {
