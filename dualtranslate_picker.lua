@@ -72,11 +72,94 @@ function Picker.chapters(outline)
     return chapters
 end
 
-function Picker.new_state(outline)
+function Picker.new_state(outline, coverage)
     local chapters = Picker.chapters(outline)
     local toc_total = 0
     for _, chapter in ipairs(chapters) do toc_total = toc_total + (chapter.toc_entries or 0) end
-    return { chapters = chapters, selected = {}, toc_total = toc_total }
+    local state = { chapters = chapters, selected = {}, toc_total = toc_total }
+    -- Coverage comes from the engine selected in the menu (12.2), not from
+    -- whatever happens to be displayed on the page.
+    if coverage then
+        state.full = coverage.full
+        state.partial = coverage.partial
+        state.engine_label = coverage.label
+    end
+    return state
+end
+
+-- Which chapters already carry a translation from the engine the menu has
+-- selected.  A chapter counts as 已翻译 only when that engine's entries cover
+-- it whole; partial_chapters render as 部分.  MCP jobs register one provider
+-- per model (mcp:<model>) while the menu offers a single "mcp_external"
+-- engine, so every model of that engine counts there.
+function Picker.coverage(plugin, book_path, engine)
+    if not book_path or type(plugin.getBookCacheDirectory) ~= "function" then
+        return nil
+    end
+    local mode = engine
+    if not mode then
+        if type(plugin.getMode) ~= "function" then return nil end
+        mode = plugin:getMode()
+    end
+    local Overlay = require("dualtranslate_overlay")
+    -- loadBookIndex also answers for a book still on the v2 overlay (migration
+    -- blocked by a lock, for one), so its finished chapters are not silently
+    -- shown as untranslated.
+    if not mode or type(Overlay.loadBookIndex) ~= "function" then return nil end
+    local index = Overlay.loadBookIndex(plugin:getBookCacheDirectory(book_path))
+    if type(index) ~= "table" or type(index.providers) ~= "table" then
+        return nil
+    end
+    local full, partial, matched, first_name = {}, {}, 0, nil
+    for provider_id, provider in pairs(index.providers) do
+        local matches = provider_id == mode
+        if mode == "mcp_external" then
+            matches = tostring(provider_id):sub(1, 4) == "mcp:"
+        end
+        if matches and type(provider) == "table" then
+            matched = matched + 1
+            -- Device engines store the provider id in display_name (Store
+            -- resolves the human name from the DB on demand), so an id is not
+            -- a label; the engine registry below supplies the real one.
+            local name = provider.display_name
+            if type(name) == "string" and name ~= "" and name ~= provider_id then
+                first_name = first_name or name
+            end
+            if type(provider.chapters) == "table" then
+                for _, value in ipairs(provider.chapters) do
+                    local number = tonumber(value)
+                    if number then full[number] = true end
+                end
+            end
+            if type(provider.partial_chapters) == "table" then
+                for _, value in ipairs(provider.partial_chapters) do
+                    local number = tonumber(value)
+                    if number then partial[number] = true end
+                end
+            end
+        end
+    end
+    if matched == 0 then return nil end
+    -- A chapter that any model finished is 已翻译 even if another model left
+    -- it partial: full always wins.
+    for chapter_index in pairs(full) do partial[chapter_index] = nil end
+    local label
+    if mode == "mcp_external" then
+        label = matched == 1 and first_name or _("MCP 外部翻译")
+    else
+        local Providers = require("dualtranslate_providers")
+        -- getProviderName answers "未知翻译服务" for ids it does not know;
+        -- that is not a label, so the registry entry is checked first.
+        if type(Providers.getProviderById) == "function"
+            and Providers.getProviderById(mode)
+            and type(Providers.getProviderName) == "function" then
+            label = Providers.getProviderName(mode)
+        end
+        if type(label) ~= "string" or label == "" or label == mode then
+            label = first_name or mode
+        end
+    end
+    return { full = full, partial = partial, label = label }
 end
 
 function Picker.count(state)
@@ -167,7 +250,15 @@ end
 -- into "[]", and an empty box stops reading as a box.
 function Picker.chapter_label(state, chapter)
     local prefix = state.selected[chapter.index] and "▣ " or "▢ "
-    return string.format("%s%d. %s", prefix, chapter.index,
+    -- The mark sits right after the index: appending it to the title would
+    -- put it exactly where the row truncates on a 600 px screen.
+    local mark = ""
+    if state.full and state.full[chapter.index] then
+        mark = _("（已翻译）")
+    elseif state.partial and state.partial[chapter.index] then
+        mark = _("（部分）")
+    end
+    return string.format("%s%d.%s %s", prefix, chapter.index, mark,
         Picker.truncate_title(chapter.title))
 end
 
@@ -175,15 +266,26 @@ function Picker.build_item_table(state, handlers, opts)
     handlers = handlers or {}
     opts = opts or {}
     local selected = Picker.count(state)
+    local translated = 0
+    for _, chapter in ipairs(state.chapters or {}) do
+        if state.full and state.full[chapter.index] then translated = translated + 1 end
+    end
     -- When several TOC labels share one spine item the list is shorter than the
     -- TOC the reader shows, which reads as missing chapters.  Say both numbers
-    -- instead of silently listing fewer rows.
-    local status_text = string.format(_("共 %d 章 · 已选 %d 章"), #state.chapters, selected)
+    -- instead of silently listing fewer rows.  The translated count sits before
+    -- the selected count: the tail of a long status line is what gets cut.
+    local status_text
     local toc_total = state.toc_total or 0
     if toc_total > #state.chapters then
-        status_text = string.format(_("共 %d 段 · 目录 %d 条 · 已选 %d 章"),
-            #state.chapters, toc_total, selected)
+        status_text = string.format(_("共 %d 段 · 目录 %d 条"),
+            #state.chapters, toc_total)
+    else
+        status_text = string.format(_("共 %d 章"), #state.chapters)
     end
+    if translated > 0 then
+        status_text = status_text .. string.format(_(" · 已译 %d"), translated)
+    end
+    status_text = status_text .. string.format(_(" · 已选 %d 章"), selected)
     -- P3: the same picker exports an MCP job, so the confirm row's wording
     -- comes from the caller; the default stays the translation one.
     local start_label = opts.start_text or _("开始翻译（%d 章）")
@@ -251,7 +353,8 @@ function Picker.show(plugin, opts)
         TranslationUI.showInfo(_("目录解析失败：") .. tostring(err or ""))
         return
     end
-    local state = Picker.new_state(outline)
+    local state = Picker.new_state(outline,
+        Picker.coverage(plugin, book_path, opts.engine))
     if #state.chapters == 0 then
         TranslationUI.showInfo(_("本书没有可选择的章节"))
         return
@@ -339,6 +442,14 @@ function Picker.show(plugin, opts)
             if (item.toc_entries or 0) > 1 then
                 text = text .. string.format(
                     _("\n目录在此文件内有 %d 条，合并为一个可翻译单元"), item.toc_entries)
+            end
+            -- Say which engine the （已翻译） mark came from: the menu's engine
+            -- selector and this list must agree on what "已翻译" means.
+            local engine = state.engine_label
+            if engine and state.full and state.full[item.chapter_index] then
+                text = text .. string.format(_("\n本章已有「%s」的译文"), engine)
+            elseif engine and state.partial and state.partial[item.chapter_index] then
+                text = text .. string.format(_("\n本章已有「%s」的部分译文"), engine)
             end
             TranslationUI.showInfo(text, 5)
         end

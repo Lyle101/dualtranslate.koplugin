@@ -286,6 +286,115 @@ do
 end
 
 -- ============================================================
+print("== 2b. 已翻译标记跟随翻译引擎 ==")
+do
+    local Overlay = require("dualtranslate_overlay")
+    local Providers = require("dualtranslate_providers")
+    Providers.getProviderById = function(id)
+        return id == "microsoft_free" and { id = id } or nil
+    end
+    Providers.getProviderName = function(id)
+        if id == "microsoft_free" then return "Microsoft Edge（免费）" end
+        return "未知翻译服务"
+    end
+    local manifest
+    Overlay.loadBookIndex = function() return manifest end
+    local plugin = {
+        getMode = function() return "microsoft_free" end,
+        getBookCacheDirectory = function() return "/tmp/picker-cache" end,
+    }
+    -- 设备端 manifest 里 display_name 存的是 provider id（真机实测），
+    -- 长按文案必须换成菜单同源的引擎名。
+    manifest = { providers = {
+        microsoft_free = { display_name = "microsoft_free",
+            chapters = { 1 }, partial_chapters = { 2 } },
+        ["mcp:gpt-5"] = { display_name = "MCP · GPT-5", chapters = { 3 } },
+    } }
+    local cov = Picker.coverage(plugin, "/books/a.epub")
+    check("覆盖度按当前引擎取", cov ~= nil and cov.full[1] == true
+        and cov.partial[2] == true and cov.full[3] == nil,
+        cov and tostring(cov.full and #cov.full))
+    check("整章覆盖后不再算部分", cov ~= nil and cov.partial[1] == nil)
+    check("标记带引擎名", cov ~= nil and cov.label == "Microsoft Edge（免费）",
+        cov and cov.label)
+
+    -- MCP 是一个引擎、多个模型：标记必须合并该引擎下所有模型。
+    plugin.getMode = function() return "mcp_external" end
+    local mcp = Picker.coverage(plugin, "/books/a.epub")
+    check("MCP 引擎合并所有模型", mcp ~= nil and mcp.full[3] == true and mcp.full[1] == nil,
+        mcp and tostring(mcp.full and mcp.full[1]))
+    check("单一模型用模型名", mcp ~= nil and mcp.label == "MCP · GPT-5", mcp and mcp.label)
+    -- 一个模型整章完成、另一个只做了一部分：合并后必须是「已翻译」。
+    manifest.providers["mcp:claude"] = { display_name = "MCP · Claude",
+        chapters = { 3 }, partial_chapters = { 3 } }
+    local multi = Picker.coverage(plugin, "/books/a.epub")
+    check("多模型回落到引擎名", multi ~= nil and multi.label == "MCP 外部翻译",
+        multi and multi.label)
+    check("整章标记压过部分标记", multi ~= nil and multi.full[3] == true
+        and multi.partial[3] == nil)
+
+    -- 导出路径显式指定 MCP 引擎：与菜单当前选中的引擎无关。
+    plugin.getMode = function() return "microsoft_free" end
+    local export_cov = Picker.coverage(plugin, "/books/a.epub", "mcp_external")
+    check("显式引擎覆盖菜单设置", export_cov ~= nil and export_cov.full[3] == true
+        and export_cov.full[1] == nil,
+        export_cov and tostring(export_cov.full and export_cov.full[1]))
+
+    plugin.getMode = function() return "system" end
+    check("没有该引擎的译文时不标记", Picker.coverage(plugin, "/books/a.epub") == nil)
+    check("插件没有引擎接口时不标记",
+        Picker.coverage({ getBookCacheDirectory = function() return "/tmp/none" end },
+            "/books/a.epub") == nil)
+    plugin.getMode = function() return "microsoft_free" end
+    manifest = nil
+    check("无 manifest 时不标记", Picker.coverage(plugin, "/books/a.epub") == nil)
+
+    -- 行文案与状态行
+    manifest = { providers = { microsoft_free = { display_name = "Microsoft Edge",
+        chapters = { 1 }, partial_chapters = { 2 } } } }
+    local state = Picker.new_state({ spine_count = 3, chapters = {} },
+        Picker.coverage(plugin, "/books/a.epub"))
+    local items = Picker.build_item_table(state, {})
+    check("已翻译行带标记", items[7].text == "▢ 1.（已翻译） 第 1 节", items[7].text)
+    check("部分翻译行带标记", items[8].text == "▢ 2.（部分） 第 2 节", items[8].text)
+    check("未翻译行不加标记", items[9].text == "▢ 3. 第 3 节", items[9].text)
+    check("状态行统计已译", items[6].text == "共 3 章 · 已译 1 · 已选 0 章", items[6].text)
+
+    -- 对话框流程：行标记 + 长按说明来源引擎
+    opened_menus, notifications = {}, {}
+    local flow_plugin = {
+        currentBookPath = function() return "/books/picker.epub" end,
+        getMode = function() return "microsoft_free" end,
+        getBookCacheDirectory = function() return "/tmp/picker-cache" end,
+        getBookOutline = function()
+            return { spine_count = 2, chapters = {
+                { index = 1, title = "One" }, { index = 2, title = "Two" } } }
+        end,
+    }
+    Picker.show(flow_plugin)
+    local menu = opened_menus[1]
+    check("选择器行内标出已翻译", menu ~= nil
+        and menu.item_table[7].text == "▢ 1.（已翻译） One",
+        menu and menu.item_table[7].text)
+    menu:onMenuHold(menu.item_table[7])
+    check("长按说明标记来源", notifications[1] ~= nil
+        and tostring(notifications[1].text):find("Microsoft Edge", 1, true) ~= nil,
+        notifications[1] and notifications[1].text)
+
+    -- 同一个选择器，导出流程传 engine="mcp_external" 时不显示 Edge 的标记。
+    opened_menus = {}
+    Picker.show(flow_plugin, { engine = "mcp_external" })
+    check("导出时按 MCP 引擎判标记", opened_menus[1] ~= nil
+        and opened_menus[1].item_table[7].text == "▢ 1. One",
+        opened_menus[1] and opened_menus[1].item_table[7].text)
+
+    Overlay.loadBookIndex = nil
+    Providers.getProviderName = nil
+    Providers.getProviderById = nil
+    opened_menus, notifications = {}, {}
+end
+
+-- ============================================================
 print("== 3. ChapterPickerDialog 流程 ==")
 do
     local plugin = {}

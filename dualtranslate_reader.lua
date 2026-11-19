@@ -1088,6 +1088,10 @@ function dualtranslate:buildMcpMenu()
             callback = function(menu)
                 self:showChapterPicker({
                     start_text = _("导出任务（%d 章）"),
+                    -- The export runs on the MCP engine whatever 翻译引擎 is
+                    -- set to, so the picker's 已翻译 marks must reflect the
+                    -- MCP providers (one per model), not the current engine.
+                    engine = "mcp_external",
                     on_start = function(indexes) self:confirmMcpExport(indexes, menu) end,
                 })
             end,

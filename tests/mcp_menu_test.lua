@@ -221,6 +221,16 @@ do
     check("导出保持菜单", items[1].keep_menu_open == true)
     check("刷新保持菜单", items[3].keep_menu_open == true)
     check("MCP 页可自刷新", items.refresh_func ~= nil and #items.refresh_func() == 3)
+    -- 导出走 MCP 引擎，与菜单里当前选中的翻译引擎无关：选择器的「已翻译」
+    -- 标记必须按 MCP 的 provider 判，而不是按 getMode()。
+    local picker_opts
+    local real_picker = dualtranslate.showChapterPicker
+    dualtranslate.showChapterPicker = function(_, opts) picker_opts = opts end
+    items[1].callback(fake_menu(items))
+    dualtranslate.showChapterPicker = real_picker
+    check("导出按 MCP 引擎标记已译", picker_opts ~= nil
+        and picker_opts.engine == "mcp_external",
+        picker_opts and tostring(picker_opts.engine))
     local job_items = items[2].sub_item_table_func()
     check("空任务列表有占位行", #job_items == 1 and job_items[1].text == "没有任务")
     -- The menu builder runs twice per open; the second call must hit the cache.
