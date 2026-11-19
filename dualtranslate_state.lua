@@ -86,7 +86,7 @@ end
 local function backfill_queue_item(item)
     if item.provider == "" then item.provider = nil end
     if item.mode == nil then
-        if item.chapter_indexes ~= nil then
+        if item.chapter_ranges ~= nil or item.chapter_indexes ~= nil then
             item.mode = "selection"
         elseif item.all_chapters == true then
             item.mode = "all"
@@ -106,14 +106,23 @@ local function backfill_queue_item(item)
         item.fragment = nil
         item.span = nil
         item.chapter_indexes = nil
+        item.chapter_ranges = nil
     elseif item.mode == "span" then
         item.span = tonumber(item.span) or 1
         item.chapter_indexes = nil
+        item.chapter_ranges = nil
     elseif item.mode == "selection" then
         item.fragment = nil
         item.span = nil
+        -- Older queued jobs carry chapter_indexes (whole files); the newer
+        -- shape is chapter_ranges.  Both are kept so a resume can use either.
         item.chapter_indexes = type(item.chapter_indexes) == "table"
-            and item.chapter_indexes or {}
+            and item.chapter_indexes or nil
+        item.chapter_ranges = type(item.chapter_ranges) == "table"
+            and item.chapter_ranges or nil
+        if item.chapter_ranges == nil and item.chapter_indexes == nil then
+            item.chapter_indexes = {}
+        end
     else
         item.status = "failed"
         item.error = "旧队列任务无法推断翻译范围，请重新发起翻译"
@@ -216,8 +225,10 @@ function State.enqueue(plugin, opts)
         -- display key off this.  Older persisted items have no provider.
         provider = opts.provider or (plugin.getMode and plugin:getMode() or nil),
         mode = mode,
-        -- Selection mode carries the explicit spine-index list; span mode
-        -- carries the starting fragment plus the chapter count.
+        -- Selection mode carries explicit chapter ranges ({index, from, to});
+        -- older callers/tests may still hand in flat chapter_indexes.  Span
+        -- mode carries the starting fragment plus the chapter count.
+        chapter_ranges = mode == "selection" and opts.chapter_ranges or nil,
         chapter_indexes = mode == "selection" and opts.chapter_indexes or nil,
         fragment = mode == "span" and opts.fragment or nil,
         span = mode == "span" and (tonumber(opts.span) or 1) or nil,

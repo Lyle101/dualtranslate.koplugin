@@ -908,7 +908,13 @@ Epub.translate_overlay({
     mode = "all" | "span" | "selection",
     fragment = fragment,             -- span 模式使用
     span = 1,                        -- span 模式使用
-    chapter_indexes = {5, 6, 9},     -- selection 模式使用
+    -- selection 模式：范围列表（锚点粒度）。from 含、to 不含，nil 表示文件边界；
+    -- {index = 5} 即整个文件，旧版 chapter_indexes 仍被兼容成整文件范围。
+    chapter_ranges = {
+        {index = 5, from = "ch5", to = "ch6"},
+        {index = 6, from = "sec2", to = nil},
+        {index = 9},
+    },
     source_lang = "en",
     target_lang = "zh-Hans",
     provider = "system",             -- 生成引擎/服务
@@ -925,23 +931,25 @@ Epub.translate_overlay({
 ```lua
 -- 注意：span 模式不能把 fragment 直接 tonumber；fragment 可能是
 -- "/body/DocFragment[5]/body..."。必须复用 Epub.resolve 的解析逻辑。
-local function resolve_chapters(self, opts, book_path, work_dir, spine)
+local function resolve_ranges(self, opts, book_path, work_dir, spine)
+    local ranges = {}
     if opts.mode == "all" then
-        local indexes = {}
-        for index = 1, #spine do indexes[#indexes + 1] = index end
-        return indexes
+        for index = 1, #spine do ranges[#ranges + 1] = {index = index} end
     elseif opts.mode == "span" then
         local chapter = self:resolve(book_path, work_dir, opts.fragment)
         local start = chapter and chapter.index or 1
-        local indexes = {}
         for index = start, math.min(start + (opts.span or 1) - 1, #spine) do
-            indexes[#indexes + 1] = index
+            ranges[#ranges + 1] = {index = index}
         end
-        return indexes
     elseif opts.mode == "selection" then
-        return normalize_indexes(opts.chapter_indexes, #spine)
+        local ranged = normalize_ranges(opts.chapter_ranges, #spine)
+        if #ranged > 0 then return ranged end
+        -- 旧调用方/旧队列项
+        for _, index in ipairs(normalize_indexes(opts.chapter_indexes, #spine)) do
+            ranges[#ranges + 1] = {index = index}
+        end
     end
-    return {}
+    return ranges
 end
 ```
 
@@ -974,7 +982,8 @@ Queue item：
 {
     book_path = "...",
     mode = "selection",
-    chapter_indexes = {5, 6},
+    -- 新版：锚点范围；旧队列项仍可能是 chapter_indexes = {5, 6}
+    chapter_ranges = {{index = 5, from = "ch5", to = "ch6"}, {index = 6}},
     provider = "system",
     status = "queued",
     current = 0, total = 0, translated = 0, failed = 0,
@@ -1366,7 +1375,7 @@ cache/dualtranslate/mcp/jobs/<job_id>/result.json          -- 翻译后（dtctl 
 现在抽取是一个会话，调用方每轮事件循环推一片：
 
 ```lua
-local session = Epub.begin_segment_export{ book_path, chapter_indexes, titles }
+local session = Epub.begin_segment_export{ book_path, chapter_ranges, titles }
 session:chapter_count()        -- 本次要走的章节数（进度分母）
 session:processed()            -- 已走完的章节数
 session:step(0.2)              -- 按 **CPU 时间** 走 0.2 s，返回已走章节数
@@ -1398,7 +1407,8 @@ session:abort()                -- 取消：删临时目录并置 aborted
   },
   "chapters": [
     { "index": 5, "title": "Chapter V" },
-    { "index": 6, "title": "Chapter VI" }
+    -- 只导出了该文件的一段（锚点范围）时带 partial，导入侧据此只标 partial
+    { "index": 6, "title": "Chapter VI", "partial": true }
   ],
   "segments": [
     {

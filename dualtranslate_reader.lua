@@ -349,11 +349,12 @@ end
 --
 -- The argument shapes are not uniform: translateWholeBook(silent, auto) and
 -- translateCurrentChapter(silent, auto) start with `silent`, while
--- translateSelectedChapters(indexes, silent, auto) takes the chapter list
--- first.  `silent=true` suppresses the progress dialog and every user-facing
--- notice, and belongs only to a job resumed from an old queue item.  The two
--- chapter entries used to start with `all_chapters`, so a leftover `true`
--- there silently muted a run — menu actions pass `false` explicitly.
+-- translateSelectedChapters(ranges, silent, auto) takes the chapter range
+-- list first (a plain index list is still widened to whole files).
+-- `silent=true` suppresses the progress dialog and every user-facing notice,
+-- and belongs only to a job resumed from an old queue item.  The two chapter
+-- entries used to start with `all_chapters`, so a leftover `true` there
+-- silently muted a run — menu actions pass `false` explicitly.
 function dualtranslate:translateWholeBook(silent, auto)
     if not self:isEpub() then return end
     -- 7.4: with the MCP engine there is no device-side request path; the
@@ -391,17 +392,51 @@ function dualtranslate:translateCurrentChapter(silent, auto)
         fragment = fragment, span = 1, silent = silent, auto = auto })
 end
 
+-- How many spine files a range list touches.  Ranges are chapters, several of
+-- them can sit in one file, and the privacy notice / progress card talk about
+-- the files that will be read.  A plain list of spine indexes (the shape
+-- before ranges existed) counts one file per entry.
+local function range_files(ranges)
+    local seen, count = {}, 0
+    for _, range in ipairs(type(ranges) == "table" and ranges or {}) do
+        local index = type(range) == "table" and tonumber(range.index) or tonumber(range)
+        if index and not seen[index] then
+            seen[index] = true
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- Callers may still hand in the pre-range shape (a list of spine indexes);
+-- every job below works on ranges, so widen those to whole-file ranges.
+local function chapter_range_list(ranges)
+    local list = {}
+    for _, value in ipairs(type(ranges) == "table" and ranges or {}) do
+        if type(value) == "table" then
+            list[#list + 1] = value
+        else
+            local index = tonumber(value)
+            if index then list[#list + 1] = { index = index } end
+        end
+    end
+    return list
+end
+
 -- One-shot selection from the chapter picker; never arms follow mode.  The
--- chapter list is the first argument here — `silent` comes second.
-function dualtranslate:translateSelectedChapters(indexes, silent, auto)
+-- range list is the first argument here — `silent` comes second.  Each range
+-- is {index, from, to} (anchors nil at the file edges), so picking one chapter
+-- out of a nine-chapter XHTML now translates that chapter only.
+function dualtranslate:translateSelectedChapters(ranges, silent, auto)
     if not self:isEpub() then return end
+    ranges = chapter_range_list(ranges)
     if self:getMode() == "mcp_external" then
-        self:confirmMcpExport(indexes)
+        self:confirmMcpExport(ranges)
         return
     end
     local book_path = self.ui.document.file
     self:enqueueTranslation({ book_path = book_path, mode = "selection",
-        chapter_indexes = indexes, silent = silent, auto = auto })
+        chapter_ranges = ranges, silent = silent, auto = auto })
 end
 
 ------------------------------------------------------------------------
@@ -412,11 +447,11 @@ end
 ------------------------------------------------------------------------
 
 -- privacy notice required before the book text leaves the device (10.10).
-function dualtranslate:confirmMcpExport(indexes, menu)
-    -- A selection job holds spine files, not TOC entries: in entry mode a
-    -- file can carry a dozen chapters, and counting entries here would
-    -- promise 790 chapters while 331 files are queued.
-    local scope = indexes and string.format(_("所选 %d 个文件"), #indexes) or _("整本书")
+function dualtranslate:confirmMcpExport(ranges, menu)
+    -- Ranges are chapters; several can live in one spine file, so the notice
+    -- counts the files the job will actually read.
+    local scope = ranges and string.format(_("所选 %d 个文件"), range_files(ranges))
+        or _("整本书")
     local dialog
     dialog = ButtonDialog:new{
         title = string.format(
@@ -430,7 +465,7 @@ function dualtranslate:confirmMcpExport(indexes, menu)
                 text = _("导出"),
                 callback = function()
                     UIManager:close(dialog)
-                    self:exportMcpJob(indexes, menu)
+                    self:exportMcpJob(ranges, menu)
                 end,
             },
         }},
@@ -438,7 +473,12 @@ function dualtranslate:confirmMcpExport(indexes, menu)
     UIManager:show(dialog)
 end
 
-function dualtranslate:exportMcpJob(indexes, menu)
+function dualtranslate:exportMcpJob(ranges, menu)
+    -- nil is not an empty selection: it means the whole book (translate
+    -- whole book, or a current chapter with no index).  An explicit list is a
+    -- selection the exporter must honour or refuse — never silently widen.
+    local has_selection = type(ranges) == "table"
+    ranges = chapter_range_list(ranges)
     local book_path = self:currentBookPath()
     if not book_path then return end
     local outline = self:getBookOutline(book_path)
@@ -481,7 +521,7 @@ function dualtranslate:exportMcpJob(indexes, menu)
 
     local session, open_err = Epub.begin_segment_export{
         book_path = book_path,
-        chapter_indexes = indexes,
+        chapter_ranges = has_selection and ranges or nil,
         titles = titles,
     }
     if not session then
@@ -574,11 +614,19 @@ function dualtranslate:exportMcpJob(indexes, menu)
         refresh_menu()
         -- A whole-book export takes a minute; a 6-second toast is easy to miss
         -- while the screen repaints, so this one waits for a tap.
-        TranslationUI.showPersistent((_(
+        local message = (_(
             "导出完成\n\n任务：%s\n%d 个文件 · %d 段\n"
             .. "电脑端可读取 cache/dualtranslate/mcp/jobs/\n\n"
             .. "请轻触屏幕以关闭此消息")):format(
-            result.job_id, result.chapters, result.segments))
+            result.job_id, result.chapters, result.segments)
+        local unreadable = tonumber(result.unreadable) or 0
+        if unreadable > 0 then
+            -- A chapter file that could not be parsed is skipped silently by
+            -- the walk; say so, or the job looks complete.
+            message = string.format(_("有 %d 个文件读不出正文，未包含在任务里。"),
+                unreadable) .. "\n\n" .. message
+        end
+        TranslationUI.showPersistent(message)
     end
     UIManager:scheduleIn(0.1, step)
 end
@@ -1091,14 +1139,11 @@ function dualtranslate:buildMcpMenu()
             callback = function(menu)
                 self:showChapterPicker({
                     start_text = _("导出任务（%d 章）"),
-                    -- Entry-mode rows (several chapters in one XHTML) still
-                    -- export whole files, so that label counts files.
-                    start_text_files = _("导出任务（%d 个文件）"),
                     -- The export runs on the MCP engine whatever 翻译引擎 is
                     -- set to, so the picker's 已翻译 marks must reflect the
                     -- MCP providers (one per model), not the current engine.
                     engine = "mcp_external",
-                    on_start = function(indexes) self:confirmMcpExport(indexes, menu) end,
+                    on_start = function(ranges) self:confirmMcpExport(ranges, menu) end,
                 })
             end,
         },
@@ -1202,7 +1247,10 @@ end
 function dualtranslate:_runTranslation(item)
     local book_path = item.book_path
     local mode = item.mode or "all"
-    local selection_count = #(item.chapter_indexes or {})
+    local selection_count = range_files(item.chapter_ranges)
+    if selection_count == 0 and type(item.chapter_indexes) == "table" then
+        selection_count = #item.chapter_indexes
+    end
     local function progress_title()
         if mode == "all" then return "正在翻译整本书…" end
         if mode == "selection" then
@@ -1346,7 +1394,7 @@ function dualtranslate:_runTranslation(item)
                     progress_dialog.title = string.format("%s  %d%%",
                         progress_title(), percentage)
                     progress_dialog.subtitle = string.format(
-                        "段落：%d/%d\n已翻译：%d    失败：%d\n章节：%d/%d\n点按进度条可取消，点按外部收起。",
+                        "段落：%d/%d\n已翻译：%d    失败：%d\n文件：%d/%d\n点按进度条可取消，点按外部收起。",
                         current, total, tonumber(translated) or 0,
                         tonumber(failed) or 0, tonumber(chapter) or 0, tonumber(chapters) or 0)
                     pcall(function()
@@ -1408,6 +1456,7 @@ function dualtranslate:_runTranslation(item)
                         mode = mode,
                         fragment = fragment,
                         span = item.span,
+                        chapter_ranges = item.chapter_ranges,
                         chapter_indexes = item.chapter_indexes,
                         source_lang = self:getSourceLang(),
                         target_lang = self:getTargetLang(),

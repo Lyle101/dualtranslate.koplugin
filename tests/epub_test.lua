@@ -13,6 +13,12 @@ os.execute("rm -rf " .. TEST_DIR)
 os.execute("mkdir -p " .. TEST_DIR .. "/META-INF")
 os.execute("mkdir -p " .. TEST_DIR .. "/OEBPS")
 
+-- 范围切片在锚点缺失时会 warn；测试环境没有 KOReader 的 logger。
+package.preload["logger"] = function()
+    return { warn = function() end, err = function() end,
+        info = function() end, dbg = function() end }
+end
+
 -- 构造 EPUB 结构：container.xml + OPF + 两章 XHTML
 local function write(p, content)
     local f = io.open(TEST_DIR .. "/" .. p, "w")
@@ -40,12 +46,14 @@ write("OEBPS/chap1.xhtml", [[<?xml version="1.0"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head><title>Chapter 1</title></head>
 <body>
-  <h1>Hello World</h1>
-  <p>This is the first paragraph.</p>
-  <p>Second paragraph with <b>bold</b> and <i>italic</i> text.</p>
-  <p>日本語のテキストです。</p>
+  <a id="dup"></a>
+  <h1 id="h1">Hello World</h1>
+  <p id="p1">This is the first paragraph.</p>
+  <p id="p2">Second paragraph with <span id="inline"></span><b>bold</b> and <i>italic</i> text.</p>
+  <p id="p3">日本語のテキストです。</p>
   <p><img src="a.png"/></p>
-  <p>  &nbsp; &amp; &lt; entities &gt; &quot;quoted&quot; &#39;apos&#39;  </p>
+  <a id="dup"></a>
+  <p id="p4">  &nbsp; &amp; &lt; entities &gt; &quot;quoted&quot; &#39;apos&#39;  </p>
 </body>
 </html>]])
 write("OEBPS/chap2.xhtml", [[<?xml version="1.0"?>
@@ -330,6 +338,125 @@ do
     local saved2_line = saved2 and saved2:read("*l")
     if saved2 then saved2:close() end
     check("章节模式 chapters 覆盖标记", saved2_line and saved2_line:match("^saved:false:%d+:1:microsoft_free$") ~= nil, tostring(saved2_line))
+
+    -- 锚点范围（第二刀）：一个 XHTML 里只翻 from..to 之间的段落。
+    -- chap1 的候选依次是 h1、p1、p2、p3、p4（p 里的 img 段落不算）。
+    local output_dir_range = "/tmp/dualtranslate_out_range"
+    os.execute("rm -rf " .. output_dir_range)
+    local range_texts = {}
+    local range_result, range_err = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "selection",
+        chapter_ranges = { { index = 1, from = "p1", to = "p3" } },
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dualtranslate_prog_range.txt", output_dir = output_dir_range,
+        translate = function(text) range_texts[#range_texts + 1] = text return "T:" .. text end,
+        translate_batch = function(texts)
+            local out = {}
+            for i, t in ipairs(texts) do
+                range_texts[#range_texts + 1] = t
+                out[i] = "B:" .. t
+            end
+            return out
+        end,
+    })
+    check("范围翻译成功", range_result ~= nil, tostring(range_err))
+    check("范围只翻 from..to 之间的段落", range_result and range_result.translated == 2,
+        tostring(range_result and range_result.translated))
+    check("范围翻译的正文正确", #range_texts == 2
+        and range_texts[1] == "This is the first paragraph."
+        and range_texts[2]:find("Second paragraph", 1, true) == 1,
+        table.concat(range_texts, " | "))
+    local range_state = last_manifest and last_manifest.providers
+        and last_manifest.providers.microsoft_free
+    check("范围翻译落 partial_chapters 而不是 chapters",
+        range_state and #(range_state.chapters or {}) == 0
+        and range_state.partial_chapters and range_state.partial_chapters[1] == 1,
+        range_state and ("done=" .. #(range_state.chapters or {})
+            .. " partial=" .. #(range_state.partial_chapters or {})))
+
+    -- 同一文件给整文件范围：覆盖度必须是「已翻译」
+    local output_dir_whole = "/tmp/dualtranslate_out_whole"
+    os.execute("rm -rf " .. output_dir_whole)
+    local whole_result = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "selection",
+        chapter_ranges = { { index = 1 } },
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dualtranslate_prog_whole.txt", output_dir = output_dir_whole,
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
+    })
+    check("整文件范围翻完整章", whole_result and whole_result.translated == 5,
+        tostring(whole_result and whole_result.translated))
+    local whole_state = last_manifest and last_manifest.providers
+        and last_manifest.providers.microsoft_free
+    check("整文件范围落 chapters",
+        whole_state and #(whole_state.partial_chapters or {}) == 0
+        and whole_state.chapters and whole_state.chapters[1] == 1,
+        whole_state and ("done=" .. #(whole_state.chapters or {})))
+
+    -- 锚点不存在：往文件边界放宽，宁可多翻也不能漏
+    local output_dir_missing = "/tmp/dualtranslate_out_missing"
+    os.execute("rm -rf " .. output_dir_missing)
+    local missing_result = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "selection",
+        chapter_ranges = { { index = 1, from = "nope", to = "p2" } },
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dualtranslate_prog_missing.txt", output_dir = output_dir_missing,
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
+    })
+    check("锚点缺失时放宽到文件开头", missing_result and missing_result.translated == 2,
+        tostring(missing_result and missing_result.translated))
+
+    -- 锚点落在段落内的行内元素上：包含它的那一段也要翻（否则整段丢失）
+    local output_dir_inline = "/tmp/dualtranslate_out_inline"
+    os.execute("rm -rf " .. output_dir_inline)
+    local inline_texts = {}
+    local inline_result = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "selection",
+        chapter_ranges = { { index = 1, from = "inline", to = "p3" } },
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dualtranslate_prog_inline.txt", output_dir = output_dir_inline,
+        translate = function(text) inline_texts[#inline_texts + 1] = text return "T:" .. text end,
+        translate_batch = function(texts)
+            local out = {}
+            for i, t in ipairs(texts) do inline_texts[#inline_texts + 1] = t; out[i] = "B:" .. t end
+            return out
+        end,
+    })
+    check("行内锚点包含所在段落", inline_result and inline_result.translated == 1
+        and inline_texts[1]:find("Second paragraph", 1, true) == 1,
+        inline_result and (inline_result.translated .. " " .. tostring(inline_texts[1])))
+
+    -- from == to（相邻条目共用锚点）放宽到文件末尾，而不是丢掉整条选择
+    local output_dir_same = "/tmp/dualtranslate_out_same"
+    os.execute("rm -rf " .. output_dir_same)
+    local same_result = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "selection",
+        chapter_ranges = { { index = 1, from = "p1", to = "p1" } },
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dualtranslate_prog_same.txt", output_dir = output_dir_same,
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
+    })
+    check("起止锚点相同则放宽到文件末尾", same_result and same_result.translated == 4,
+        tostring(same_result and same_result.translated))
+
+    -- 重复 id：终点取最后一次出现，范围只会变宽
+    local output_dir_dup = "/tmp/dualtranslate_out_dup"
+    os.execute("rm -rf " .. output_dir_dup)
+    local dup_result = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "selection",
+        chapter_ranges = { { index = 1, from = "p1", to = "dup" } },
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dualtranslate_prog_dup.txt", output_dir = output_dir_dup,
+        translate = function(text) return "T:" .. text end,
+        translate_batch = function(texts) local out = {} for i, t in ipairs(texts) do out[i] = "B:" .. t end return out end,
+    })
+    check("重复 id 的终点取最后一次出现", dup_result and dup_result.translated == 3,
+        tostring(dup_result and dup_result.translated))
+
+
 
     -- 取消标志
     local output_dir3 = "/tmp/dualtranslate_out3"

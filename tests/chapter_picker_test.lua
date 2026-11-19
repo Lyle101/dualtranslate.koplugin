@@ -240,19 +240,21 @@ do
     local state = Picker.new_state({ spine_count = 3, chapters = {} })
     check("初始未选", Picker.count(state) == 0)
     Picker.toggle(state, 2)
-    check("勾选单章", Picker.count(state) == 1 and Picker.selected_indexes(state)[1] == 2)
+    check("勾选单章", Picker.count(state) == 1
+        and Picker.selected_ranges(state)[1].index == 2)
     Picker.invert(state)
-    local inverted = Picker.selected_indexes(state)
-    check("反选", Picker.count(state) == 2 and inverted[1] == 1 and inverted[2] == 3)
+    local inverted = Picker.selected_ranges(state)
+    check("反选", Picker.count(state) == 2
+        and inverted[1].index == 1 and inverted[2].index == 3)
     Picker.select_all(state)
     check("全选本书", Picker.count(state) == 3)
     Picker.select_none(state)
     check("全不选", Picker.count(state) == 0)
     Picker.select_rows(state, { 3, 1, 9 })
     check("按页选择忽略越界并保持升序",
-        #Picker.selected_indexes(state) == 2
-        and Picker.selected_indexes(state)[1] == 1
-        and Picker.selected_indexes(state)[2] == 3)
+        #Picker.selected_ranges(state) == 2
+        and Picker.selected_ranges(state)[1].index == 1
+        and Picker.selected_ranges(state)[2].index == 3)
 
     local big = Picker.new_state({ spine_count = 31, chapters = {} })
     check("分页数量", Picker.page_count(big, 30) == 2)
@@ -401,71 +403,116 @@ do
     check("toc_total 按文件累加，不随行重复", state.toc_total == 4,
         tostring(state.toc_total))
     local items = Picker.build_item_table(state, {})
-    check("状态行给条数与文件数", items[6].text == "共 4 条 · 2 文件 · 已选 0 条",
+    check("状态行给条数与文件数", items[6].text == "共 4 条 · 2 文件 · 已选 0 章",
         items[6].text)
     check("行标题按 file.sub 编号", items[7].text == "▢ 1.1 第一章", items[7].text)
     check("子条目行带 sub 与锚点", items[8].sub_index == 2 and items[8].anchor == "s1")
 
-    -- 同一文件里只选一条：交付给 job 的仍是唯一文件号，开始按钮按文件计数
+    -- 只选「1.2 第一节」：交付的是一个锚点范围，不再是整份文件
     Picker.toggle(state, 2)
     local picked = Picker.build_item_table(state, {})
-    check("选中同文件一条仍只交付一个文件",
-        #Picker.selected_indexes(state) == 1 and Picker.selected_indexes(state)[1] == 1)
-    check("开始按钮按文件计数", picked[1].text == "开始翻译（1 个文件）", picked[1].text)
-    local export_items = Picker.build_item_table(state, {}, {
-        start_text = "导出任务（%d 章）",
-        start_text_files = "导出任务（%d 个文件）",
-    })
-    check("导出路径用文件措辞", export_items[1].text == "导出任务（1 个文件）",
+    local ranges = Picker.selected_ranges(state)
+    check("选中一条交付一个锚点范围", #ranges == 1 and ranges[1].index == 1
+        and ranges[1].from == "s1" and ranges[1].to == "s2",
+        ranges[1] and tostring(ranges[1].from) .. "-" .. tostring(ranges[1].to))
+    check("开始按钮按章计数", picked[1].text == "开始翻译（1 章）", picked[1].text)
+    local export_items = Picker.build_item_table(state, {},
+        { start_text = "导出任务（%d 章）" })
+    check("导出按钮同样按章计数", export_items[1].text == "导出任务（1 章）",
         export_items[1].text)
-    check("部分覆盖的文件被标出", #Picker.partial_files(state) == 1
-        and Picker.partial_files(state)[1] == 1)
-    Picker.select_all(state)
-    check("全选后不再有部分覆盖", #Picker.partial_files(state) == 0)
+
+    -- 选同一文件的前两条：起点是文件开头，终点是第三条的锚点
+    Picker.toggle(state, 1)
+    ranges = Picker.selected_ranges(state)
+    check("范围起点为文件开头", #ranges == 1 and ranges[1].from == nil
+        and ranges[1].to == "s2", ranges[1] and tostring(ranges[1].to))
+
+    -- 不连续的选择拆成两个范围，各自贴住相邻条目的锚点
+    Picker.select_none(state)
+    Picker.select_rows(state, { 1, 3 })
+    ranges = Picker.selected_ranges(state)
+    check("不连续的选择拆成两个范围", #ranges == 2
+        and ranges[1].from == nil and ranges[1].to == "s1"
+        and ranges[2].from == "s2" and ranges[2].to == nil,
+        #ranges .. " " .. tostring(ranges[1] and ranges[1].to)
+            .. "/" .. tostring(ranges[2] and ranges[2].from))
+
+    -- 相邻两条目录共用同一个锚点：终点不能等于起点（否则是空范围），
+    -- 要顺延到下一个不同的锚点
+    local dup_outline = {
+        spine_count = 2,
+        chapters = {},
+        entries = {
+            { index = 1, anchor = "x", title = "甲", href = "a" },
+            { index = 1, anchor = "x", title = "乙", href = "a" },
+            { index = 1, anchor = "y", title = "丙", href = "a" },
+        },
+    }
+    local dup_state = Picker.new_state(dup_outline)
+    Picker.select_rows(dup_state, { 1 })
+    local dup_ranges = Picker.selected_ranges(dup_state)
+    check("共用锚点时终点顺延到下一个锚点", #dup_ranges == 1
+        and dup_ranges[1].from == nil and dup_ranges[1].to == "y",
+        dup_ranges[1] and (tostring(dup_ranges[1].from) .. "-" .. tostring(dup_ranges[1].to)))
+
+    -- run 的末尾与「下一条未选」共用锚点：终点必须顺延，否则已勾的那一章
+    -- 会被切片排他掉（勾 2 章只翻 1 章）
+    local shared_outline = {
+        spine_count = 1,
+        chapters = {},
+        entries = {
+            { index = 1, anchor = "a", title = "甲", href = "a" },
+            { index = 1, anchor = "b", title = "乙", href = "a" },
+            { index = 1, anchor = "b", title = "丙", href = "a" },
+            { index = 1, anchor = "d", title = "丁", href = "a" },
+        },
+    }
+    local shared = Picker.new_state(shared_outline)
+    Picker.select_rows(shared, { 1, 2 })
+    local shared_ranges = Picker.selected_ranges(shared)
+    check("run 末尾与下一条共用锚点时终点顺延", #shared_ranges == 1
+        and shared_ranges[1].from == nil and shared_ranges[1].to == "d",
+        shared_ranges[1] and tostring(shared_ranges[1].to))
+    Picker.select_none(shared)
+    Picker.select_rows(shared, { 2 })
+    shared_ranges = Picker.selected_ranges(shared)
+    check("只勾共用锚点的一条时终点也顺延", #shared_ranges == 1
+        and shared_ranges[1].from == "b" and shared_ranges[1].to == "d",
+        shared_ranges[1] and (tostring(shared_ranges[1].from) .. "-"
+            .. tostring(shared_ranges[1].to)))
+
+    -- 整文件选中：一个无锚点范围，覆盖度才能算「已翻译」
+    Picker.select_none(state)
+    Picker.select_rows(state, { 1, 2, 3 })
+    ranges = Picker.selected_ranges(state)
+    check("整文件选中给整文件范围", #ranges == 1
+        and ranges[1].from == nil and ranges[1].to == nil)
     Picker.select_none(state)
 end
 
-print("== 2d. 部分选择先确认（锚点行仍按文件翻译） ==")
+print("== 2d. 开始翻译直接交付锚点范围 ==")
 do
     local plugin = {
         currentBookPath = function() return "/books/sections.epub" end,
         getBookOutline = function() return section_outline end,
     }
     local started
-    plugin.translateSelectedChapters = function(_, indexes) started = indexes end
+    plugin.translateSelectedChapters = function(_, ranges) started = ranges end
     opened_menus, closed_widgets, notifications = {}, {}, {}
-
-    local function last_dialog()
-        for index = #opened_menus, 1, -1 do
-            if opened_menus[index].is_dialog then return opened_menus[index] end
-        end
-        return nil
-    end
 
     Picker.show(plugin)
     local menu = opened_menus[1]
     menu.perpage = 14
-    -- 只选「1.2 第一节」：文件 1 还有另两条没选
+    -- 只选「1.2 第一节」
     menu:onMenuSelect(menu.item_table[8])
     menu:onMenuSelect(menu.item_table[1])
-    local dialog = last_dialog()
-    check("部分选择先弹确认框", dialog ~= nil and #closed_widgets == 0,
-        tostring(dialog and dialog.title))
-    check("确认框说明会连带翻译其余章节", dialog ~= nil
-        and tostring(dialog.title):find("其余章节", 1, true) ~= nil,
-        dialog and dialog.title)
-    dialog.buttons[1][1].callback()
-    check("取消后不开始", started == nil)
+    check("部分选择直接开始，不再弹确认框",
+        #closed_widgets == 1 and closed_widgets[1] == menu, tostring(#closed_widgets))
+    check("交付锚点范围", started ~= nil and #started == 1
+        and started[1].index == 1 and started[1].from == "s1" and started[1].to == "s2",
+        started and started[1] and tostring(started[1].from) .. "-" .. tostring(started[1].to))
 
-    -- 再次点开始并确认：菜单关闭，交付唯一文件号
-    menu:onMenuSelect(menu.item_table[1])
-    dialog = last_dialog()
-    dialog.buttons[1][2].callback()
-    check("确认后开始翻译", started ~= nil and #started == 1 and started[1] == 1,
-        started and table.concat(started, ","))
-    check("确认后关闭菜单", #closed_widgets == 3 and closed_widgets[3] == menu)
-
-    -- 选中文件内全部条目：不需要确认
+    -- 选中文件内全部条目：整文件范围
     opened_menus, closed_widgets, started = {}, {}, nil
     Picker.show(plugin)
     menu = opened_menus[1]
@@ -474,8 +521,18 @@ do
     menu:onMenuSelect(menu.item_table[8])
     menu:onMenuSelect(menu.item_table[9])
     menu:onMenuSelect(menu.item_table[1])
-    check("整文件选中时不弹确认框", last_dialog() == nil)
-    check("整文件选中直接开始", started ~= nil and #started == 1 and started[1] == 1)
+    check("整文件选中交付整文件范围", started ~= nil and #started == 1
+        and started[1].index == 1 and started[1].from == nil and started[1].to == nil)
+
+    -- 单条目文件同样是一个无锚点范围
+    opened_menus, closed_widgets, started = {}, {}, nil
+    Picker.show(plugin)
+    menu = opened_menus[1]
+    menu.perpage = 14
+    menu:onMenuSelect(menu.item_table[10])
+    menu:onMenuSelect(menu.item_table[1])
+    check("单条目文件交付无锚点范围", started ~= nil and #started == 1
+        and started[1].index == 2 and started[1].from == nil and started[1].to == nil)
 
     -- 长按给出完整标题、条目数与锚点
     opened_menus, notifications = {}, {}
@@ -662,8 +719,10 @@ do
 
     menu:onMenuSelect(menu.item_table[1])
     check("开始翻译关闭菜单", #closed_widgets == 1 and closed_widgets[1] == menu)
-    check("交付升序章节号",
-        started ~= nil and #started == 3 and started[1] == 1 and started[3] == 3)
+    check("交付升序整文件范围",
+        started ~= nil and #started == 3
+        and started[1].index == 1 and started[3].index == 3
+        and started[1].from == nil and started[3].to == nil)
 
     -- 目录解析失败：提示，不打开空菜单
     plugin.getBookOutline = function() return nil, "坏的 container.xml" end

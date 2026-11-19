@@ -166,7 +166,7 @@ long_paragraph = table.concat(long_paragraph, " ")
 local BOOK = stub_book(ROOT .. "/books/job.epub", {
     { "META-INF/container.xml", CONTAINER },
     { "OEBPS/content.opf", OPF },
-    { "OEBPS/chap1.xhtml", xhtml("<h1>One</h1><p>First paragraph.</p><p>Second paragraph.</p>") },
+    { "OEBPS/chap1.xhtml", xhtml("<h1 id=\"h1\">One</h1><p id=\"p1\">First paragraph.</p><p id=\"p2\">Second paragraph.</p>") },
     { "OEBPS/style.css", "ul.tight { padding-left: 0; }\n" },
     { "OEBPS/chap2.xhtml", xhtml("<p>Chapter two content.</p><ul><li>First bullet.</li><li>Second bullet.</li></ul><ul><li>Parent bullet.<ul class=\"tight\"><li>Nested bullet.</li></ul></li></ul>") },
     { "OEBPS/chap3.xhtml", xhtml("<p>" .. long_paragraph .. "</p>") },
@@ -274,6 +274,44 @@ do
     end
     check("第一章三段（h1+p+p）", parents["s000001"] == 1 and parents["s000002"] == 1
         and parents["s000003"] == 1)
+
+    -- 锚点范围导出：只导出 p1..p2 之间的段落，章节标 partial 供导入侧使用
+    local ranged = Epub.collect_segments{
+        book_path = BOOK,
+        chapter_ranges = { { index = 1, from = "p1", to = "p2" } },
+        max_chars = 2000,
+        titles = { [1] = "第一章" },
+    }
+    check("范围导出的段落", ranged ~= nil and #ranged.segments == 1
+        and ranged.segments[1].source == "First paragraph.",
+        ranged and #ranged.segments)
+    check("范围导出的章节标 partial", ranged and ranged.chapters[1].partial == true)
+
+    local whole = Epub.collect_segments{
+        book_path = BOOK, chapter_ranges = { { index = 1 } }, max_chars = 2000,
+    }
+    check("整文件范围不标 partial", whole ~= nil and #whole.segments == 3
+        and whole.chapters[1].partial == nil, whole and #whole.segments)
+
+    local missing = Epub.collect_segments{
+        book_path = BOOK,
+        chapter_ranges = { { index = 1, from = "nope", to = "p2" } },
+        max_chars = 2000,
+    }
+    check("锚点缺失时导出放宽到文件开头", missing ~= nil and #missing.segments == 2,
+        missing and #missing.segments)
+
+    -- 显式给了范围但全部无效：必须报错，不能悄悄退回「整本书」
+    local none, none_err = Epub.collect_segments{
+        book_path = BOOK, chapter_ranges = { { index = 99 } }, max_chars = 2000,
+    }
+    check("范围全部无效时导出报错", none == nil
+        and tostring(none_err):find("范围", 1, true) ~= nil, tostring(none_err))
+    local empty, empty_err = Epub.collect_segments{
+        book_path = BOOK, chapter_ranges = {}, max_chars = 2000,
+    }
+    check("显式空范围不退回整本", empty == nil
+        and tostring(empty_err):find("范围", 1, true) ~= nil, tostring(empty_err))
 
     local list = Epub.collect_segments{
         book_path = BOOK, chapter_indexes = { 2 }, max_chars = 2000,

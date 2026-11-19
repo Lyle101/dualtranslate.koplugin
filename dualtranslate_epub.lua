@@ -349,6 +349,10 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                                 end
                                 table.insert(candidates, {
                                     order = node.inner_start,
+                                    -- End of the element (closing tag), used by
+                                    -- range slicing: an anchor inside this
+                                    -- element still belongs to its paragraph.
+                                    span_end = tag_end,
                                     source = source,
                                     list_indent = list_indent,
                                     selector = 'DocFragment[Source="' .. css_attribute(relative)
@@ -454,27 +458,171 @@ local function normalize_indexes(list, spine_count)
 end
 Epub.normalize_indexes = normalize_indexes
 
+-- Chapter ranges (7.3, anchor granularity): {index, from, to} means "the spine
+-- file at `index`, from the element whose id is `from` (inclusive) up to `to`
+-- (exclusive)".  Both edges may be nil, so {index = n} is the whole file and a
+-- TOC entry becomes {index, from = entry.anchor, to = next_entry.anchor}.
+--
+-- Invalid entries are dropped rather than guessed at: an index outside the
+-- spine cannot be translated.  A range with identical edges is widened below
+-- instead of dropped, because dropping it would empty the whole selection.
+local function normalize_ranges(ranges, spine_count)
+    local out, seen = {}, {}
+    for position, range in ipairs(type(ranges) == "table" and ranges or {}) do
+        if type(range) == "table" then
+            local index = tonumber(range.index)
+            local from, to = range.from, range.to
+            if type(from) ~= "string" or from == "" then from = nil end
+            if type(to) ~= "string" or to == "" then to = nil end
+            -- Adjacent TOC entries can share one anchor.  Such a range cannot
+            -- express "one chapter": widen it to the end of the file instead
+            -- of dropping the selection (an empty list used to mean "export
+            -- the whole book").
+            if from and to and from == to then to = nil end
+            if index and index == math.floor(index) and index >= 1 and index <= spine_count then
+                local key = string.format("%d\0%s\0%s", index, from or "", to or "")
+                if not seen[key] then
+                    seen[key] = true
+                    out[#out + 1] = { index = index, from = from, to = to,
+                        sequence = position }
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.index ~= b.index then return a.index < b.index end
+        return a.sequence < b.sequence
+    end)
+    return out
+end
+Epub.normalize_ranges = normalize_ranges
+
+-- First and last byte offset of each requested id in the chapter text.  Old
+-- EPUB2 files anchor with <a name="..."> instead of id, so both count.  A
+-- duplicated id (bad converters emit them) needs both ends: a range start
+-- takes the first occurrence, a range end the last, so the slice only ever
+-- grows.  Missing ids are absent from the result.
+local function tag_anchor_id(raw)
+    -- `[%s]id=` rather than plain `id=`: data-id and its cousins are not ids.
+    -- `name=` also matches unrelated attributes (a meta generator); a hit can
+    -- only move a boundary earlier, i.e. widen the slice.
+    return raw:match("[%s]id%s*=%s*[\"']([^\"']+)[\"']")
+        or raw:match("[%s]name%s*=%s*[\"']([^\"']+)[\"']")
+end
+Epub.tag_anchor_id = tag_anchor_id
+
+local function anchor_offsets(document, wanted)
+    local offsets = {}
+    if next(wanted) == nil then return offsets end
+    local position = 1
+    while true do
+        local tag_start, tag_end = document:find("<[^>]*>", position)
+        if not tag_start then break end
+        local raw = document:sub(tag_start, tag_end)
+        position = tag_end + 1
+        if not raw:match("^<%s*[!?/]") then
+            local id = tag_anchor_id(raw)
+            if id and wanted[id] then
+                local seen = offsets[id]
+                if seen then
+                    seen.last = tag_start
+                else
+                    offsets[id] = { first = tag_start, last = tag_start }
+                end
+            end
+        end
+    end
+    return offsets
+end
+Epub.anchor_offsets = anchor_offsets
+
+-- Keep the candidates that overlap one of the chapter's ranges, erring wide:
+-- an element that starts before the range but is still open at the start
+-- anchor owns the chapter's first words, and a TOC whose anchor is missing
+-- from the XHTML must translate too much, never nothing.  Anchors are
+-- normalised by the outline parser, so they carry no %XX escapes and match
+-- the ids in the file.
+local function slice_candidates(candidates, ranges, document)
+    if #candidates == 0 or #ranges == 0 then return candidates end
+    local logger = require("logger")
+    local wanted, whole = {}, false
+    for _, range in ipairs(ranges) do
+        -- Callers already skip whole-file chapters; this keeps direct callers
+        -- (and tests) from slicing them by accident.
+        if not range.from and not range.to then whole = true end
+        if range.from then wanted[range.from] = true end
+        if range.to then wanted[range.to] = true end
+    end
+    if whole then return candidates end
+    local offsets = anchor_offsets(document, wanted)
+    for anchor in pairs(wanted) do
+        if not offsets[anchor] then
+            logger.warn("dualtranslate: range anchor missing from the chapter, widening:", anchor)
+        end
+    end
+    local edges = {}
+    for _, range in ipairs(ranges) do
+        -- Start takes the first occurrence and end the last, so a duplicated
+        -- id can only widen the slice.
+        local from = range.from and offsets[range.from] and offsets[range.from].first or nil
+        local to = range.to and offsets[range.to] and offsets[range.to].last or nil
+        if from and to and from >= to then
+            -- The TOC lists the end before the start.  Translating to the end
+            -- of the file is recoverable; an empty slice silently loses text.
+            logger.warn("dualtranslate: range anchors out of order, widening:", range.from, range.to)
+            to = nil
+        end
+        edges[#edges + 1] = { from = from, to = to }
+    end
+    local kept, seen = {}, {}
+    for _, candidate in ipairs(candidates) do
+        local order = candidate.order or 0
+        for _, edge in ipairs(edges) do
+            -- `order` is the element's inner start; an anchor on an inline
+            -- element inside a paragraph sits after it.  A candidate that
+            -- merely starts before the anchor but ends after it still owns
+            -- the chapter's first words, so it counts as inside.
+            local after_start = not edge.from or order >= edge.from
+                or (candidate.span_end or 0) > edge.from
+            if after_start and (not edge.to or order < edge.to) then
+                if not seen[candidate.selector] then
+                    seen[candidate.selector] = true
+                    kept[#kept + 1] = candidate
+                end
+                break
+            end
+        end
+    end
+    return kept
+end
+Epub.slice_candidates = slice_candidates
+
 -- 7.3: span must reuse Epub.resolve (the fragment may be an xpointer, not a
--- number); selection normalizes the requested indexes against the spine.
-local function resolve_chapters(opts, book_path, work_dir, spine)
+-- number); selection carries explicit ranges, with the pre-range
+-- chapter_indexes shape still accepted for queued jobs from older versions.
+local function resolve_ranges(opts, book_path, work_dir, spine)
     local mode = opts.mode or "all"
+    local ranges = {}
     if mode == "all" then
-        local indexes = {}
-        for index = 1, #spine do indexes[#indexes + 1] = index end
-        return indexes
+        for index = 1, #spine do ranges[#ranges + 1] = { index = index } end
+        return ranges
     elseif mode == "span" then
         local chapter = Epub:resolve(book_path, work_dir, opts.fragment)
         local start = chapter and chapter.index or 1
         local span_count = math.max(1, tonumber(opts.span) or 1)
-        local indexes = {}
         for index = start, math.min(start + span_count - 1, #spine) do
-            indexes[#indexes + 1] = index
+            ranges[#ranges + 1] = { index = index }
         end
-        return indexes
+        return ranges
     elseif mode == "selection" then
-        return normalize_indexes(opts.chapter_indexes, #spine)
+        local ranged = normalize_ranges(opts.chapter_ranges, #spine)
+        if #ranged > 0 then return ranged end
+        for _, index in ipairs(normalize_indexes(opts.chapter_indexes, #spine)) do
+            ranges[#ranges + 1] = { index = index }
+        end
+        return ranges
     end
-    return {}
+    return ranges
 end
 
 function Epub.translate_overlay(opts, ...)
@@ -522,14 +670,33 @@ function Epub.translate_overlay(opts, ...)
     if not resolved then cleanup(); return nil, err end
     local spine = resolved.spine
     local spine_count = resolved.spine_count or #spine
-    local indexes = resolve_chapters(opts, book_path, work_dir, spine)
-    if #indexes == 0 then cleanup(); return nil, "没有可翻译的章节" end
+    local ranges = resolve_ranges(opts, book_path, work_dir, spine)
+    if #ranges == 0 then cleanup(); return nil, "没有可翻译的章节" end
+    -- Group the ranges by file: a chapter read once, sliced once per range.
+    -- `whole` records whether any range covers the entire file, which is what
+    -- decides between "已翻译" and "部分" for the manifest below.
+    local ranges_by_index, chapter_order = {}, {}
+    for _, range in ipairs(ranges) do
+        local bucket = ranges_by_index[range.index]
+        if not bucket then
+            bucket = {}
+            ranges_by_index[range.index] = bucket
+            chapter_order[#chapter_order + 1] = range.index
+        end
+        bucket[#bucket + 1] = range
+    end
     local chapters = {}
-    for _, index in ipairs(indexes) do
+    for _, index in ipairs(chapter_order) do
         local relative = spine[index]
         if relative then
+            local bucket = ranges_by_index[index]
+            local whole = false
+            for _, range in ipairs(bucket) do
+                if not range.from and not range.to then whole = true end
+            end
             chapters[#chapters + 1] = { index = index, relative = relative,
-                absolute = work_dir .. "/" .. relative }
+                absolute = work_dir .. "/" .. relative, ranges = bucket,
+                whole = whole }
         end
     end
 
@@ -551,6 +718,14 @@ function Epub.translate_overlay(opts, ...)
         if #candidates == 0 and document then
             candidates = collect_overlay_candidates(document, current.relative,
                 current.index, true, styles)
+        end
+        if document and #candidates > 0 and not current.whole then
+            local total_before = #candidates
+            candidates = slice_candidates(candidates, current.ranges, document)
+            -- Missing anchors widen a range to the file edges; when that (or a
+            -- one-paragraph chapter) keeps every candidate, the file really is
+            -- fully translated and must not stay "partial" forever.
+            if #candidates == total_before then current.whole = true end
         end
         chapter_candidates[current.index] = candidates
         total = total + #candidates
@@ -676,12 +851,18 @@ function Epub.translate_overlay(opts, ...)
                     -- chapter) also left complete=true, so page-turn follow
                     -- skipped the missing chapter forever.
                     status[index] = "failed"
-                elseif st.candidates == 0 then
-                    status[index] = "done"
+                elseif status[index] == "done" then
+                    -- Entries are only ever added or replaced, so a range run
+                    -- can only fill a file in, never empty it out.
                 elseif st.cancelled then
                     status[index] = "partial"
+                elseif st.candidates == 0 then
+                    -- An empty whole file is done (image-only chapter); an
+                    -- empty slice says nothing about the rest of the file.
+                    status[index] = st.whole and "done" or (status[index] or "partial")
                 elseif st.success == st.candidates and st.failed == 0 then
-                    status[index] = "done"
+                    -- A finished range is still only a fraction of the file.
+                    status[index] = st.whole and "done" or "partial"
                 elseif st.success > 0 then
                     status[index] = "partial"
                 else
@@ -831,7 +1012,7 @@ function Epub.translate_overlay(opts, ...)
         chapter_pos = chapter_pos + 1
         local candidates = chapter_candidates[current.index] or {}
         local st = { candidates = #candidates, success = 0, failed = 0,
-            entered = true, cancelled = false,
+            entered = true, cancelled = false, whole = current.whole == true,
             unreadable = unreadable[current.index] == true }
         chapter_stats[current.index] = st
         -- Release the collected source text of this chapter as soon as its
@@ -1451,7 +1632,7 @@ local ExportSession = {}
 ExportSession.__index = ExportSession
 
 function ExportSession:chapter_count()
-    return #self.chapter_indexes
+    return #self.chapter_order
 end
 
 function ExportSession:processed()
@@ -1464,7 +1645,7 @@ end
 function ExportSession:step(seconds)
     local budget = tonumber(seconds) or 0.2
     local started = os.clock()
-    local total = #self.chapter_indexes
+    local total = #self.chapter_order
     while self.position < total do
         self:_next_chapter()
         if os.clock() - started >= budget then break end
@@ -1474,7 +1655,7 @@ end
 
 function ExportSession:_next_chapter()
     self.position = self.position + 1
-    local index = self.chapter_indexes[self.position]
+    local index = self.chapter_order[self.position]
     local relative = self.spine[index]
     local document = relative and self.third[relative] and read_file(self.third[relative])
     if not document then
@@ -1485,8 +1666,23 @@ function ExportSession:_next_chapter()
     if #candidates == 0 then
         candidates = collect_overlay_candidates(document, relative, index, true, self.sheet)
     end
+    local whole = self.whole_by_index[index] == true
+    if #candidates > 0 and not whole then
+        local total_before = #candidates
+        candidates = slice_candidates(candidates, self.ranges_by_index[index], document)
+        -- Same rule as the translation path: a slice that kept every candidate
+        -- covered the whole file, so the export may say "not partial".
+        if #candidates == total_before then
+            whole = true
+            self.whole_by_index[index] = true
+        end
+    end
     local title = self.titles[index] or string.format("第 %d 章", index)
-    self.chapters[#self.chapters + 1] = { index = index, title = title }
+    -- `partial` is what keeps the importer from marking a whole file done
+    -- when only one chapter inside it was exported.
+    local chapter = { index = index, title = title }
+    if not whole then chapter.partial = true end
+    self.chapters[#self.chapters + 1] = chapter
     for _, candidate in ipairs(candidates) do
         local parts = Tools.split_text(candidate.source, self.max_chars)
         if #parts == 0 then parts = { candidate.source } end
@@ -1574,17 +1770,39 @@ function Epub.begin_segment_export(opts)
     local spine = package.spine
     if #spine == 0 then cleanup(); return nil, "找不到可读取的 spine 项" end
 
-    local chapter_indexes
-    if type(opts.chapter_indexes) == "table" and #opts.chapter_indexes > 0 then
-        chapter_indexes = normalize_indexes(opts.chapter_indexes, #spine)
-    else
-        chapter_indexes = {}
-        for index = 1, #spine do chapter_indexes[#chapter_indexes + 1] = index end
+    -- An explicit range list that normalises to nothing must fail, not fall
+    -- back to "the caller chose nothing, so export the whole book": that fall
+    -- back would write the entire book to a PC-readable job file after the
+    -- privacy notice promised a selection.
+    local ranges_provided = type(opts.chapter_ranges) == "table"
+    local ranges = normalize_ranges(opts.chapter_ranges, #spine)
+    if #ranges == 0 and not ranges_provided then
+        local chapter_indexes
+        if type(opts.chapter_indexes) == "table" and #opts.chapter_indexes > 0 then
+            chapter_indexes = normalize_indexes(opts.chapter_indexes, #spine)
+        else
+            chapter_indexes = {}
+            for index = 1, #spine do chapter_indexes[#chapter_indexes + 1] = index end
+        end
+        for _, index in ipairs(chapter_indexes) do
+            ranges[#ranges + 1] = { index = index }
+        end
     end
-    if #chapter_indexes == 0 then cleanup(); return nil, "没有可导出的章节" end
+    if #ranges == 0 then cleanup(); return nil, "所选范围没有可导出的章节" end
+    local ranges_by_index, chapter_order, whole_by_index = {}, {}, {}
+    for _, range in ipairs(ranges) do
+        local bucket = ranges_by_index[range.index]
+        if not bucket then
+            bucket = {}
+            ranges_by_index[range.index] = bucket
+            chapter_order[#chapter_order + 1] = range.index
+        end
+        bucket[#bucket + 1] = range
+        if not range.from and not range.to then whole_by_index[range.index] = true end
+    end
 
     local wanted = {}
-    for _, index in ipairs(chapter_indexes) do
+    for _, index in ipairs(chapter_order) do
         if spine[index] then wanted[spine[index]] = true end
     end
     local third = Tools.extract_entries(book_path, work_dir, wanted)
@@ -1616,7 +1834,9 @@ function Epub.begin_segment_export(opts)
         sheet = ListIndent.compile(styles),
         max_chars = max_chars,
         titles = type(opts.titles) == "table" and opts.titles or {},
-        chapter_indexes = chapter_indexes,
+        chapter_order = chapter_order,
+        ranges_by_index = ranges_by_index,
+        whole_by_index = whole_by_index,
         chapters = {},
         segments = {},
         unreadable = 0,

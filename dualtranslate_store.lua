@@ -689,7 +689,22 @@ function Store.importResult(job, result, opts)
             if index then
                 local total = parent_counts[index] or 0
                 local done = done_counts[index] or 0
-                if total == 0 or done == total then
+                if chapter.partial then
+                    -- Only one range of this file was exported; the paragraphs
+                    -- outside it never entered the job, so "done" would lie.
+                    if chapter_status[index] == "done" then
+                        -- A finished file stays finished: entries are merged,
+                        -- a range import cannot take anything away.
+                    elseif done > 0 then
+                        chapter_status[index] = "partial"
+                    elseif total > 0 then
+                        -- Every paragraph in the range failed.  Filing that
+                        -- under "partly translated" would hide the failure.
+                        chapter_status[index] = "failed"
+                    else
+                        chapter_status[index] = chapter_status[index] or "partial"
+                    end
+                elseif total == 0 or done == total then
                     chapter_status[index] = "done"
                 elseif done > 0 then
                     chapter_status[index] = "partial"

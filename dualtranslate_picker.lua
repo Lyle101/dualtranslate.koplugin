@@ -2,9 +2,9 @@
 -- Rows are TOC entries when several chapters live in one XHTML (each entry
 -- keeps its anchor), otherwise spine files.  Selection is per book, lives
 -- only in this dialog's state and is handed to the queue as `mode =
--- "selection"` (7.3); nothing is persisted as a setting.  A job still
--- translates whole files, so the row selection resolves to the distinct
--- spine indexes behind it.
+-- "selection"` (7.3); nothing is persisted as a setting.  A selection becomes
+-- chapter ranges: rows sharing a file own the slice between their anchors, and
+-- selecting a whole file sends it without anchors.
 --
 -- Layout note: the chapter list uses the native Menu pagination instead of a
 -- hard 30-per-page slice.  Menu's per-page count also drives its item font
@@ -304,35 +304,88 @@ function Picker.select_rows(state, keys)
     end
 end
 
--- Ascending spine order with each file once, which is what the worker
--- expects for a job: selecting five chapters of one XHTML still asks for that
--- file once.
-function Picker.selected_indexes(state)
-    local indexes, seen = {}, {}
+-- The job's unit: one range per contiguous run of selected TOC entries in a
+-- file.  Selecting every entry of a file yields a whole-file range (no
+-- anchors), which is what keeps the manifest's 已翻译 flag honest; a run that
+-- reaches a file edge leaves that side open (nil).  Boundary anchors that the
+-- file does not carry are widened: too much text is recoverable, too little
+-- is a silent hole.
+function Picker.selected_ranges(state)
+    local ranges = {}
+    local by_file, order = {}, {}
     for _, chapter in ipairs(state.chapters or {}) do
-        if state.selected[chapter.key] and not seen[chapter.index] then
-            seen[chapter.index] = true
-            indexes[#indexes + 1] = chapter.index
+        local bucket = by_file[chapter.index]
+        if not bucket then
+            bucket = {}
+            by_file[chapter.index] = bucket
+            order[#order + 1] = chapter.index
+        end
+        bucket[#bucket + 1] = chapter
+    end
+    -- The entry that ends a run is the next one whose anchor is not already
+    -- used inside the run: an anchor equal to one of them would describe an
+    -- empty slice (adjacent TOC entries sometimes share one), and slicing
+    -- stops *before* the end anchor, so reusing it would drop a chapter.
+    local function anchor_from(rows, position, stops)
+        for probe = position, #rows do
+            local row = rows[probe]
+            if row and row.anchor and not stops[row.anchor] then return row.anchor end
+        end
+        return nil
+    end
+    local function anchor_before(rows, position)
+        for probe = position - 1, 1, -1 do
+            local row = rows[probe]
+            if row and row.anchor then return row.anchor end
+        end
+        return nil
+    end
+    for _, index in ipairs(order) do
+        local rows = by_file[index]
+        local picked = 0
+        for _, row in ipairs(rows) do
+            if state.selected[row.key] then picked = picked + 1 end
+        end
+        if picked == #rows then
+            ranges[#ranges + 1] = { index = index }
+        elseif picked > 0 then
+            local run_start
+            for position = 1, #rows + 1 do
+                local row = rows[position]
+                local selected = row and state.selected[row.key]
+                if selected and not run_start then
+                    run_start = position
+                elseif run_start and not selected then
+                    local first = rows[run_start]
+                    -- The first entry of a file may still carry an anchor; it
+                    -- is not used as the start (content before it belongs to
+                    -- the file's opening, and skipping it would lose text).
+                    -- A run starting mid-file does start at its own anchor:
+                    -- anything before it is the previous chapter, and
+                    -- reaching back would translate that chapter too.
+                    local own = first.anchor
+                    local from = run_start > 1
+                        and (own or anchor_before(rows, run_start)) or nil
+                    -- Every anchor the run already covers is a stop: the next
+                    -- unselected entry may share one of them, and ending the
+                    -- slice there would cut the run short.
+                    local stops = {}
+                    for probe = run_start, position - 1 do
+                        local row = rows[probe]
+                        if row and row.anchor then stops[row.anchor] = true end
+                    end
+                    if from then stops[from] = true end
+                    ranges[#ranges + 1] = {
+                        index = index,
+                        from = from,
+                        to = anchor_from(rows, position, stops),
+                    }
+                    run_start = nil
+                end
+            end
         end
     end
-    return indexes
-end
-
--- Files the selection covers only partly.  The job is still per file, so the
--- dialog has to warn that the rest of those files will be translated too.
-function Picker.partial_files(state)
-    local totals, picked, list = {}, {}, {}
-    for _, chapter in ipairs(state.chapters or {}) do
-        totals[chapter.index] = (totals[chapter.index] or 0) + 1
-        if state.selected[chapter.key] then
-            picked[chapter.index] = (picked[chapter.index] or 0) + 1
-        end
-    end
-    for index, total in pairs(totals) do
-        if picked[index] and picked[index] < total then list[#list + 1] = index end
-    end
-    table.sort(list)
-    return list
+    return ranges
 end
 
 function Picker.page_count(state, page_size)
@@ -400,11 +453,6 @@ function Picker.build_item_table(state, handlers, opts)
     opts = opts or {}
     local selected = Picker.count(state)
     local translated = Picker.translated_files(state)
-    -- Rows are TOC entries in entry mode, but the confirm row counts what the
-    -- job will touch: the distinct spine files behind the selection.  Say
-    -- "文件" there, or "开始翻译（331 章）" would contradict the "790 条"
-    -- right above it.
-    local units = #Picker.selected_indexes(state)
     local files = state.file_count or 0
     local entry_mode = state.entry_mode == true
     -- When several TOC labels share one spine item and the list shows them
@@ -414,7 +462,9 @@ function Picker.build_item_table(state, handlers, opts)
     local status_text, unit_word
     if entry_mode then
         status_text = string.format(_("共 %d 条 · %d 文件"), #state.chapters, files)
-        unit_word = _("条")
+        -- A row is one chapter, so the selected count speaks in 章 even though
+        -- the total speaks in TOC entries.
+        unit_word = _("章")
     elseif (state.toc_total or 0) > #state.chapters then
         status_text = string.format(_("共 %d 段 · 目录 %d 条"),
             #state.chapters, state.toc_total)
@@ -428,20 +478,14 @@ function Picker.build_item_table(state, handlers, opts)
     end
     status_text = status_text .. string.format(_(" · 已选 %d %s"), selected, unit_word)
     -- P3: the same picker exports an MCP job, so the confirm row's wording
-    -- comes from the caller; the default stays the translation one.  The
-    -- caller may supply a separate "per file" template for entry mode.
-    local start_label
-    if entry_mode then
-        start_label = opts.start_text_files or opts.start_text
-            or _("开始翻译（%d 个文件）")
-    else
-        start_label = opts.start_text or _("开始翻译（%d 章）")
-    end
+    -- comes from the caller; the default stays the translation one.  It now
+    -- counts chapters (rows), because a row translates its own range.
+    local start_label = opts.start_text or _("开始翻译（%d 章）")
     local items = {
         {
-            text = string.format(start_label, units),
+            text = string.format(start_label, selected),
             bold = true,
-            select_enabled = units > 0,
+            select_enabled = selected > 0,
             callback = handlers.on_start,
         },
         { text = _("全选本书"), callback = handlers.on_select_all },
@@ -478,9 +522,9 @@ function Picker.build_item_table(state, handlers, opts)
     -- identical buttons sit on screen at the same time.
     if opts.trailing then
         items[#items + 1] = {
-            text = string.format(start_label, units),
+            text = string.format(start_label, selected),
             bold = true,
-            select_enabled = units > 0,
+            select_enabled = selected > 0,
             callback = handlers.on_start,
         }
     end
@@ -492,9 +536,8 @@ local function book_display_name(book_path)
     return (name:gsub("%.[Ee][Pp][Uu][Bb]$", ""))
 end
 
--- opts.on_start(indexes) overrides the default translate action; opts.start_text
--- changes the confirm row (e.g. "导出任务（%d 章）"), and opts.start_text_files
--- its entry-mode variant ("导出任务（%d 个文件）").  MCP export reuses the
+-- opts.on_start(ranges) overrides the default translate action; opts.start_text
+-- changes the confirm row (e.g. "导出任务（%d 章）").  MCP export reuses the
 -- picker unchanged so chapter identity is chosen by exactly one implementation.
 function Picker.show(plugin, opts)
     opts = opts or {}
@@ -521,7 +564,6 @@ function Picker.show(plugin, opts)
         return Picker.build_item_table(state, handlers, {
             trailing = state.trailing_confirm == true,
             start_text = opts.start_text,
-            start_text_files = opts.start_text_files,
         })
     end
 
@@ -556,45 +598,14 @@ function Picker.show(plugin, opts)
             rebuild()
         end,
         on_start = function()
-            local indexes = Picker.selected_indexes(state)
-            if #indexes == 0 then return end
-            local function start()
-                UIManager:close(menu)
-                if opts.on_start then
-                    opts.on_start(indexes)
-                else
-                    plugin:translateSelectedChapters(indexes)
-                end
+            local ranges = Picker.selected_ranges(state)
+            if #ranges == 0 then return end
+            UIManager:close(menu)
+            if opts.on_start then
+                opts.on_start(ranges)
+            else
+                plugin:translateSelectedChapters(ranges)
             end
-            -- Rows are TOC entries, but a job still translates whole files.
-            -- Picking one section out of a 23-chapter XHTML therefore queues
-            -- all 23; say that before spending a long run on them.
-            local partial = Picker.partial_files(state)
-            if #partial == 0 then
-                start()
-                return
-            end
-            local ButtonDialog = require("ui/widget/buttondialog")
-            local dialog
-            dialog = ButtonDialog:new{
-                title = string.format(
-                    _("所选条目中，有 %d 个文件只选了一部分；这一版以文件为单位，这些文件的其余章节也会一并处理。"),
-                    #partial),
-                buttons = {{
-                    {
-                        text = _("取消"),
-                        callback = function() UIManager:close(dialog) end,
-                    },
-                    {
-                        text = _("继续"),
-                        callback = function()
-                            UIManager:close(dialog)
-                            start()
-                        end,
-                    },
-                }},
-            }
-            UIManager:show(dialog)
         end,
     }
 
@@ -602,7 +613,7 @@ function Picker.show(plugin, opts)
         title = _("选择章节"),
         subtitle = book_display_name(book_path),
         item_table = Picker.build_item_table(state, handlers,
-            { start_text = opts.start_text, start_text_files = opts.start_text_files }),
+            { start_text = opts.start_text }),
         is_borderless = true,
         is_popout = false,
     }
@@ -626,7 +637,7 @@ function Picker.show(plugin, opts)
                 or tostring(item.chapter_index), item.full_title or "")
             if (item.toc_entries or 0) > 1 then
                 text = text .. string.format(
-                    _("\n该文件共 %d 条目录，本版以文件为单位"), item.toc_entries)
+                    _("\n该文件共 %d 条目录"), item.toc_entries)
             end
             if item.anchor then
                 text = text .. string.format(_("\n锚点：%s"), item.anchor)

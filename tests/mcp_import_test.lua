@@ -216,6 +216,137 @@ do
 end
 
 -- ============================================================
+print("== 2b. 范围任务只标 partial ==")
+do
+    local ranged_book = ROOT .. "/books/ranged.epub"
+    local handle = io.open(ranged_book, "wb")
+    handle:write(string.rep("y", 2048))
+    handle:close()
+    -- 同一本书只导出了第一章的一个范围：导入后不能把第一章算成整章完成
+    local ranged_job = {
+        schema = "dualtranslate.job.v1",
+        job_id = "20261115_120000_0002",
+        created_at = os.time(),
+        book = {
+            device_path = ranged_book, title = "Ranged", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 5,
+            file_size = lfs.attributes(ranged_book, "size"),
+            file_mtime = lfs.attributes(ranged_book, "modification") or 0,
+        },
+        chapters = { { index = 1, title = "One", partial = true } },
+        segments = {
+            { id = "s000001", parent_id = "s000001", part = 1, parent_total = 1,
+              chapter_index = 1, chapter_title = "One", selector = "sel-ranged",
+              xpointer = "/body/DocFragment/body/p[1]", source = "Ranged paragraph" },
+        },
+        options = { max_chars_per_segment = 4500, split_long_segments = true },
+    }
+    local result = make_result({ { id = "s000001", text = "范围段落" } })
+    result.job_id = ranged_job.job_id
+    local summary, err = Store.importResult(ranged_job, result)
+    check("范围任务导入成功", summary ~= nil, tostring(err))
+    local manifest = Overlay.loadManifest(Store.bookDir(ranged_book, "zh-Hans"))
+    local provider = manifest and manifest.providers["mcp:gpt-5"]
+    check("范围任务落 partial_chapters",
+        provider and provider.partial_chapters and provider.partial_chapters[1] == 1
+        and #(provider.chapters or {}) == 0,
+        provider and ("done=" .. #(provider.chapters or {})
+            .. " partial=" .. #(provider.partial_chapters or {})))
+    check("范围任务不算整本完成", provider and provider.complete == false)
+end
+
+-- ============================================================
+print("== 2c. 范围导入不降级已完成的文件 ==")
+do
+    local done_book = ROOT .. "/books/done.epub"
+    local handle = io.open(done_book, "wb")
+    handle:write(string.rep("w", 1536))
+    handle:close()
+    local function job_for(job_id, partial, selector, source)
+        return {
+            schema = "dualtranslate.job.v1",
+            job_id = job_id,
+            created_at = os.time(),
+            book = {
+                device_path = done_book, title = "Done", source_lang = "en",
+                target_lang = "zh-Hans", spine_count = 5,
+                file_size = lfs.attributes(done_book, "size"),
+                file_mtime = lfs.attributes(done_book, "modification") or 0,
+            },
+            chapters = { { index = 1, title = "One", partial = partial or nil } },
+            segments = {
+                { id = "s000001", parent_id = "s000001", part = 1, parent_total = 1,
+                  chapter_index = 1, chapter_title = "One", selector = selector,
+                  xpointer = "/body/DocFragment/body/p[1]", source = source },
+            },
+            options = { max_chars_per_segment = 4500, split_long_segments = true },
+        }
+    end
+    local whole_job = job_for("20261115_120000_0003", false, "sel-done-1", "Whole")
+    local whole_result = make_result({ { id = "s000001", text = "整章" } })
+    whole_result.job_id = whole_job.job_id
+    check("整章任务先导入", Store.importResult(whole_job, whole_result) ~= nil)
+
+    local partial_job = job_for("20261115_120000_0004", true, "sel-done-2", "Range")
+    local partial_result = make_result({ { id = "s000001", text = "范围" } })
+    partial_result.job_id = partial_job.job_id
+    local summary, err = Store.importResult(partial_job, partial_result)
+    check("范围任务导入成功", summary ~= nil, tostring(err))
+    local manifest = Overlay.loadManifest(Store.bookDir(done_book, "zh-Hans"))
+    local provider = manifest and manifest.providers["mcp:gpt-5"]
+    check("已完成的文件不被范围导入降级", provider
+        and provider.chapters[1] == 1 and #(provider.partial_chapters or {}) == 0,
+        provider and ("done=" .. #(provider.chapters or {})
+            .. " partial=" .. #(provider.partial_chapters or {})))
+end
+
+-- ============================================================
+print("== 2d. 范围内的段落全失败落 failed ==")
+do
+    local fail_book = ROOT .. "/books/fail.epub"
+    local handle = io.open(fail_book, "wb")
+    handle:write(string.rep("z", 1024))
+    handle:close()
+    -- 第一章的范围一段都没回来，第二章正常回传：导入要能继续，但第一章
+    -- 必须落 failed_chapters，而不是混进「部分」
+    local fail_job = {
+        schema = "dualtranslate.job.v1",
+        job_id = "20261115_120000_0005",
+        created_at = os.time(),
+        book = {
+            device_path = fail_book, title = "Fail", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 5,
+            file_size = lfs.attributes(fail_book, "size"),
+            file_mtime = lfs.attributes(fail_book, "modification") or 0,
+        },
+        chapters = { { index = 1, title = "One", partial = true },
+            { index = 2, title = "Two" } },
+        segments = {
+            { id = "s000001", parent_id = "s000001", part = 1, parent_total = 1,
+              chapter_index = 1, chapter_title = "One", selector = "sel-fail",
+              xpointer = "/body/DocFragment/body/p[1]", source = "Lost paragraph" },
+            { id = "s000002", parent_id = "s000002", part = 1, parent_total = 1,
+              chapter_index = 2, chapter_title = "Two", selector = "sel-ok",
+              xpointer = "/body/DocFragment[2]/body/p[1]", source = "Fine paragraph" },
+        },
+        options = { max_chars_per_segment = 4500, split_long_segments = true },
+    }
+    local result = make_result({ { id = "s000002", text = "正常" } })
+    result.job_id = fail_job.job_id
+    local summary, err = Store.importResult(fail_job, result, { allow_partial = true })
+    check("允许部分导入", summary ~= nil, tostring(err))
+    local manifest = Overlay.loadManifest(Store.bookDir(fail_book, "zh-Hans"))
+    local provider = manifest and manifest.providers["mcp:gpt-5"]
+    check("范围内全失败落 failed_chapters", provider
+        and #(provider.failed_chapters or {}) == 1 and provider.failed_chapters[1] == 1
+        and #(provider.partial_chapters or {}) == 0,
+        provider and ("failed=" .. #(provider.failed_chapters or {})
+            .. " partial=" .. #(provider.partial_chapters or {})))
+    check("正常回传的章节仍算完成", provider
+        and provider.chapters and provider.chapters[1] == 2)
+end
+
+-- ============================================================
 print("== 3. 幂等与部分更新 ==")
 do
     local manifest_before = load_manifest()

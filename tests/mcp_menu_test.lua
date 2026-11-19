@@ -199,7 +199,8 @@ do
         dialog and dialog.title)
     dialog.buttons[1][2].callback()
     check("确认后按所选章节导出", exported and #exported == 2
-        and exported[1] == 2 and exported[2] == 5)
+        and exported[1].index == 2 and exported[2].index == 5
+        and exported[1].from == nil and exported[2].to == nil)
 
     exported = "unset"
     dualtranslate:translateWholeBook(true)
@@ -542,7 +543,9 @@ do
     end
 
     local slices = 0
+    local last_export_opts
     local fake_epub = { begin_segment_export = function(opts)
+        last_export_opts = opts
         local session = { position = 0, total = 3 }
         function session:chapter_count() return self.total end
         function session:processed() return self.position end
@@ -568,6 +571,10 @@ do
     notifications = {}
     dualtranslate:exportMcpJob(nil)
     check("分片次数等于章节数", slices == 3, tostring(slices))
+    -- nil 是「整本书」，不能被当成空选择范围而拒绝整本导出
+    check("整本导出不冒充范围", last_export_opts ~= nil
+        and last_export_opts.chapter_ranges == nil, tostring(last_export_opts
+        and type(last_export_opts.chapter_ranges)))
     check("进度框显示过", #dialogs == 1 and dialogs[1].shown == true)
     check("进度跑到 100%", dialogs[1] and dialogs[1].percent == 100,
         dialogs[1] and tostring(dialogs[1].percent))
@@ -578,6 +585,13 @@ do
     check("导出完成提示", done ~= nil, table.concat(notifications, " | "))
     check("结果来自 collected（1 段）", done and done:find("1 段", 1, true) ~= nil, tostring(done))
     check("完成提示等待轻触关闭", done and done:find("轻触屏幕", 1, true) ~= nil, tostring(done))
+
+    -- 显式范围原样下传（不会被当成「整本」）
+    dualtranslate:exportMcpJob({ { index = 2, from = "a", to = "b" } })
+    check("显式范围原样下传", last_export_opts ~= nil
+        and type(last_export_opts.chapter_ranges) == "table"
+        and last_export_opts.chapter_ranges[1].index == 2
+        and last_export_opts.chapter_ranges[1].from == "a")
 
     dualtranslate.getBookOutline, dualtranslate.epub = real_outline, real_epub
     UIManager.scheduleIn, ProgressbarDialog.new = real_schedule, real_new

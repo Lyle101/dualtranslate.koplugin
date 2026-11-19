@@ -177,6 +177,8 @@ return {
     { book_path = "/old5.epub", status = "queued", all_chapters = true, provider = "system" },
     { book_path = "/old6.epub", status = "queued", all_chapters = false, fragment = "1", provider = "" },
     { book_path = "/old7.epub", status = "queued", chapter_indexes = { 2, 1 } },
+    { book_path = "/old8.epub", status = "queued",
+      chapter_ranges = { { index = 3, from = "a", to = "b" } } },
 }
 ]])
     f:close()
@@ -204,6 +206,10 @@ return {
     local old7 = by_path["/old7.epub"]
     check("有 chapter_indexes → selection 任务", old7 ~= nil and old7.mode == "selection"
         and type(old7.chapter_indexes) == "table" and #old7.chapter_indexes == 2)
+    local old8 = by_path["/old8.epub"]
+    check("有 chapter_ranges → selection 任务并保留范围", old8 ~= nil
+        and old8.mode == "selection" and type(old8.chapter_ranges) == "table"
+        and old8.chapter_ranges[1].index == 3 and old8.chapter_ranges[1].from == "a")
     os.remove(State.getQueuePath())
 end
 

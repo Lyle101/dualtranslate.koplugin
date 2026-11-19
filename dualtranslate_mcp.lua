@@ -510,6 +510,7 @@ function Mcp.exportJob(opts)
         extracted, err = Epub.collect_segments{
             book_path = book_path,
             chapter_indexes = opts.chapter_indexes,
+            chapter_ranges = opts.chapter_ranges,
             titles = opts.titles,
             max_chars = opts.max_chars,
         }
