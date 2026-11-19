@@ -53,16 +53,22 @@ end
 -- A longer message whose lines must not be cut: the toast renders one line
 -- per "\n" and truncates anything wider than the screen with "…", while the
 -- info box wraps.  Used for the chapter picker's long-press detail, where the
--- point is showing the whole TOC label.  Near full width, ten seconds, top of
--- the screen.
-function TranslationUI.showDetail(message, timeout)
+-- point is showing the whole TOC label.  Near full width, ten seconds, pinned
+-- under the caller's title bar when it names one.
+--
+-- opts.timeout: seconds before it closes itself (default 10).
+-- opts.below:   height of a bar to stay clear of (the picker's title bar).
+function TranslationUI.showDetail(message, opts)
+    opts = opts or {}
     local InfoMessage = require("ui/widget/infomessage")
     local Screen = require("device").screen
     local Size = require("ui/size")
     local detail = InfoMessage:new{
         text = message,
-        timeout = timeout or 10,
-        width_factor = 0.9,
+        timeout = opts.timeout or 10,
+        -- 19/20 of the screen: wide enough for a long TOC label in two lines,
+        -- narrow enough that the frame is visibly a box, not a new page.
+        width_factor = 0.95,
         show_icon = false,
     }
     -- Reparent the box: the widget keeps its frame, the layout around it just
@@ -70,7 +76,7 @@ function TranslationUI.showDetail(message, timeout)
     -- dimen, so the refresh area follows.
     detail[1] = top_center_container():new{
         dimen = Screen:getSize(),
-        top_margin = Size.margin.default,
+        top_margin = (opts.below or 0) + Size.margin.default,
         detail[1][1],
     }
     UIManager:show(detail)

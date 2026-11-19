@@ -641,7 +641,11 @@ function Picker.show(plugin, opts)
             elseif engine and state.partial and state.partial[item.chapter_index] then
                 text = text .. string.format(_("\n%s已有「%s」的部分译文"), subject, engine)
             end
-            TranslationUI.showDetail(text)
+            -- Keep the menu's title bar (and its close button) uncovered: the
+            -- detail sits right below it, not on top of it.
+            local bar_height = menu.title_bar
+                and tonumber(menu.title_bar:getHeight()) or 0
+            TranslationUI.showDetail(text, { below = bar_height })
         end
         return true
     end
