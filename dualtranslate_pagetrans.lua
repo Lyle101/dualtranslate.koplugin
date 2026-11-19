@@ -27,9 +27,9 @@ function PageTrans.attach(plugin)
     end
 
     -- "逐章模式" is a preference only: checking it does not translate
-    -- anything.  Tapping "翻译本书" while it is checked translates the
-    -- current chapter and arms the follow mode; turning the checkbox off
-    -- disarms it so page turns stop scheduling new chapters.
+    -- anything.  Tapping "翻译当前章节" while it is checked translates that
+    -- chapter and arms the follow mode; turning the checkbox off disarms it
+    -- so page turns stop scheduling new chapters.
     plugin.togglePageTranslation = function(self, menu)
         local enabled = not self:isPageTranslationEnabled()
         self:saveSetting("page_translation", enabled)

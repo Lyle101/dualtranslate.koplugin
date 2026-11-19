@@ -347,11 +347,13 @@ end
 -- unconditional and never consults the 逐章模式 preference; that preference
 -- only governs whether the current-chapter entry arms page-turn follow.
 --
--- The first positional argument of every entry below is `silent`, NOT the
--- scope: `silent=true` suppresses the progress dialog and every user-facing
--- notice (only a job resumed from an old queue item should carry it).  These
--- signatures used to start with `all_chapters`, so a leftover `true` there
--- silently muted a run — pass `false` (or nothing) from any menu action.
+-- The argument shapes are not uniform: translateWholeBook(silent, auto) and
+-- translateCurrentChapter(silent, auto) start with `silent`, while
+-- translateSelectedChapters(indexes, silent, auto) takes the chapter list
+-- first.  `silent=true` suppresses the progress dialog and every user-facing
+-- notice, and belongs only to a job resumed from an old queue item.  The two
+-- chapter entries used to start with `all_chapters`, so a leftover `true`
+-- there silently muted a run — menu actions pass `false` explicitly.
 function dualtranslate:translateWholeBook(silent, auto)
     if not self:isEpub() then return end
     -- 7.4: with the MCP engine there is no device-side request path; the
@@ -389,7 +391,8 @@ function dualtranslate:translateCurrentChapter(silent, auto)
         fragment = fragment, span = 1, silent = silent, auto = auto })
 end
 
--- One-shot selection from the chapter picker; never arms follow mode.
+-- One-shot selection from the chapter picker; never arms follow mode.  The
+-- chapter list is the first argument here — `silent` comes second.
 function dualtranslate:translateSelectedChapters(indexes, silent, auto)
     if not self:isEpub() then return end
     if self:getMode() == "mcp_external" then
@@ -1134,7 +1137,14 @@ function dualtranslate:offerEngineFallback(item, result)
         end
         self:startNextQueuedTranslation()
     end
-    if current == "microsoft_free" or item.silent then
+    -- A modal card may only interrupt the reader when this job is the one the
+    -- user is looking at.  A whole-book job keeps running while the user reads
+    -- (or switches to) another book; asking "switch to Edge?" over that page
+    -- would be an interruption about a book that is not on screen.  The
+    -- queue row and the log carry the reason in that case.
+    local on_screen = self.ui and self.ui.document
+        and self.ui.document.file == item.book_path
+    if current == "microsoft_free" or item.silent or not on_screen then
         give_up()
         return
     end
@@ -1652,8 +1662,8 @@ function dualtranslate:reopenTranslationProgress()
     -- init() rebuilt the bar at 0%; put the last known percentage back (same
     -- 0-100 scale as progress_max) so the reopened card matches the numbers in
     -- its own title instead of showing an empty bar.  A failure here only
-    -- skips that restore: the card is already up and the next poll, half a
-    -- second away, writes the real value anyway.
+    -- skips that restore: the card is already up and the next poll — at most a
+    -- second away while the chain was hidden — writes the real value anyway.
     if progress.last_percentage then
         pcall(function() dialog:reportProgress(progress.last_percentage) end)
     end

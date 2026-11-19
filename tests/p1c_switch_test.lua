@@ -243,11 +243,16 @@ do
         p._page_translation_last_fragment = nil
         p._page_translation_overlay_state = nil
         scheduled = nil
-        p:maybeSchedulePageTranslation(true)
+        -- 生产路径（onPageUpdate / onPosUpdate / onDocumentRerendered）都传
+        -- silent=false：翻页续译同样显示进度框，只是 auto 压掉完成提示。
+        p:maybeSchedulePageTranslation(false)
         return scheduled ~= nil
     end
     check("system covered chapter skipped", attempt("system", "1") == false)
     check("system uncovered chapter schedules", attempt("system", "3") == true)
+    check("翻页续译转发 silent=false / auto=true",
+        scheduled and scheduled.silent == false and scheduled.auto == true,
+        scheduled and tostring(scheduled.silent) .. "/" .. tostring(scheduled.auto))
     check("microsoft_free not complete schedules", attempt("microsoft_free", "1") == true)
     -- a complete provider blocks every chapter, even uncovered ones
     seedV3(BOOK, lang, {
@@ -268,7 +273,7 @@ do
     p._page_translation_last_fragment = nil
     p._page_translation_overlay_state = nil
     scheduled = nil
-    p:maybeSchedulePageTranslation(true)
+    p:maybeSchedulePageTranslation(false)
     check("mcp_external guard", scheduled == nil)
     p.getMode = real_getMode
 end

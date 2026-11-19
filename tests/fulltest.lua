@@ -288,6 +288,27 @@ do
     -- enqueue 同书去重
     State.enqueue(plugin, { book_path = "/books/a.epub", mode = "all", silent = true })
     check("同书去重", #plugin._translation_queue == 1)
+
+    -- 重复点翻译：进度框属于另一本书时只提示，不能把别的书的进度卡弹出来；
+    -- 属于本书时重开它，不打扰。
+    local notices, reopened = {}, 0
+    -- showInfo 在 enqueue 里是点号调用（不带 self），两种写法都接受。
+    plugin.TranslationUI = { showInfo = function(a, b)
+        notices[#notices + 1] = b or a
+    end }
+    plugin.reopenTranslationProgress = function()
+        reopened = reopened + 1
+        return true
+    end
+    plugin._translation_progress = { active = true, book_path = "/books/other.epub",
+        dialog = {}, last_percentage = 10 }
+    State.enqueue(plugin, { book_path = "/books/a.epub", mode = "all", silent = false })
+    check("异书进度框不重开", reopened == 0 and #notices == 1)
+    notices = {}
+    plugin._translation_progress.book_path = "/books/a.epub"
+    State.enqueue(plugin, { book_path = "/books/a.epub", mode = "all", silent = false })
+    check("本书进度框重开", reopened == 1 and #notices == 0)
+    plugin._translation_progress = nil
     -- enqueue 章节
     State.enqueue(plugin, { book_path = "/books/b.epub", mode = "span",
         fragment = "3", silent = true })

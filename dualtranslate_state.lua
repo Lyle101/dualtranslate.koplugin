@@ -381,6 +381,15 @@ function State.startNext(plugin)
         if mtime and os.time() - mtime > STALE_TRANSLATION_SECONDS then
             logger.warn("dualtranslate: watchdog resetting stalled translation worker")
             progress.active = false
+            -- The stalled run's card is no longer refreshed by anything (its
+            -- poller stops once the entry is released), so close it here:
+            -- otherwise it stays on screen frozen and the next job stacks its
+            -- own card on top of it.
+            if progress.dialog then
+                pcall(function() UIManager:close(progress.dialog, "partial") end)
+                progress.dialog = nil
+                progress.last_percentage = nil
+            end
             local stalled_item = progress.item
             if stalled_item then
                 stalled_item.status = "failed"

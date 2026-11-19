@@ -214,15 +214,46 @@ io.open = real_open
 assert(reads == 0, "a hidden tick must not read the progress file, got " .. reads)
 assert(scheduled_calls[3] and scheduled_calls[3].delay == 1,
     "a hidden tick must re-arm the poller, or the reopened bar freezes")
+
+-- A visible tick must read the worker's progress file, drive the bar, and
+-- remember the percentage that reopen replays.
+dialog._dualtranslate_hidden = false
+local progress_path = dualtranslate._translation_progress.path
+os.execute('mkdir -p "' .. (progress_path:match("^(.*)/[^/]+$") or "/tmp") .. '"')
+do
+    local file = assert(io.open(progress_path, "w"))
+    file:write("5|10|5|0|1|2\n")
+    file:close()
+end
+scheduled_calls[3].fn()
+assert(dualtranslate._translation_progress.last_percentage == 50,
+    "a visible tick should remember the percentage, got "
+    .. tostring(dualtranslate._translation_progress.last_percentage))
+assert(dialog.percentage == 50,
+    "a visible tick should drive the bar, got " .. tostring(dialog.percentage))
+assert(scheduled_calls[4] and scheduled_calls[4].delay == 0.5,
+    "a visible tick should keep the 0.5s cadence")
+os.remove(progress_path)
+
 -- A late tick must never leak into the next job: once the watchdog releases
 -- this entry and the next job installs its own table, the old chain stops
 -- instead of writing this run's percentage into it.
 local next_job = { active = true }
 dualtranslate._translation_progress = next_job
 local before = #scheduled_calls
-scheduled_calls[3].fn()
+scheduled_calls[4].fn()
 assert(#scheduled_calls == before, "a stale poller must stop once its entry is replaced")
 assert(next_job.last_percentage == nil, "a stale poller must not write the next job's entry")
+-- A silent job (queue resume of an old item) stays card-less, even though it
+-- is the book on screen.
+scheduled_calls = {}
+dualtranslate.ui.document = { file = SpanBook }
+dualtranslate:_runTranslation({ book_path = SpanBook, mode = "span",
+    status = "queued", silent = true })
+scheduled_calls[1].fn()
+assert(dualtranslate._translation_progress.dialog == nil,
+    "a silent job must not create the progress dialog")
+
 -- Leave nothing running.
 next_job.active = false
 dualtranslate._translation_progress = nil
