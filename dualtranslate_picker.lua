@@ -614,7 +614,7 @@ function Picker.show(plugin, opts)
                 text = string.format(_("第 %d 个文件 · 第 %d 条目录：%s"),
                     item.chapter_index, item.sub_index, item.full_title or "")
                 text = text .. string.format(
-                    _("\n该文件共有 %d 条目录，本版按文件翻译"), item.toc_entries or 0)
+                    _("\n该文件共有 %d 条目录，本版以文件为单位"), item.toc_entries or 0)
             else
                 text = string.format(_("第 %d 章：%s"),
                     item.chapter_index, item.full_title or "")
