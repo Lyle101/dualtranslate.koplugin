@@ -91,14 +91,21 @@ function Picker.chapters(outline)
     -- and repeated entries without anchors would just drop every other file.
     if #order < entry_count and has_anchor then
         table.sort(order)
+        -- `ordinal` is the number the user sees, starting at 1 for the first
+        -- file the TOC covers; the spine index stays the job's identity but
+        -- would leave gaps (a cover file, files no entry points at) and make
+        -- the list look like it starts in the middle of the book.
+        local ordinal = 0
         for _, index in ipairs(order) do
+            ordinal = ordinal + 1
             local bucket = by_index[index]
             local total = #bucket.entries
             for sub, entry in ipairs(bucket.entries) do
                 chapters[#chapters + 1] = {
                     key = #chapters + 1,
+                    ordinal = ordinal,
                     index = index,
-                    -- A single-entry file keeps the plain "12." numbering.
+                    -- A single-entry file keeps the plain "12" numbering.
                     sub = total > 1 and sub or nil,
                     toc_entries = total,
                     anchor = entry.anchor,
@@ -123,6 +130,8 @@ function Picker.chapters(outline)
         local aliases = chapter and chapter.aliases
         chapters[#chapters + 1] = {
             key = #chapters + 1,
+            -- One row per file, so the display number is the spine index.
+            ordinal = index,
             index = index,
             title = chapter and chapter.title or string.format(_("第 %d 节"), index),
             level = chapter and chapter.level or 0,
@@ -357,15 +366,21 @@ function Picker.visible_row_keys(item_table, page, perpage)
     return keys
 end
 
--- 7.1: the row carries the spine index as well as the (truncated) title, or
+-- The number the user sees: "12" for a file row, "5.2" for the second chapter
+-- of the fifth file the TOC covers (so the rows sharing one translation unit
+-- stay grouped).  No trailing dot — on a 600 px row it only ate width the
+-- title needs, and the space already separates the number from the title.
+function Picker.row_number(chapter)
+    local ordinal = chapter.ordinal or chapter.index
+    if chapter.sub then return string.format("%d.%d", ordinal, chapter.sub) end
+    return tostring(ordinal)
+end
+
+-- 7.1: the row carries that number as well as the (truncated) title, or
 -- identically named chapters cannot be told apart.  The full title stays on
 -- the item for the long-press detail.  The checkbox is a geometric-shape
 -- glyph rather than "[x]"/"[ ]": on a 758 px screen the ASCII pair collapses
 -- into "[]", and an empty box stops reading as a box.
---
--- A file holding several chapters is numbered `file.sub` so the rows that
--- share one translation unit stay grouped ("5.2" is the second chapter of
--- spine file 5); a plain repeat of "5." would read as a bug.
 function Picker.chapter_label(state, chapter)
     local prefix = state.selected[chapter.key] and "▣ " or "▢ "
     -- The mark sits right after the index: appending it to the title would
@@ -376,9 +391,7 @@ function Picker.chapter_label(state, chapter)
     elseif state.partial and state.partial[chapter.index] then
         mark = _("（部分）")
     end
-    local number = chapter.sub and string.format("%d.%d.", chapter.index, chapter.sub)
-        or string.format("%d.", chapter.index)
-    return string.format("%s%s%s %s", prefix, number, mark,
+    return string.format("%s%s%s %s", prefix, Picker.row_number(chapter), mark,
         Picker.truncate_title(chapter.title))
 end
 
@@ -449,6 +462,7 @@ function Picker.build_item_table(state, handlers, opts)
             text = Picker.chapter_label(state, chapter),
             row_key = chapter.key,
             chapter_index = chapter.index,
+            number = Picker.row_number(chapter),
             sub_index = chapter.sub,
             full_title = chapter.title,
             toc_entries = chapter.toc_entries,
@@ -602,26 +616,17 @@ function Picker.show(plugin, opts)
         return true
     end
 
-    -- Separator-like rows and long titles: hold shows the untruncated title
-    -- plus the spine index, which is also the job's chapter id (6.5).  For a
-    -- file that holds several chapters, say which file the row belongs to and
-    -- how many entries share it; the anchor is shown too, because it is what
-    -- a chapter-granular job will eventually slice on.
+    -- Long-press detail: the complete title, the file's entry count and the
+    -- anchor.  A toast cuts anything wider than the screen with "…", and TOC
+    -- labels are routinely longer than the 40 characters a row keeps, so the
+    -- detail goes through InfoMessage, which wraps instead of truncating.
     function menu:onMenuHold(item)
         if type(item) == "table" and item.chapter_index then
-            local text
-            if item.sub_index then
-                text = string.format(_("第 %d 个文件 · 第 %d 条目录：%s"),
-                    item.chapter_index, item.sub_index, item.full_title or "")
+            local text = string.format("%s %s", item.number
+                or tostring(item.chapter_index), item.full_title or "")
+            if (item.toc_entries or 0) > 1 then
                 text = text .. string.format(
-                    _("\n该文件共有 %d 条目录，本版以文件为单位"), item.toc_entries or 0)
-            else
-                text = string.format(_("第 %d 章：%s"),
-                    item.chapter_index, item.full_title or "")
-                if (item.toc_entries or 0) > 1 then
-                    text = text .. string.format(
-                        _("\n目录在此文件内有 %d 条，合并为一个可翻译单元"), item.toc_entries)
-                end
+                    _("\n该文件共 %d 条目录，本版以文件为单位"), item.toc_entries)
             end
             if item.anchor then
                 text = text .. string.format(_("\n锚点：%s"), item.anchor)
@@ -636,7 +641,7 @@ function Picker.show(plugin, opts)
             elseif engine and state.partial and state.partial[item.chapter_index] then
                 text = text .. string.format(_("\n%s已有「%s」的部分译文"), subject, engine)
             end
-            TranslationUI.showInfo(text, 5)
+            TranslationUI.showDetail(text, 5)
         end
         return true
     end

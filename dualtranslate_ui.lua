@@ -31,4 +31,17 @@ function TranslationUI.showInfo(message, timeout)
     })
 end
 
+-- A longer message whose lines must not be cut: the toast renders one line
+-- per "\n" and truncates anything wider than the screen with "…", while the
+-- info box wraps.  Used for the chapter picker's long-press detail, where the
+-- point is showing the whole TOC label.
+function TranslationUI.showDetail(message, timeout)
+    local InfoMessage = require("ui/widget/infomessage")
+    UIManager:show(InfoMessage:new{
+        text = message,
+        timeout = timeout or 5,
+        show_icon = false,
+    })
+end
+
 return TranslationUI

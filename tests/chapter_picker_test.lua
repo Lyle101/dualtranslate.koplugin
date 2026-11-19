@@ -49,6 +49,13 @@ local stubs = {
             return opts
         end,
     },
+    -- 长按详情走 InfoMessage（会换行，不截断）；测试里和通知一起计数。
+    ["ui/widget/infomessage"] = {
+        new = function(_, opts)
+            opts.is_notification = true
+            return opts
+        end,
+    },
     ["ui/widget/menu"] = {
         new = function(_, opts)
             -- Menu:init computes perpage from the reader setting; the fake
@@ -251,7 +258,7 @@ do
     check("状态行显示章节与已选数",
         items[6].text == "共 3 章 · 已选 0 章" and items[6].select_enabled == false)
     check("章节行带标记、spine index 与标题",
-        items[7].text == "▢ 1. 第 1 节" and items[7].chapter_index == 1
+        items[7].text == "▢ 1 第 1 节" and items[7].chapter_index == 1
         and items[7].full_title == "第 1 节")
     check("单页列表不加尾部确认行", items[#items].chapter_index ~= nil)
 
@@ -288,7 +295,7 @@ do
     Picker.toggle(empty_state, 1)
     local selected_items = Picker.build_item_table(empty_state, {})
     check("勾选后标记与计数同步",
-        selected_items[7].text == "▣ 1. 第 1 节"
+        selected_items[7].text == "▣ 1 第 1 节"
         and selected_items[1].select_enabled == true
         and selected_items[1].text == "开始翻译（1 章）")
 end
@@ -349,6 +356,28 @@ do
     })
     check("同文件重复但没有锚点时仍按文件出行", #no_anchor == 3, tostring(#no_anchor))
 
+    -- 目录从第二个 spine 文件才开始（spine 1 是封面）：显示编号仍从 1 起，
+    -- spine 号只留在 index 里给 job 用。
+    local shifted_outline = {
+        spine_count = 6,
+        chapters = {},
+        entries = {
+            { index = 2, anchor = "a", title = "第一章", href = "b" },
+            { index = 2, anchor = "b", title = "第一节", href = "b" },
+            { index = 5, anchor = "c", title = "第二章", href = "e" },
+        },
+    }
+    local shifted = Picker.chapters(shifted_outline)
+    check("显示编号从 1 开始而不是 spine 号",
+        shifted[1].ordinal == 1 and shifted[1].index == 2
+        and Picker.row_number(shifted[1]) == "1.1"
+        and Picker.row_number(shifted[2]) == "1.2"
+        and Picker.row_number(shifted[3]) == "2",
+        Picker.row_number(shifted[1]) .. " " .. Picker.row_number(shifted[3]))
+    local shifted_items = Picker.build_item_table(Picker.new_state(shifted_outline), {})
+    check("行文案不带末尾句点", shifted_items[7].text == "▢ 1.1 第一章"
+        and shifted_items[8].text == "▢ 1.2 第一节", shifted_items[8].text)
+
     local state = Picker.new_state(section_outline)
     check("状态区分条目与文件", state.file_count == 2 and #state.chapters == 4)
     check("toc_total 按文件累加，不随行重复", state.toc_total == 4,
@@ -356,7 +385,7 @@ do
     local items = Picker.build_item_table(state, {})
     check("状态行给条数与文件数", items[6].text == "共 4 条 · 2 文件 · 已选 0 条",
         items[6].text)
-    check("行标题按 file.sub 编号", items[7].text == "▢ 1.1. 第一章", items[7].text)
+    check("行标题按 file.sub 编号", items[7].text == "▢ 1.1 第一章", items[7].text)
     check("子条目行带 sub 与锚点", items[8].sub_index == 2 and items[8].anchor == "s1")
 
     -- 同一文件里只选一条：交付给 job 的仍是唯一文件号，开始按钮按文件计数
@@ -430,15 +459,15 @@ do
     check("整文件选中时不弹确认框", last_dialog() == nil)
     check("整文件选中直接开始", started ~= nil and #started == 1 and started[1] == 1)
 
-    -- 长按说明所属文件、条目数与锚点
+    -- 长按给出完整标题、条目数与锚点
     opened_menus, notifications = {}, {}
     Picker.show(plugin)
     menu = opened_menus[1]
     menu:onMenuHold(menu.item_table[8])
     local text = tostring(notifications[1] and notifications[1].text)
-    check("长按给出文件、条目数与锚点",
-        text:find("第 1 个文件", 1, true) ~= nil
-        and text:find("共有 3 条目录", 1, true) ~= nil
+    check("长按给出编号、完整标题、条目数与锚点",
+        text:find("1.2 第一节", 1, true) ~= nil
+        and text:find("共 3 条目录", 1, true) ~= nil
         and text:find("锚点：s1", 1, true) ~= nil, text)
 end
 
@@ -512,9 +541,9 @@ do
     local state = Picker.new_state({ spine_count = 3, chapters = {} },
         Picker.coverage(plugin, "/books/a.epub"))
     local items = Picker.build_item_table(state, {})
-    check("已翻译行带标记", items[7].text == "▢ 1.（已翻译） 第 1 节", items[7].text)
-    check("部分翻译行带标记", items[8].text == "▢ 2.（部分） 第 2 节", items[8].text)
-    check("未翻译行不加标记", items[9].text == "▢ 3. 第 3 节", items[9].text)
+    check("已翻译行带标记", items[7].text == "▢ 1（已翻译） 第 1 节", items[7].text)
+    check("部分翻译行带标记", items[8].text == "▢ 2（部分） 第 2 节", items[8].text)
+    check("未翻译行不加标记", items[9].text == "▢ 3 第 3 节", items[9].text)
     check("状态行统计已译", items[6].text == "共 3 章 · 已译 1 · 已选 0 章", items[6].text)
 
     -- 对话框流程：行标记 + 长按说明来源引擎
@@ -531,7 +560,7 @@ do
     Picker.show(flow_plugin)
     local menu = opened_menus[1]
     check("选择器行内标出已翻译", menu ~= nil
-        and menu.item_table[7].text == "▢ 1.（已翻译） One",
+        and menu.item_table[7].text == "▢ 1（已翻译） One",
         menu and menu.item_table[7].text)
     menu:onMenuHold(menu.item_table[7])
     check("长按说明标记来源", notifications[1] ~= nil
@@ -542,7 +571,7 @@ do
     opened_menus = {}
     Picker.show(flow_plugin, { engine = "mcp_external" })
     check("导出时按 MCP 引擎判标记", opened_menus[1] ~= nil
-        and opened_menus[1].item_table[7].text == "▢ 1. One",
+        and opened_menus[1].item_table[7].text == "▢ 1 One",
         opened_menus[1] and opened_menus[1].item_table[7].text)
 
     Overlay.loadBookIndex = nil
@@ -587,7 +616,7 @@ do
     check("勾选章节不关闭菜单", #closed_widgets == 0)
     check("菜单原地刷新", menu.updated and menu.updated >= 1)
     local row = find_item(function(item) return item.chapter_index == 2 end)
-    check("章节行标记为已选并带 spine index", row.text == "▣ 2. Chapter Two")
+    check("章节行标记为已选并带 spine index", row.text == "▣ 2 Chapter Two")
     check("开始项计数更新",
         menu.item_table[1].select_enabled == true and menu.item_table[1].text == "开始翻译（1 章）")
 
@@ -601,13 +630,13 @@ do
     notifications = {}
     menu:onMenuHold({ chapter_index = 2, full_title = "第一部分", toc_entries = 4 })
     check("长按说明合并的目录条数", notifications[1] ~= nil
-        and tostring(notifications[1].text):find("有 4 条", 1, true) ~= nil,
+        and tostring(notifications[1].text):find("共 4 条目录", 1, true) ~= nil,
         notifications[1] and notifications[1].text)
     check("单标题行不加合并说明", (function()
         notifications = {}
         menu:onMenuHold({ chapter_index = 3, full_title = "独章", toc_entries = 1 })
         return notifications[1] ~= nil
-            and tostring(notifications[1].text):find("合并为一个可翻译单元", 1, true) == nil
+            and tostring(notifications[1].text):find("该文件共", 1, true) == nil
     end)())
 
     menu:onMenuSelect(find_item(function(item) return item.text == "全选本页" end))
