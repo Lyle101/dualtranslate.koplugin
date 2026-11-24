@@ -420,6 +420,7 @@ function dualtranslate:currentChapterRange()
     -- while it is in the lower half of the page.
     local height = self.ui and self.ui.view and self.ui.view.dimen
         and self.ui.view.dimen.h
+    local page_position = Coverage.entry_at_page(pages, page)
     local position = Coverage.reading_position(pages, page, height,
         function(item)
             if not item.xp then return nil end
@@ -429,6 +430,10 @@ function dualtranslate:currentChapterRange()
             return nil
         end)
     if not position then return whole, tostring(index) end
+    if page_position and page_position ~= position then
+        logger.info("dualtranslate: chapter", index .. "." .. page_position,
+            "starts at the page bottom; staying on", index .. "." .. position)
+    end
     return Coverage.entry_range(rows, position, index),
         index .. "." .. position, rows
 end
