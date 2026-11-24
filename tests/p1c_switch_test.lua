@@ -291,6 +291,29 @@ do
     check("同文件未翻条目仍然调度", attempt_entry(3) == true)
     p.currentChapterRange = function() return nil end
     p.getCurrentFragment = function() return fragment end
+
+    -- 勾选「逐章模式」应当立即武装续译（旧行为要再点一次「翻译当前章节」，
+    -- 用户勾了框翻页却什么都不发生）。取消勾选则解除。
+    p:saveSetting("page_translation", false)
+    p._page_translation_follow_active = nil
+    p._page_translation_last_fragment = "2.5"
+    notifications = {}
+    p:togglePageTranslation()
+    check("勾选逐章模式即武装续译",
+        p:isPageTranslationEnabled() == true
+        and p._page_translation_follow_active == true
+        and p._page_translation_last_fragment == nil,
+        tostring(p._page_translation_follow_active))
+    check("开启时给出提示", notifications[1] ~= nil
+        and tostring(notifications[1]):find("逐章模式已开启", 1, true) ~= nil,
+        notifications[1])
+    notifications = {}
+    p:togglePageTranslation()
+    check("取消勾选即解除续译", p:isPageTranslationEnabled() == false
+        and p._page_translation_follow_active == nil)
+    check("关闭时也给出提示", notifications[1] ~= nil
+        and tostring(notifications[1]):find("逐章模式已关闭", 1, true) ~= nil,
+        notifications[1])
     -- mcp_external never auto-schedules (7.4 guard)
     local real_getMode = p.getMode
     p.getMode = function() return "mcp_external" end

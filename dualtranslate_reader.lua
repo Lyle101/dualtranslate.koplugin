@@ -365,7 +365,9 @@ function dualtranslate:chapterEntryPages(book_path, index, rows)
             pages = {} }
         return nil
     end
-    logger.dbg("dualtranslate: entry pages for chapter", index, #pages, "of",
+    -- INFO, not dbg: when page-turn follow "does nothing", this line says
+    -- whether the anchors were located at all.  Once per chapter change.
+    logger.info("dualtranslate: entry pages for chapter", index, #pages, "of",
         #rows, "anchors")
     self._entry_page_cache = { book_path = book_path, index = index,
         pages = pages }
@@ -384,7 +386,16 @@ function dualtranslate:currentChapterRange()
     local document = self.ui and self.ui.document
     if not document then return nil end
     local index = self:currentChapterIndex()
-    if not index then return nil end
+    if not index then
+        -- One line per session: without the chapter index there is no entry to
+        -- map, and every page turn would look like a fresh chapter.
+        if not self._chapter_index_warned then
+            logger.warn("dualtranslate: cannot resolve the current chapter; "
+                .. "page-turn follow stays file-based")
+            self._chapter_index_warned = true
+        end
+        return nil
+    end
     local book_path = document.file
     local whole = { index = index }
     local outline = self:getBookOutline(book_path)
@@ -496,6 +507,8 @@ function dualtranslate:translateCurrentChapter(silent, auto)
     -- enqueue (another job for this book) must stay retryable.
     if queued ~= false and key then
         self._page_translation_last_fragment = key
+        logger.info("dualtranslate: scheduled entry", key, "range",
+            tostring(range and range.from), "->", tostring(range and range.to))
     end
 end
 

@@ -8,16 +8,21 @@
 -- book-level overlay: complete text, toggleable visibility, persistent
 -- across reopens, no line limit.
 --
--- Exposed as the "逐章模式" checkbox next to "翻译本书": checking it is a
--- preference only.  Tapping "翻译当前章节" while it is checked translates the
--- current chapter (with the normal progress dialog) and arms the follow
--- mode; turning pages then keeps translating each newly reached chapter
--- through the serial queue — same progress dialog, but the job is flagged
--- `auto` so the per-chapter completion notice stays quiet.  Already
--- translated paragraphs are reused by the overlay merge and never requested
--- again.
+-- Exposed as the "逐章模式" checkbox next to "翻译本书".  Checking it arms the
+-- follow mode directly: the next page turn translates the entry being read,
+-- and every entry reached afterwards, through the serial queue (the job is
+-- flagged `auto` so the per-chapter completion notice stays quiet).  Tapping
+-- "翻译当前章节" does the same for the current entry without waiting for a
+-- page turn.  Already translated paragraphs are reused by the overlay merge
+-- and never requested again.
+--
+-- Arming on the checkbox (not only on "翻译当前章节") matches what the label
+-- promises.  Before, ticking it and turning pages did nothing — the
+-- preference was silently inert until a second, unrelated action.
 local UIManager = require("ui/uimanager")
 local Overlay = require("dualtranslate_overlay")
+local TranslationUI = require("dualtranslate_ui")
+local _ = require("gettext")
 
 local PageTrans = {}
 
@@ -26,15 +31,19 @@ function PageTrans.attach(plugin)
         return plugin:getSetting("page_translation", false) == true
     end
 
-    -- "逐章模式" is a preference only: checking it does not translate
-    -- anything.  Tapping "翻译当前章节" while it is checked translates that
-    -- chapter and arms the follow mode; turning the checkbox off disarms it
-    -- so page turns stop scheduling new chapters.
+    -- Checking "逐章模式" arms follow right away: the next page turn starts
+    -- with the entry being read (the key is cleared, so the guard does not
+    -- skip it).  Unchecking disarms, so page turns stop scheduling.
     plugin.togglePageTranslation = function(self, menu)
         local enabled = not self:isPageTranslationEnabled()
         self:saveSetting("page_translation", enabled)
-        if not enabled then
+        if enabled then
+            self._page_translation_follow_active = true
+            self._page_translation_last_fragment = nil
+            TranslationUI.showInfo(_("逐章模式已开启：翻页时自动翻译新到达的章节"))
+        else
             self._page_translation_follow_active = nil
+            TranslationUI.showInfo(_("逐章模式已关闭：翻页不再自动翻译"))
         end
         UIManager:setDirty("all", "ui")
         if menu and menu.updateItems then menu:updateItems() end
