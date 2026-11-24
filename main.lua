@@ -790,6 +790,7 @@ function dualtranslate:onReadSettings()
     local path = self.ui and self.ui.document and self.ui.document.file
     if not path then return end
     local dir = self:getBookCacheDirectory(path)
+    local manifest
     if Overlay.exists(dir .. "/manifest.json") or Overlay.exists(dir .. "/overlay.json") then
         -- 13.1: lazy per-book migration before any read.  14.3: book open
         -- only runs the light reconcile (delete intents + missing entries);
@@ -801,7 +802,7 @@ function dualtranslate:onReadSettings()
             { lock_timeout = 0.5 })
         pcall(Store.reconcile, path, self:getTargetLang(), self.cache,
             { light = true, lock_timeout = 0.5 })
-        local manifest = Overlay.loadManifest(dir)
+        manifest = Overlay.loadManifest(dir)
         if manifest and Overlay.isStale(manifest, path) then
             -- Hide the layer for this session instead of persisting a global
             -- translation_visible=false (which would leak to other books).
@@ -812,6 +813,19 @@ function dualtranslate:onReadSettings()
         end
     else
         self._translation_stale = nil
+    end
+    -- A checked 逐章模式 is a standing instruction, but the "armed" flag only
+    -- lives in memory: after a restart the box was checked and page turns did
+    -- nothing, which reads as a broken checkbox.  Resume follow for a book
+    -- that already carries this engine's translations; a fresh book still
+    -- waits for an explicit 翻译当前章节 so opening it never starts a job.
+    if self:isPageTranslationEnabled() and not self._translation_stale then
+        local provider = manifest and manifest.providers
+            and manifest.providers[self:getMode()]
+        if provider and (tonumber(provider.translated_count) or 0) > 0 then
+            self._page_translation_follow_active = true
+            self._page_translation_last_fragment = nil
+        end
     end
     if self:hasTranslationOverlay(path)
         and self:getSetting("translation_visible", true) == true then

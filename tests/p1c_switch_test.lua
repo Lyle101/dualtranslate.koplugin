@@ -457,6 +457,26 @@ do
     check("onReadSettings migrates v2", Overlay.loadManifest(dir) ~= nil)
     check("onReadSettings refreshes", styled > 0)
     check("fresh book not stale", p._translation_stale == nil)
+
+    -- 勾着逐章模式重启后：已有本引擎译文的书自动恢复续译（否则勾选框
+    -- 看着是开的，翻页却什么都不发生）
+    p:saveSetting("mode", "system")
+    p:saveSetting("page_translation", true)
+    p._page_translation_follow_active = nil
+    p._page_translation_last_fragment = "2.5"
+    p:onReadSettings()
+    check("开书恢复续译", p._page_translation_follow_active == true
+        and p._page_translation_last_fragment == nil,
+        tostring(p._page_translation_follow_active))
+    -- 没有任何译文的书不恢复：开书不应自己开始翻译
+    p._page_translation_follow_active = nil
+    local brand_new = ROOT .. "/books/brand-new.epub"
+    p.ui.document.file = brand_new
+    p:onReadSettings()
+    check("新书不自动开翻", p._page_translation_follow_active == nil)
+    p.ui.document.file = BOOK
+    p:saveSetting("page_translation", false)
+    p._page_translation_follow_active = nil
     -- stale: manifest size mismatch hides layer + prompts
     local manifest = Overlay.loadManifest(dir)
     manifest.book_size = 999999
