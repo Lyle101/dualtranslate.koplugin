@@ -353,8 +353,10 @@ function dualtranslate:chapterEntryPages(book_path, index, rows)
                 end
             end
             if page then
+                -- Keep the address: the page alone cannot tell a chapter
+                -- heading at the top of a page from one at the bottom.
                 pages[#pages + 1] = { position = position, page = page,
-                    anchor = row.anchor }
+                    anchor = row.anchor, xp = xp }
             end
         end
     end
@@ -411,7 +413,21 @@ function dualtranslate:currentChapterRange()
     if not pages then return whole, tostring(index) end
     local page = document.getCurrentPage and document:getCurrentPage() or nil
     if not page then return whole, tostring(index) end
-    local position = Coverage.entry_at_page(pages, page)
+    -- The page number alone over-reports at a chapter boundary: a heading
+    -- sitting under the last lines of the current chapter shares the page
+    -- with it, and "translate what I am reading" must not jump ahead.  Ask
+    -- CREngine where the heading actually sits and keep the previous entry
+    -- while it is in the lower half of the page.
+    local height = self.ui and self.ui.view and self.ui.view.dimen
+        and self.ui.view.dimen.h
+    local position = Coverage.reading_position(pages, page, height,
+        function(item)
+            if not item.xp then return nil end
+            local ok, value = pcall(document.getScreenPositionFromXPointer,
+                document, item.xp)
+            if ok then return value end
+            return nil
+        end)
     if not position then return whole, tostring(index) end
     return Coverage.entry_range(rows, position, index),
         index .. "." .. position, rows

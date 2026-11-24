@@ -1048,6 +1048,10 @@ Queue item：
     `onDocumentRerendered`（字号/边距变化）清空页表。
   - 锚点落在文件第一条时 `from = nil`（文件开头属于它）；锚点定位失败、目录只有一条、
     或 `getPageFromXPointer` 全部返回 0 时退回整文件范围——不映射不会比旧行为更差。
+  - **同页两章**：章节标题可能压在上一章正文下方，两章同页。只按页码取"最后一个
+    page ≤ 当前页"会把标题在页尾的那一章当成正在读的章（翻页还没发生就开始翻下一章），
+    所以再用 `getScreenPositionFromXPointer` 取标题在页内的 y：落在下半页仍算上一章，
+    真正翻过去（y 在上半页）才切换。取不到坐标或页面高度时退回页码判定。
 - `mcp_external` 不参与翻页自动续译；`maybeSchedulePageTranslation` 开头必须加：
   ```lua
   if self:getMode() == "mcp_external" then return end

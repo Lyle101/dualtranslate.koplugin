@@ -121,6 +121,29 @@ function Coverage.entry_at_page(pages, page)
     return nil
 end
 
+-- The entry being read, with the page's own layout taken into account: a
+-- chapter heading that only appears at the bottom of the page is not the
+-- chapter being read yet (the page still shows the previous one above it),
+-- even though CREngine reports the same page for both.  `y_of(item)` returns
+-- the heading's vertical position inside the page, or nil when unknown; the
+-- entry counts as current only when it starts in the upper half.
+function Coverage.reading_position(pages, page, height, y_of)
+    local position = Coverage.entry_at_page(pages, page)
+    if not position or not height or height <= 0 or type(y_of) ~= "function" then
+        return position
+    end
+    local by_position = {}
+    for _, item in ipairs(pages or {}) do by_position[item.position] = item end
+    while position > 1 do
+        local item = by_position[position]
+        if not item or item.page ~= page then break end
+        local y = y_of(item)
+        if type(y) ~= "number" or y <= height * 0.5 then break end
+        position = position - 1
+    end
+    return position
+end
+
 -- The job range a TOC entry covers: from its own anchor to the next distinct
 -- one.  The first entry of a file starts at the file edge (nil) even when it
 -- carries an anchor — its opening text precedes that anchor, and a range

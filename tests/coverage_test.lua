@@ -81,6 +81,26 @@ do
     check("超出最后一条仍算最后一条", Coverage.entry_at_page(pages, 99) == 4)
     check("没有可用锚点返回 nil", Coverage.entry_at_page({}, 5) == nil)
 
+    -- 同一页上出现下一条目的标题：只看页码会提前跳到下一章，
+    -- 标题在页面下半部时应仍算上一章
+    local same_page = { { position = 1, page = 5 }, { position = 2, page = 9 },
+        { position = 3, page = 9 } }
+    local function y_at(map)
+        return function(item) return map[item.position] end
+    end
+    check("标题在页面上半部算新章",
+        Coverage.reading_position(same_page, 9, 1000, y_at({ [2] = 120, [3] = 150 })) == 3)
+    check("标题在页面下半部仍算上一章",
+        Coverage.reading_position(same_page, 9, 1000, y_at({ [2] = 120, [3] = 860 })) == 2)
+    check("拿不到坐标时退回页码判定",
+        Coverage.reading_position(same_page, 9, 1000, function() return nil end) == 3)
+    check("没有页面高度时退回页码判定",
+        Coverage.reading_position(same_page, 9, nil, y_at({ [3] = 900 })) == 3)
+    check("第一条不会被退掉",
+        Coverage.reading_position(same_page, 5, 1000, y_at({ [1] = 900 })) == 1)
+    check("只退同页的条目",
+        Coverage.reading_position(same_page, 9, 1000, y_at({ [2] = 900, [3] = 900 })) == 1)
+
     local rows = {
         { anchor = "a" }, { anchor = "b" }, { anchor = "c" }, { anchor = "c" },
     }
