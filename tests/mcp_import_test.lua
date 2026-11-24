@@ -233,7 +233,8 @@ do
             file_size = lfs.attributes(ranged_book, "size"),
             file_mtime = lfs.attributes(ranged_book, "modification") or 0,
         },
-        chapters = { { index = 1, title = "One", partial = true } },
+        chapters = { { index = 1, title = "One", partial = true,
+            ranges = { { from = "p1", to = "p2" } } } },
         segments = {
             { id = "s000001", parent_id = "s000001", part = 1, parent_total = 1,
               chapter_index = 1, chapter_title = "One", selector = "sel-ranged",
@@ -253,6 +254,14 @@ do
         provider and ("done=" .. #(provider.chapters or {})
             .. " partial=" .. #(provider.partial_chapters or {})))
     check("范围任务不算整本完成", provider and provider.complete == false)
+    -- 任务里带的锚点范围落进覆盖表：选择器只给这一条打「已翻译」，
+    -- 而不是给同文件的每条都打「部分」。
+    local entry_rows = provider and provider.entry_ranges and provider.entry_ranges["1"]
+    check("范围任务记录条目覆盖", type(entry_rows) == "table" and #entry_rows == 1
+        and entry_rows[1].from == "p1" and entry_rows[1].to == "p2"
+        and entry_rows[1].done == true,
+        entry_rows and (tostring(entry_rows[1] and entry_rows[1].from) .. "-"
+            .. tostring(entry_rows[1] and entry_rows[1].to)))
 end
 
 -- ============================================================
@@ -319,7 +328,8 @@ do
             file_size = lfs.attributes(fail_book, "size"),
             file_mtime = lfs.attributes(fail_book, "modification") or 0,
         },
-        chapters = { { index = 1, title = "One", partial = true },
+        chapters = { { index = 1, title = "One", partial = true,
+                ranges = { { from = "a", to = "b" } } },
             { index = 2, title = "Two" } },
         segments = {
             { id = "s000001", parent_id = "s000001", part = 1, parent_total = 1,
@@ -337,6 +347,8 @@ do
     check("允许部分导入", summary ~= nil, tostring(err))
     local manifest = Overlay.loadManifest(Store.bookDir(fail_book, "zh-Hans"))
     local provider = manifest and manifest.providers["mcp:gpt-5"]
+    check("一段都没回来时不写条目覆盖", provider
+        and provider.entry_ranges == nil, provider and type(provider.entry_ranges))
     check("范围内全失败落 failed_chapters", provider
         and #(provider.failed_chapters or {}) == 1 and provider.failed_chapters[1] == 1
         and #(provider.partial_chapters or {}) == 0,

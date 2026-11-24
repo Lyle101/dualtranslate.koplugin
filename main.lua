@@ -764,6 +764,9 @@ function dualtranslate:onCloseDocument()
     self._page_translation_follow_active = nil
     self._page_translation_last_fragment = nil
     self._chapter_index_cache = nil
+    -- Anchor -> page tables are pagination-specific; the next book re-renders
+    -- with its own font settings.
+    self._entry_page_cache = nil
     -- 7.2: the parsed outline belongs to the book that was just closed.
     self._book_outline_cache = nil
     self._style_refresh_scheduled = nil
@@ -840,6 +843,14 @@ function dualtranslate:onPosUpdate()
 end
 
 function dualtranslate:onDocumentRerendered()
+    -- Pagination may have changed (font size, margins, zoom), so the cached
+    -- anchor -> page table is no longer the document's: drop it and let the
+    -- next lookup ask CREngine again.  `_chapter_index_cache` is keyed by page
+    -- number, which often survives a font change (KOReader keeps the current
+    -- xpointer), so it must go too or the page would resolve to the chapter
+    -- that *used* to sit there.
+    self._entry_page_cache = nil
+    self._chapter_index_cache = nil
     if self.maybeSchedulePageTranslation then
         self:maybeSchedulePageTranslation(false)
     end

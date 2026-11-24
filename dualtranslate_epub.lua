@@ -5,6 +5,7 @@
 local Epub = {}
 local Archiver = require("ffi/archiver")
 local Overlay = require("dualtranslate_overlay")
+local Coverage = require("dualtranslate_coverage")
 local ListIndent = require("dualtranslate_listindent")
 local Tools = require("dualtranslate_tools")
 local DataStorage = require("datastorage")
@@ -542,8 +543,11 @@ Epub.anchor_offsets = anchor_offsets
 -- from the XHTML must translate too much, never nothing.  Anchors are
 -- normalised by the outline parser, so they carry no %XX escapes and match
 -- the ids in the file.
-local function slice_candidates(candidates, ranges, document)
-    if #candidates == 0 or #ranges == 0 then return candidates end
+-- Each kept candidate remembers which range kept it (`range_group`), because
+-- the checkpoint records one outcome per range: that is what lets the picker
+-- say "this chapter is translated" instead of "part of this file is".
+local function slice_range_groups(candidates, ranges, document)
+    if #candidates == 0 or #ranges == 0 then return nil end
     local logger = require("logger")
     local wanted, whole = {}, false
     for _, range in ipairs(ranges) do
@@ -553,7 +557,7 @@ local function slice_candidates(candidates, ranges, document)
         if range.from then wanted[range.from] = true end
         if range.to then wanted[range.to] = true end
     end
-    if whole then return candidates end
+    if whole then return nil end
     local offsets = anchor_offsets(document, wanted)
     for anchor in pairs(wanted) do
         if not offsets[anchor] then
@@ -574,10 +578,14 @@ local function slice_candidates(candidates, ranges, document)
         end
         edges[#edges + 1] = { from = from, to = to }
     end
-    local kept, seen = {}, {}
+    local groups = {}
+    for position = 1, #edges do
+        groups[position] = { range = ranges[position], candidates = {} }
+    end
+    local seen = {}
     for _, candidate in ipairs(candidates) do
         local order = candidate.order or 0
-        for _, edge in ipairs(edges) do
+        for position, edge in ipairs(edges) do
             -- `order` is the element's inner start; an anchor on an inline
             -- element inside a paragraph sits after it.  A candidate that
             -- merely starts before the anchor but ends after it still owns
@@ -587,10 +595,25 @@ local function slice_candidates(candidates, ranges, document)
             if after_start and (not edge.to or order < edge.to) then
                 if not seen[candidate.selector] then
                     seen[candidate.selector] = true
-                    kept[#kept + 1] = candidate
+                    candidate.range_group = position
+                    local group = groups[position]
+                    group.candidates[#group.candidates + 1] = candidate
                 end
                 break
             end
+        end
+    end
+    return groups
+end
+
+local function slice_candidates(candidates, ranges, document)
+    local groups = slice_range_groups(candidates, ranges, document)
+    -- Whole-file range (or nothing to slice): every candidate stays.
+    if not groups then return candidates end
+    local kept = {}
+    for _, group in ipairs(groups) do
+        for _, candidate in ipairs(group.candidates) do
+            kept[#kept + 1] = candidate
         end
     end
     return kept
@@ -602,6 +625,11 @@ Epub.slice_candidates = slice_candidates
 -- chapter_indexes shape still accepted for queued jobs from older versions.
 local function resolve_ranges(opts, book_path, work_dir, spine)
     local mode = opts.mode or "all"
+    -- Anchor ranges win over the mode: "translate the current chapter" is a
+    -- span job narrowed to the entry the page is in.  The fragment is not
+    -- consulted then — it only names the starting chapter for a plain span.
+    local explicit = normalize_ranges(opts.chapter_ranges, #spine)
+    if #explicit > 0 then return explicit end
     local ranges = {}
     if mode == "all" then
         for index = 1, #spine do ranges[#ranges + 1] = { index = index } end
@@ -620,7 +648,6 @@ local function resolve_ranges(opts, book_path, work_dir, spine)
         for _, index in ipairs(normalize_indexes(opts.chapter_indexes, #spine)) do
             ranges[#ranges + 1] = { index = index }
         end
-        return ranges
     end
     return ranges
 end
@@ -721,11 +748,24 @@ function Epub.translate_overlay(opts, ...)
         end
         if document and #candidates > 0 and not current.whole then
             local total_before = #candidates
-            candidates = slice_candidates(candidates, current.ranges, document)
-            -- Missing anchors widen a range to the file edges; when that (or a
-            -- one-paragraph chapter) keeps every candidate, the file really is
-            -- fully translated and must not stay "partial" forever.
-            if #candidates == total_before then current.whole = true end
+            local groups = slice_range_groups(candidates, current.ranges, document)
+            if groups then
+                local kept = {}
+                for _, group in ipairs(groups) do
+                    for _, candidate in ipairs(group.candidates) do
+                        kept[#kept + 1] = candidate
+                    end
+                end
+                candidates = kept
+                -- Missing anchors widen a range to the file edges; when that
+                -- (or a one-paragraph chapter) keeps every candidate, the file
+                -- really is fully translated and must not stay "partial".
+                if #candidates == total_before then
+                    current.whole = true
+                else
+                    current.groups = groups
+                end
+            end
         end
         chapter_candidates[current.index] = candidates
         total = total + #candidates
@@ -879,6 +919,55 @@ function Epub.translate_overlay(opts, ...)
         end
         return done, partial, failed
     end
+    -- Per-file list of the ranges that came back, {from, to, done}.  Seeded
+    -- from the manifest so a failed re-run (or a narrower selection) never
+    -- erases an earlier chapter's coverage; a file that is now whole drops its
+    -- list, `chapters` already says all of it is translated.
+    local function entry_coverage(done_indexes)
+        local covered = {}
+        if prior_state and type(prior_state.entry_ranges) == "table" then
+            for index, list in pairs(prior_state.entry_ranges) do
+                if type(list) == "table" then
+                    -- Keep the key even when the list is empty: it marks the
+                    -- file as entry-tracked, which is what stops the file-level
+                    -- "partial" from being painted on every row.
+                    local key = tostring(index)
+                    covered[key] = Coverage.merge_ranges(covered[key], list)
+                end
+            end
+        end
+        for index, st in pairs(chapter_stats) do
+            if st.entered and not st.whole and st.range_stats then
+                local key = tostring(index)
+                local additions = {}
+                for _, stat in pairs(st.range_stats) do
+                    -- Nothing succeeded: the range is not covered at all, and
+                    -- recording it as partial would mark chapters this run
+                    -- never touched.
+                    if stat.total > 0 and stat.success > 0 then
+                        additions[#additions + 1] = {
+                            from = stat.range.from, to = stat.range.to,
+                            done = stat.success >= stat.total or nil,
+                        }
+                    end
+                end
+                if #additions > 0 then
+                    covered[key] = Coverage.merge_ranges(covered[key], additions)
+                elseif covered[key] == nil and not st.cancelled then
+                    -- The range held no text (an image-only chapter) or every
+                    -- paragraph failed.  Keep an empty list: it tells the
+                    -- picker this file is tracked per entry, so the file-level
+                    -- "partial" must not spill onto rows that were never in
+                    -- the request.  A cancelled file is excluded: it may
+                    -- already have a file-level partial from an earlier run,
+                    -- and hiding that would under-report.
+                    covered[key] = {}
+                end
+            end
+        end
+        for _, index in ipairs(done_indexes) do covered[tostring(index)] = nil end
+        return covered
+    end
     local function save_checkpoint(complete, allow_empty)
         -- Never replace an existing overlay with an empty one.  When the
         -- provider changed and every request failed, writing an empty
@@ -916,6 +1005,7 @@ function Epub.translate_overlay(opts, ...)
             manifest.providers = manifest.providers or {}
             local existing = manifest.providers[provider]
             local done, partial, failed = classify_chapters()
+            local range_coverage = entry_coverage(done)
             -- Only a whole-book run that finished every spine chapter may be
             -- complete; span/selection runs always leave it incomplete (7.4).
             local is_complete = complete == true and mode == "all"
@@ -929,6 +1019,9 @@ function Epub.translate_overlay(opts, ...)
                 chapters = done,
                 partial_chapters = partial,
                 failed_chapters = failed,
+                -- Which chapter inside a shared file finished; the picker's
+                -- （已翻译）/（部分） marks read this before partial_chapters.
+                entry_ranges = next(range_coverage) and range_coverage or nil,
                 complete = is_complete,
                 translated_count = count_unique(merged),
                 updated_at = os.time(),
@@ -1014,6 +1107,15 @@ function Epub.translate_overlay(opts, ...)
         local st = { candidates = #candidates, success = 0, failed = 0,
             entered = true, cancelled = false, whole = current.whole == true,
             unreadable = unreadable[current.index] == true }
+        -- One outcome per requested range, so the manifest can record the
+        -- chapters inside this file that actually finished.
+        if current.groups then
+            st.range_stats = {}
+            for position, group in ipairs(current.groups) do
+                st.range_stats[position] = { range = group.range,
+                    total = #group.candidates, success = 0 }
+            end
+        end
         chapter_stats[current.index] = st
         -- Release the collected source text of this chapter as soon as its
         -- batch loop finishes.  On a several-hundred-chapter book the full
@@ -1084,6 +1186,10 @@ function Epub.translate_overlay(opts, ...)
                     end
                     translated_count = translated_count + 1
                     st.success = st.success + 1
+                    if candidate.range_group and st.range_stats then
+                        local stat = st.range_stats[candidate.range_group]
+                        if stat then stat.success = stat.success + 1 end
+                    end
                     consecutive_failures = 0
                 else
                     failed_count = failed_count + 1
@@ -1611,6 +1717,102 @@ function Epub.outline(book_path, ...)
 end
 
 -- ---------------------------------------------------------------------------
+-- Page -> TOC entry (current chapter at entry granularity)
+--
+-- A TOC entry is an anchor, and CREngine can tell the page an element starts
+-- on if the element is addressed the way its own xpointers are: a path of tag
+-- names with sibling indices ("/body/div[2]/h1").  Parsing the chapter once
+-- yields that path for every anchor, so mapping the page costs one parse per
+-- chapter, not one per page turn, and no text is re-requested.
+-- ---------------------------------------------------------------------------
+
+-- Spine hrefs, cached per book: resolving one chapter needs the OPF, and a
+-- page turn must not unpack the container again.
+local spine_cache
+function Epub.spine(book_path)
+    local size = lfs.attributes(book_path, "size")
+    local mtime = lfs.attributes(book_path, "modification") or 0
+    if spine_cache and spine_cache.book_path == book_path
+        and spine_cache.size == size and spine_cache.mtime == mtime then
+        return spine_cache.spine
+    end
+    local work_dir = new_work_dir("spine_")
+    if not work_dir then return nil end
+    local ok, spine = pcall(function()
+        local first = Tools.extract_entries(book_path, work_dir,
+            { ["META-INF/container.xml"] = true })
+        local container = first and first["META-INF/container.xml"]
+            and read_file(first["META-INF/container.xml"])
+        local opf_path = container and container_opf_path(container)
+        if not opf_path then return nil end
+        local second = Tools.extract_entries(book_path, work_dir, { [opf_path] = true })
+        local opf_file = second and second[opf_path]
+        local opf = opf_file and read_file(opf_file)
+        if not opf then return nil end
+        return parse_package(opf, opf_path).spine
+    end)
+    Tools.rmtree(work_dir)
+    if not ok or type(spine) ~= "table" or #spine == 0 then return nil end
+    -- size/mtime in the key, same as the outline cache: the same path can be
+    -- replaced by a new edition, and its spine is not this book's spine.
+    spine_cache = { book_path = book_path, size = size, mtime = mtime,
+        spine = spine }
+    return spine
+end
+
+local anchor_path_cache
+-- Anchor id -> element path under body ("/body/div[2]/h1"), for one spine
+-- item.  Only the page the user is reading is parsed, and the result is kept
+-- until the chapter changes.
+function Epub.chapter_anchor_paths(book_path, index)
+    index = tonumber(index)
+    if not index then return nil end
+    local cached = anchor_path_cache
+    if cached and cached.book_path == book_path and cached.index == index then
+        return cached.paths
+    end
+    local spine = Epub.spine(book_path)
+    local relative = spine and spine[index]
+    if not relative then return nil end
+    local work_dir = new_work_dir("anchor_")
+    if not work_dir then return nil end
+    local ok, paths = pcall(function()
+        local extracted = Tools.extract_entries(book_path, work_dir, { [relative] = true })
+        local path
+        for _, value in pairs(extracted or {}) do path = value end
+        local document = path and read_file(path)
+        if not document then return nil end
+        local tree = parse_elements(document)
+        local root = direct_child(tree, "html") or tree
+        local body = direct_child(root, "body") or root
+        local map = {}
+        local function walk(node, prefix)
+            local counts = {}
+            for _, child in ipairs(node.children) do
+                local count = (counts[child.name] or 0) + 1
+                counts[child.name] = count
+                -- Same spelling as collect_overlay_candidates: the index is
+                -- omitted for the first element of its type, which is also
+                -- what CREngine writes back.  An explicit [1] parses too, but
+                -- two spellings for one address invite drift.
+                local child_path = prefix .. "/" .. child.name
+                    .. (count > 1 and ("[" .. count .. "]") or "")
+                local id = tag_anchor_id(child.raw)
+                -- The first occurrence wins, same as the slicer's range start.
+                if id and not map[id] then map[id] = child_path end
+                walk(child, child_path)
+            end
+        end
+        walk(body, "/body")
+        return map
+    end)
+    Tools.rmtree(work_dir)
+    if not ok or type(paths) ~= "table" then return nil end
+    anchor_path_cache = { book_path = book_path, index = index, paths = paths }
+    return paths
+end
+
+-- ---------------------------------------------------------------------------
 -- MCP job extraction (design 10.2)
 --
 -- The device exports the job because selectors must match CREngine's own
@@ -1681,7 +1883,20 @@ function ExportSession:_next_chapter()
     -- `partial` is what keeps the importer from marking a whole file done
     -- when only one chapter inside it was exported.
     local chapter = { index = index, title = title }
-    if not whole then chapter.partial = true end
+    if not whole then
+        chapter.partial = true
+        -- Which chapters inside this file the job carries: the importer
+        -- records them, so the picker can mark the entries that were exported
+        -- instead of calling the whole file partly translated.
+        local ranges = self.ranges_by_index[index]
+        if ranges and #ranges > 0 then
+            local copy = {}
+            for _, range in ipairs(ranges) do
+                copy[#copy + 1] = { from = range.from, to = range.to }
+            end
+            chapter.ranges = copy
+        end
+    end
     self.chapters[#self.chapters + 1] = chapter
     for _, candidate in ipairs(candidates) do
         local parts = Tools.split_text(candidate.source, self.max_chars)

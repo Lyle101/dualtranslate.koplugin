@@ -656,6 +656,12 @@ cache/dualtranslate/books/<hash>/
       "chapters": [5],
       "partial_chapters": [6],
       "failed_chapters": [],
+      "entry_ranges": {
+        "6": [
+          { "from": "ch6sec2", "to": "ch6sec3", "done": true },
+          { "from": "ch6sec3", "to": null }
+        ]
+      },
       "complete": false,
       "translated_count": 410,
       "updated_at": 1760000100
@@ -732,6 +738,7 @@ local slug = provider_id:gsub("[^%w._-]", "_")  -- mcp:gpt-5 -> mcp_gpt-5
 
 - `providers[pid].chapters`：**完整翻译完成**的 spine index 列表。该章所有候选段落都成功（`failed == 0`）才加入；**候选数为 0 的章节（封面、版权页、空白页）直接计入 `chapters`**，不进入 `failed_chapters`。否则 `complete` 永远不成立，逐章模式会反复重排这些章（D13）。
 - `providers[pid].partial_chapters`：有部分译文、但仍有失败/未完成段落的章节。
+- `providers[pid].entry_ranges`：`spine index -> [{from, to, done}]`，这条记录的是**文件内部**翻完了哪几段。`from`/`to` 是目录锚点（`to` 不含，`null` 表示文件边界），与 job 的 `chapter_ranges` 同一形状；`done=true` 表示该范围全部段落成功，字段缺省表示部分成功（选择器显示「（部分）」）。空数组表示「该文件按条目记账、但一条都没覆盖」，用来阻止文件级「部分」溢到每一行。它只用于「条目级」标记与翻页续跳，`chapters/partial_chapters` 仍是文件级结论（决定整书是否 `complete`）。整文件完成时该文件的条目表会被清掉——`chapters` 已经表达了「全翻完」。旧 manifest 没有这个字段时，选择器退回文件级标记。
 - `providers[pid].failed_chapters`：尝试过、至少有 1 段候选且 0 段成功的章节，或中断时尚未完成的章节。
 - `providers[pid].complete`：仅当 `spine_count >= 1` **且** `chapters` 覆盖 `1..spine_count` 且 `partial_chapters/failed_chapters` 为空时为 true；整书任务才允许置 true。`spine_count=0`（迁移读不到 OPF spine）时恒为 false——空集 `1..0` 不能被当成「已覆盖全书」。
 - `translated_count`：entries 中**唯一 selector** 的数量，用于菜单显示；DB 行数只用于诊断，不作为显示依据。
@@ -1017,7 +1024,8 @@ Queue item：
 - v1.3 改为每章维护 `chapter_success`、`chapter_failed`、`candidate_count`：
   - `candidate_count == 0`（封面/版权/空白页）→ 直接写入 `chapters`（空真），**不写** `failed_chapters`；
   - 该章所有候选都成功 → 写入 `chapters`；
-  - 有成功也有失败/取消 → 写入 `partial_chapters`；
+  - 有成功也有失败/取消 → 写入 `partial_chapters`；同时按范围记录 `entry_ranges`，
+    让选择器只在翻过的条目上显示「（部分）」；
   - `candidate_count > 0` 且 0 段成功 → 写入 `failed_chapters`。
 - 进度文件仍可用 `章 x/y` 表示处理进度；manifest 的 `chapters` 只表示**完整完成**。
 - 取消/中断时，当前章如果只完成一部分，必须进 `partial_chapters`，下次翻译会重新排队（已完成的段落仍会被复用）。
@@ -1031,6 +1039,15 @@ Queue item：
   - `translateSelectedChapters(list)`：一次性任务，不 follow。
   - 若保留 `translateBook(all_chapters, ...)`，必须增加显式 `mode` 参数，不能再用 `isPageTranslationEnabled()` 改写。
 - `PageTrans` 的 complete 检查改为当前**生成引擎**的 `manifest.providers[provider]`，不是全局 `complete`；`chapters` 只认完整完成的章节，`partial_chapters/failed_chapters` 仍可重新排队。
+- **当前章 = 当前目录条目**（13.x）：一个 XHTML 装多章时，`translateCurrentChapter` 不再把整份文件交给 job。
+  取当前 spine 文件里每条目录的锚点，解析该章 XHTML 得到锚点元素的路径（`/body/div[2]/h1`），
+  用 `document:getPageFromXPointer("/body/DocFragment[N]" .. path)` 问 CREngine 每个锚点落在第几页；
+  当前页之前最后一个锚点就是正在读的条目。范围取「该条目锚点 → 下一条目锚点」，走
+  `chapter_ranges`（`to` 不含、`nil` 为文件边界），与选择器的范围同一条管线。
+  - 解析只在**换章**时做一次（`chapter_anchor_paths` 按 书+spine 缓存），翻页只查缓存好的页表；
+    `onDocumentRerendered`（字号/边距变化）清空页表。
+  - 锚点落在文件第一条时 `from = nil`（文件开头属于它）；锚点定位失败、目录只有一条、
+    或 `getPageFromXPointer` 全部返回 0 时退回整文件范围——不映射不会比旧行为更差。
 - `mcp_external` 不参与翻页自动续译；`maybeSchedulePageTranslation` 开头必须加：
   ```lua
   if self:getMode() == "mcp_external" then return end

@@ -14,6 +14,7 @@ local DataStorage = require("datastorage")
 local Cache = require("dualtranslate_cache")
 local Providers = require("dualtranslate_providers")
 local Overlay = require("dualtranslate_overlay")
+local Coverage = require("dualtranslate_coverage")
 local Store = require("dualtranslate_store")
 local Tools = require("dualtranslate_tools")
 local TranslationUI = require("dualtranslate_ui")
@@ -308,6 +309,103 @@ function dualtranslate:getCurrentFragment()
     return ok and xpointer or nil
 end
 
+-- Which TOC entries of `index` start on which page, cached per chapter.  The
+-- answer comes from CREngine itself (getPageFromXPointer on the element path
+-- the anchor lives at), so it follows the renderer's own pagination; the
+-- chapter is parsed once for its paths, never per page turn.
+function dualtranslate:chapterEntryPages(book_path, index, rows)
+    local cached = self._entry_page_cache
+    if cached and cached.book_path == book_path and cached.index == index then
+        -- An empty cached list is a remembered failure: retrying N probes on
+        -- every page turn would not make CREngine find the anchors.
+        if #cached.pages == 0 then return nil end
+        return cached.pages
+    end
+    local document = self.ui and self.ui.document
+    if not document or not document.getPageFromXPointer then return nil end
+    local Epub = self.epub or (self.loadEpubModule and self:loadEpubModule())
+    local paths = Epub and Epub.chapter_anchor_paths
+        and Epub.chapter_anchor_paths(book_path, index)
+    if type(paths) ~= "table" then return nil end
+    local pages = {}
+    local function page_of(address)
+        local ok, value = pcall(document.getPageFromXPointer, document, address)
+        if ok and type(value) == "number" and value > 0 then return value end
+        return nil
+    end
+    for position, row in ipairs(rows) do
+        local path = row.anchor and paths[row.anchor]
+        if path then
+            -- Same xpointer spelling the overlay uses: [N] only past the
+            -- first DocFragment.
+            local xp = "/body/DocFragment"
+                .. (index > 1 and ("[" .. index .. "]") or "") .. path
+            local page = page_of(xp)
+            if not page then
+                -- The renderer rebuilt the tree differently (invalid nesting,
+                -- an entity inside an attribute), yet the anchor's parent is
+                -- still addressable and starts at the same place.  Falling
+                -- back to it beats dropping the anchor: a missing page would
+                -- attribute this entry's text to the previous one.
+                local parent = xp:gsub("/[^/]+$", "")
+                if parent ~= xp and parent:sub(-5) ~= "/body" then
+                    page = page_of(parent)
+                end
+            end
+            if page then
+                pages[#pages + 1] = { position = position, page = page,
+                    anchor = row.anchor }
+            end
+        end
+    end
+    if #pages == 0 then
+        logger.warn("dualtranslate: no TOC anchor of chapter", index,
+            "could be located by CREngine; keeping the whole file")
+        self._entry_page_cache = { book_path = book_path, index = index,
+            pages = {} }
+        return nil
+    end
+    logger.dbg("dualtranslate: entry pages for chapter", index, #pages, "of",
+        #rows, "anchors")
+    self._entry_page_cache = { book_path = book_path, index = index,
+        pages = pages }
+    return pages
+end
+
+-- The current TOC entry as a job range.  nil when the chapter cannot be
+-- resolved; a whole-file range (no anchors) whenever entry granularity is not
+-- available — no outline, no CREngine probing, or a file the TOC lists once.
+-- That keeps the old behaviour as the floor: a failed mapping translates the
+-- same file it used to.
+--
+-- `key` identifies the entry for the page-turn guard ("12.3" = third entry of
+-- spine file 12), and is the chapter index alone for a whole-file fallback.
+function dualtranslate:currentChapterRange()
+    local document = self.ui and self.ui.document
+    if not document then return nil end
+    local index = self:currentChapterIndex()
+    if not index then return nil end
+    local book_path = document.file
+    local whole = { index = index }
+    local outline = self:getBookOutline(book_path)
+    local entries = outline and type(outline.entries) == "table" and outline.entries
+    if not entries or #entries == 0 then return whole, tostring(index) end
+    local rows = {}
+    for _, entry in ipairs(entries) do
+        if tonumber(entry.index) == index then rows[#rows + 1] = entry end
+    end
+    -- One entry means the file is the chapter: nothing to narrow.
+    if #rows <= 1 then return whole, tostring(index) end
+    local pages = self:chapterEntryPages(book_path, index, rows)
+    if not pages then return whole, tostring(index) end
+    local page = document.getCurrentPage and document:getCurrentPage() or nil
+    if not page then return whole, tostring(index) end
+    local position = Coverage.entry_at_page(pages, page)
+    if not position then return whole, tostring(index) end
+    return Coverage.entry_range(rows, position, index),
+        index .. "." .. position, rows
+end
+
 -- 7.2: on-demand outline behind the chapter picker.  The EPUB module already
 -- caches the parsed result on disk keyed by (path, size, mtime); this keeps one
 -- parsed copy in memory for the open book, so reopening the picker or opening
@@ -370,14 +468,17 @@ end
 
 function dualtranslate:translateCurrentChapter(silent, auto)
     if not self:isEpub() then return end
+    -- The current entry, not the whole file: a XHTML holding nine chapters
+    -- used to hand all nine to the job.  The range falls back to the file when
+    -- the page cannot be mapped onto a TOC anchor.
+    local range, key = self:currentChapterRange()
     if self:getMode() == "mcp_external" then
         local index = self:currentChapterIndex()
-        self:confirmMcpExport(index and { index } or nil)
+        self:confirmMcpExport(range and { range } or (index and { index } or nil))
         return
     end
     local book_path = self.ui.document.file
     local fragment = self:getCurrentFragment()
-    if fragment then self._page_translation_last_fragment = fragment end
     -- 逐章模式: translating the current chapter arms follow so page turns keep
     -- scheduling the newly reached chapters (each one still shows the progress
     -- dialog; `auto` only silences the per-chapter completion notice).  The
@@ -388,8 +489,14 @@ function dualtranslate:translateCurrentChapter(silent, auto)
     if self:isPageTranslationEnabled() then
         self._page_translation_follow_active = true
     end
-    self:enqueueTranslation({ book_path = book_path, mode = "span",
-        fragment = fragment, span = 1, silent = silent, auto = auto })
+    local queued = self:enqueueTranslation({ book_path = book_path, mode = "span",
+        fragment = fragment, span = 1, chapter_ranges = range and { range } or nil,
+        silent = silent, auto = auto })
+    -- Remember the entry only once it really entered the queue: a refused
+    -- enqueue (another job for this book) must stay retryable.
+    if queued ~= false and key then
+        self._page_translation_last_fragment = key
+    end
 end
 
 -- How many spine files a range list touches.  Ranges are chapters, several of
@@ -1642,7 +1749,12 @@ function dualtranslate:_runTranslation(item)
             -- session, otherwise page turns would keep re-queueing an
             -- already-complete final chapter forever.  Only span mode drives
             -- follow; a one-shot selection never arms or disarms it (7.4).
-            if mode == "span" and result.last_chapter then
+            -- A span job narrowed to one TOC entry says nothing about the rest
+            -- of that last file, so it must not disarm: the remaining entries
+            -- still need to be scheduled as they are reached.
+            local narrowed = type(item.chapter_ranges) == "table"
+                and #item.chapter_ranges > 0
+            if mode == "span" and result.last_chapter and not narrowed then
                 self._page_translation_follow_active = nil
             end
             self:saveTranslationQueue()

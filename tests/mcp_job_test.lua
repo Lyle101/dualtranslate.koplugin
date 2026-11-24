@@ -286,12 +286,19 @@ do
         and ranged.segments[1].source == "First paragraph.",
         ranged and #ranged.segments)
     check("范围导出的章节标 partial", ranged and ranged.chapters[1].partial == true)
+    check("范围导出带上锚点，供导入记录条目覆盖", ranged
+        and type(ranged.chapters[1].ranges) == "table"
+        and ranged.chapters[1].ranges[1].from == "p1"
+        and ranged.chapters[1].ranges[1].to == "p2",
+        ranged and ranged.chapters[1].ranges
+            and tostring(ranged.chapters[1].ranges[1].from))
 
     local whole = Epub.collect_segments{
         book_path = BOOK, chapter_ranges = { { index = 1 } }, max_chars = 2000,
     }
     check("整文件范围不标 partial", whole ~= nil and #whole.segments == 3
-        and whole.chapters[1].partial == nil, whole and #whole.segments)
+        and whole.chapters[1].partial == nil and whole.chapters[1].ranges == nil,
+        whole and #whole.segments)
 
     local missing = Epub.collect_segments{
         book_path = BOOK,

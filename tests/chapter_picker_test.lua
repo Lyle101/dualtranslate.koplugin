@@ -619,7 +619,67 @@ do
     check("已翻译行带标记", items[7].text == "▢ 1（已翻译） 第 1 节", items[7].text)
     check("部分翻译行带标记", items[8].text == "▢ 2（部分） 第 2 节", items[8].text)
     check("未翻译行不加标记", items[9].text == "▢ 3 第 3 节", items[9].text)
-    check("状态行统计已译", items[6].text == "共 3 章 · 已译 1 · 已选 0 章", items[6].text)
+    check("状态行统计已译", items[6].text == "共 3 章 · 已译 1 章 · 已选 0 章", items[6].text)
+
+    -- 空覆盖表要穿过 Picker.coverage 活下来：它表示「该文件按条目记账、
+    -- 一条都没覆盖」，读端不能因为它没有元素就丢掉这个键。
+    local saved_manifest = manifest
+    manifest = { providers = { microsoft_free = { display_name = "Microsoft Edge",
+        chapters = {}, partial_chapters = { 1 }, entry_ranges = { ["1"] = {} } } } }
+    local empty_cov = Picker.coverage(plugin, "/books/a.epub")
+    check("空覆盖表原样保留", empty_cov ~= nil and type(empty_cov.ranges["1"]) == "table"
+        and #empty_cov.ranges["1"] == 0,
+        empty_cov and type(empty_cov.ranges and empty_cov.ranges["1"]))
+    local empty_state = Picker.new_state(section_outline, empty_cov)
+    check("空覆盖表压掉文件级部分", empty_state.partial[1] == nil,
+        tostring(empty_state.partial[1]))
+    manifest = saved_manifest
+
+    -- 条目级覆盖：同一文件里只翻了一条时，只有那一条带标记，
+    -- 其余同文件条目不能被写成「部分」。
+    local entry_state = Picker.new_state(section_outline, {
+        full = {}, partial = { 1 }, engine_label = "Microsoft Edge",
+        ranges = { ["1"] = { { from = "s1", to = "s2", done = true } } },
+    })
+    local entry_items = Picker.build_item_table(entry_state, {})
+    check("只有被范围覆盖的条目显示已翻译",
+        entry_items[8].text == "▢ 1.2（已翻译） 第一节", entry_items[8].text)
+    check("同文件其余条目不加标记",
+        entry_items[7].text == "▢ 1.1 第一章" and entry_items[9].text == "▢ 1.3 第二节",
+        entry_items[7].text .. " / " .. entry_items[9].text)
+    check("范围任务不再让整文件显示部分", entry_state.partial[1] == nil)
+
+    -- 未完成的范围（段落部分失败）只把覆盖到的条目标成「部分」
+    entry_state = Picker.new_state(section_outline, {
+        full = {}, partial = { 1 },
+        ranges = { ["1"] = { { from = "s2", to = nil, done = nil } } },
+    })
+    entry_items = Picker.build_item_table(entry_state, {})
+    check("未完成范围标部分",
+        entry_items[9].text == "▢ 1.3（部分） 第二节", entry_items[9].text)
+    check("未覆盖条目仍无标记", entry_items[7].text == "▢ 1.1 第一章", entry_items[7].text)
+
+    -- 范围里一段正文都没有（图片章）：覆盖表为空列表，但文件已被条目级跟踪，
+    -- 不能退回文件级「部分」把整份文件的行都标上
+    entry_state = Picker.new_state(section_outline, {
+        full = {}, partial = { 1 }, ranges = { ["1"] = {} },
+    })
+    entry_items = Picker.build_item_table(entry_state, {})
+    check("空覆盖表不落到文件级部分",
+        entry_items[7].text == "▢ 1.1 第一章"
+        and entry_items[9].text == "▢ 1.3 第二节", entry_items[9].text)
+
+    -- 整文件完成（chapters 列表）优先于任何范围表
+    entry_state = Picker.new_state(section_outline, {
+        full = { [1] = true }, partial = {},
+        ranges = { ["1"] = { { from = "s1", to = "s2", done = true } } },
+    })
+    entry_items = Picker.build_item_table(entry_state, {})
+    check("整文件完成时所有条目都带标记",
+        entry_items[7].text == "▢ 1.1（已翻译） 第一章"
+        and entry_items[9].text == "▢ 1.3（已翻译） 第二节", entry_items[7].text)
+    check("状态行按条目统计已译", entry_items[6].text:find("已译 3 条", 1, true) ~= nil,
+        entry_items[6].text)
 
     -- 对话框流程：行标记 + 长按说明来源引擎
     opened_menus, notifications = {}, {}

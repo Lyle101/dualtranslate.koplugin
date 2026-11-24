@@ -179,6 +179,10 @@ return {
     { book_path = "/old7.epub", status = "queued", chapter_indexes = { 2, 1 } },
     { book_path = "/old8.epub", status = "queued",
       chapter_ranges = { { index = 3, from = "a", to = "b" } } },
+    { book_path = "/old9.epub", status = "queued", mode = "span", fragment = "4",
+      span = 1, chapter_ranges = { { index = 4, from = "x", to = "y" } } },
+    { book_path = "/old10.epub", status = "queued", mode = "span", fragment = "5",
+      span = 1, chapter_ranges = {} },
 }
 ]])
     f:close()
@@ -210,6 +214,15 @@ return {
     check("有 chapter_ranges → selection 任务并保留范围", old8 ~= nil
         and old8.mode == "selection" and type(old8.chapter_ranges) == "table"
         and old8.chapter_ranges[1].index == 3 and old8.chapter_ranges[1].from == "a")
+    -- 当前章任务：span 也能带条目范围（条目级「翻译当前章节」）
+    local old9 = by_path["/old9.epub"]
+    check("span 任务保留条目范围", old9 ~= nil and old9.mode == "span"
+        and type(old9.chapter_ranges) == "table"
+        and old9.chapter_ranges[1].index == 4
+        and old9.chapter_ranges[1].from == "x", old9 and type(old9.chapter_ranges))
+    local old10 = by_path["/old10.epub"]
+    check("span 任务的空范围被丢弃", old10 ~= nil and old10.mode == "span"
+        and old10.chapter_ranges == nil, old10 and tostring(old10.chapter_ranges))
     os.remove(State.getQueuePath())
 end
 

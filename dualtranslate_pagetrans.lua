@@ -65,14 +65,14 @@ function PageTrans.attach(plugin)
         end
         local book_path = self.ui and self.ui.document and self.ui.document.file
         if not book_path then return end
-        -- Same-chapter guard: page turns inside the current chapter must not
-        -- re-queue it after its job finished (the job is idempotent, but the
-        -- queue entry and the completion toast would be pure noise).  When
-        -- the chapter resolver is unavailable the fragment is nil; use a
-        -- sentinel so we still de-duplicate instead of re-queueing chapter 1
-        -- on every page turn.
-        local fragment = self:getCurrentFragment()
-        local fragment_key = fragment or "__unknown_fragment__"
+        -- Which TOC entry the page is in.  A file holding several chapters is
+        -- read chapter by chapter now, so the guard has to identify the entry
+        -- ("12.3"), not just the file.
+        local range, key, rows = self:currentChapterRange()
+        -- No entry range (no outline, no CREngine probing): the chapter index
+        -- is still enough to keep the old whole-file guard.
+        if not key then key = self:getCurrentFragment() end
+        local fragment_key = key or "__unknown_fragment__"
         if fragment_key == self._page_translation_last_fragment then return end
         -- The whole book is already translated by the *current generation
         -- engine* (7.4): completeness is judged per provider, so a book
@@ -89,6 +89,7 @@ function PageTrans.attach(plugin)
                 path = dir,
                 complete = state and state.complete == true or false,
                 chapters = state and state.chapters or nil,
+                entry_ranges = state and state.entry_ranges or nil,
                 at = now,
             }
             self._page_translation_overlay_state = cached
@@ -98,20 +99,28 @@ function PageTrans.attach(plugin)
         -- translated" is tracked through the provider's chapters list.
         -- partial_chapters/failed_chapters are deliberately NOT treated as
         -- covered: those chapters must stay re-queueable (7.4).
-        if cached.chapters and type(cached.chapters) == "table" then
-            local fragment_index = tonumber(fragment_key)
-            if fragment_index then
-                for _, covered in ipairs(cached.chapters) do
-                    if covered == fragment_index then return end
-                end
+        local chapter_index = range and range.index or tonumber(fragment_key)
+        if chapter_index and cached.chapters and type(cached.chapters) == "table" then
+            for _, covered in ipairs(cached.chapters) do
+                if covered == chapter_index then return end
             end
+        end
+        -- Entry-level skip: a finished range inside a shared file marks only
+        -- its own entries, so turning into an untranslated neighbour still
+        -- schedules it.  This is what makes page-turn follow work inside one
+        -- XHTML instead of stopping at the first translated entry.
+        if rows and chapter_index and cached.entry_ranges then
+            local Coverage = require("dualtranslate_coverage")
+            local full = Coverage.entry_states(
+                { entry_ranges = cached.entry_ranges }, { [chapter_index] = rows })
+            if full[fragment_key] then return end
         end
         -- Queue the current chapter.  `silent` is forwarded as-is (every
         -- production caller passes false, so auto-continue shows the same
         -- progress dialog); `auto` marks the job as page-turn driven and only
         -- suppresses the completion toast — a toast on every chapter would be
         -- noise.
-        self._page_translation_last_fragment = fragment_key
+        -- translateCurrentChapter records the key once the job is queued.
         self:translateCurrentChapter(silent == true, true)
     end
 end

@@ -94,6 +94,41 @@ do
 end
 
 -- ============================================================
+-- 1b. 锚点元素路径（页 → 目录条目）
+-- ============================================================
+print("== 1b. 锚点元素路径 ==")
+do
+    package.loaded["dualtranslate_tools"] = nil
+    package.preload["dualtranslate_tools"] = function()
+        return {
+            mkdir_p = function() return true end,
+            rmtree = function() return true end,
+            unzip_to = function() return true end,
+            stable_path_hash = function() return "x" end,
+            extract_entries = function(_, _, wanted)
+                local out = {}
+                for key in pairs(wanted) do out[key] = TEST_DIR .. "/" .. key end
+                return out
+            end,
+        }
+    end
+    local Epub2 = dofile("dualtranslate_epub.lua")
+    local paths = Epub2.chapter_anchor_paths("/books/x.epub", 1)
+    check("路径表非空", type(paths) == "table" and next(paths) ~= nil)
+    -- 与 collect_overlay_candidates 的 xpointer 拼法一致：同标签首个元素不带下标
+    check("首个同类元素不带下标", paths and paths.h1 == "/body/h1", paths and paths.h1)
+    check("同名元素带序号", paths and paths.p1 == "/body/p"
+        and paths.p2 == "/body/p[2]" and paths.p3 == "/body/p[3]",
+        paths and (tostring(paths.p1) .. " " .. tostring(paths.p3)))
+    check("行内锚点带祖先路径", paths and paths.inline == "/body/p[2]/span",
+        paths and paths.inline)
+    check("重复 id 取第一次出现", paths and paths.dup == "/body/a", paths and paths.dup)
+    check("每章解析结果缓存", Epub2.chapter_anchor_paths("/books/x.epub", 1) == paths)
+    local second = Epub2.chapter_anchor_paths("/books/x.epub", 2)
+    check("换章重新解析", second ~= nil and second ~= paths)
+end
+
+-- ============================================================
 -- 2. html_to_text + collect_overlay_candidates（内联副本）
 -- ============================================================
 print("== 2. collect_overlay_candidates ==")
@@ -373,6 +408,38 @@ do
         and range_state.partial_chapters and range_state.partial_chapters[1] == 1,
         range_state and ("done=" .. #(range_state.chapters or {})
             .. " partial=" .. #(range_state.partial_chapters or {})))
+    -- 条目级覆盖：这次到底翻了文件里的哪一条，写进 manifest 供选择器标记
+    local range_rows = range_state and range_state.entry_ranges
+        and range_state.entry_ranges["1"]
+    check("范围完成时记录条目级覆盖",
+        type(range_rows) == "table" and #range_rows == 1
+        and range_rows[1].from == "p1" and range_rows[1].to == "p3"
+        and range_rows[1].done == true,
+        range_rows and (tostring(range_rows[1] and range_rows[1].from) .. "-"
+            .. tostring(range_rows[1] and range_rows[1].to)))
+
+    -- 范围内有一段失败：覆盖表在，但不能算完成（条目显示「部分」）
+    local output_dir_half = "/tmp/dualtranslate_out_half"
+    os.execute("rm -rf " .. output_dir_half)
+    local half_result = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "selection",
+        chapter_ranges = { { index = 1, from = "p1", to = "p3" } },
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dualtranslate_prog_half.txt", output_dir = output_dir_half,
+        translate = function(text)
+            if text:find("first", 1, true) then return nil end
+            return "T:" .. text
+        end,
+    })
+    check("范围内部分失败仍保留译文", half_result ~= nil, tostring(half_result))
+    local half_state = last_manifest and last_manifest.providers
+        and last_manifest.providers.microsoft_free
+    local half_rows = half_state and half_state.entry_ranges
+        and half_state.entry_ranges["1"]
+    check("部分失败的范围不算完成",
+        type(half_rows) == "table" and #half_rows == 1
+        and half_rows[1].from == "p1" and half_rows[1].done == nil,
+        half_rows and tostring(half_rows[1] and half_rows[1].done))
 
     -- 同一文件给整文件范围：覆盖度必须是「已翻译」
     local output_dir_whole = "/tmp/dualtranslate_out_whole"
@@ -393,6 +460,9 @@ do
         whole_state and #(whole_state.partial_chapters or {}) == 0
         and whole_state.chapters and whole_state.chapters[1] == 1,
         whole_state and ("done=" .. #(whole_state.chapters or {})))
+    check("整文件完成时清掉条目覆盖表", whole_state
+        and whole_state.entry_ranges == nil, whole_state
+        and type(whole_state.entry_ranges))
 
     -- 锚点不存在：往文件边界放宽，宁可多翻也不能漏
     local output_dir_missing = "/tmp/dualtranslate_out_missing"

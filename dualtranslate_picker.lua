@@ -13,6 +13,7 @@
 local _ = require("gettext")
 local Tools = require("dualtranslate_tools")
 local TranslationUI = require("dualtranslate_ui")
+local Coverage = require("dualtranslate_coverage")
 
 local Picker = {}
 
@@ -165,19 +166,70 @@ function Picker.new_state(outline, coverage)
     if coverage then
         state.full = coverage.full
         state.partial = coverage.partial
+        state.entry_ranges = coverage.ranges
         state.engine_label = coverage.label
     end
+    Picker.apply_entry_coverage(state)
     return state
 end
 
--- How many spine files carry a finished translation.  In entry mode one file
--- contributes several rows, so counting rows would report a single translated
--- file as a dozen translated chapters.
-function Picker.translated_files(state)
-    local seen, total = {}, 0
+-- Turn the manifest's anchor ranges into per-row marks.  Entry mode lists
+-- several rows per file, and a range covers only some of them: without this
+-- every row of a file with one translated chapter read "部分", which is
+-- exactly the lie the per-entry coverage removes.  A file with no ranges (old
+-- manifest, or a whole-file run) keeps the file-level mark as the fallback.
+function Picker.apply_entry_coverage(state)
+    local rows_by_file = {}
     for _, chapter in ipairs(state.chapters or {}) do
-        if state.full and state.full[chapter.index] and not seen[chapter.index] then
-            seen[chapter.index] = true
+        local bucket = rows_by_file[chapter.index]
+        if not bucket then
+            bucket = {}
+            rows_by_file[chapter.index] = bucket
+        end
+        bucket[#bucket + 1] = chapter
+    end
+    local full, partial = Coverage.entry_states(
+        { entry_ranges = state.entry_ranges }, rows_by_file)
+    for index, rows in pairs(rows_by_file) do
+        if not (state.full and state.full[index]) then
+            -- A key with an empty list still means "this file is tracked per
+            -- entry": a range that held no text must not fall back to the
+            -- file-level mark and paint every row.
+            local ranges = state.entry_ranges and state.entry_ranges[tostring(index)]
+            if type(ranges) == "table" then
+                for position, row in ipairs(rows) do
+                    local key = index .. "." .. position
+                    row.entry_full = full[key] == true or nil
+                    row.entry_partial = (not row.entry_full
+                        and partial[key] == true) or nil
+                end
+                -- The rows carry the precise mark now; the file-level
+                -- "partial" must not spill onto the untranslated ones.
+                state.partial = state.partial or {}
+                state.partial[index] = nil
+            end
+        end
+    end
+end
+
+-- The row's mark, in the order the user thinks about it: the file may be
+-- finished (whole-file run), then the entry itself (range run), then the old
+-- file-level partial.
+function Picker.row_state(state, chapter)
+    if state.full and state.full[chapter.index] then return "full" end
+    if chapter.entry_full then return "full" end
+    if chapter.entry_partial then return "partial" end
+    if state.partial and state.partial[chapter.index] then return "partial" end
+    return nil
+end
+
+-- How many rows carry a finished translation.  In entry mode a row is a TOC
+-- entry, so the count speaks in chapters; in file mode a row already is the
+-- file.  Counting files would report one finished entry as a finished file.
+function Picker.translated_rows(state)
+    local total = 0
+    for _, chapter in ipairs(state.chapters or {}) do
+        if Picker.row_state(state, chapter) == "full" then
             total = total + 1
         end
     end
@@ -207,7 +259,7 @@ function Picker.coverage(plugin, book_path, engine)
     if type(index) ~= "table" or type(index.providers) ~= "table" then
         return nil
     end
-    local full, partial, matched, first_name = {}, {}, 0, nil
+    local full, partial, ranges, matched, first_name = {}, {}, {}, 0, nil
     for provider_id, provider in pairs(index.providers) do
         local matches = provider_id == mode
         if mode == "mcp_external" then
@@ -234,12 +286,29 @@ function Picker.coverage(plugin, book_path, engine)
                     if number then partial[number] = true end
                 end
             end
+            if type(provider.entry_ranges) == "table" then
+                for index, list in pairs(provider.entry_ranges) do
+                    -- An empty list is meaningful: the file is tracked per
+                    -- entry and nothing inside it is covered, so the file-level
+                    -- 部分 must not be painted over every row.
+                    if type(list) == "table" then
+                        -- Always store the key: an empty list is a record too
+                        -- ("tracked per entry, nothing covered yet").
+                        local key = tostring(index)
+                        ranges[key] = Coverage.merge_ranges(ranges[key], list)
+                    end
+                end
+            end
         end
     end
     if matched == 0 then return nil end
     -- A chapter that any model finished is 已翻译 even if another model left
     -- it partial: full always wins.
-    for chapter_index in pairs(full) do partial[chapter_index] = nil end
+    for chapter_index in pairs(full) do
+        partial[chapter_index] = nil
+        -- A finished file needs no per-entry map: every row is 已翻译.
+        ranges[tostring(chapter_index)] = nil
+    end
     local label
     if mode == "mcp_external" then
         label = matched == 1 and first_name or _("MCP 外部翻译")
@@ -256,7 +325,7 @@ function Picker.coverage(plugin, book_path, engine)
             label = first_name or mode
         end
     end
-    return { full = full, partial = partial, label = label }
+    return { full = full, partial = partial, ranges = ranges, label = label }
 end
 
 function Picker.count(state)
@@ -439,9 +508,10 @@ function Picker.chapter_label(state, chapter)
     -- The mark sits right after the index: appending it to the title would
     -- put it exactly where the row truncates on a 600 px screen.
     local mark = ""
-    if state.full and state.full[chapter.index] then
+    local state_name = Picker.row_state(state, chapter)
+    if state_name == "full" then
         mark = _("（已翻译）")
-    elseif state.partial and state.partial[chapter.index] then
+    elseif state_name == "partial" then
         mark = _("（部分）")
     end
     return string.format("%s%s%s %s", prefix, Picker.row_number(chapter), mark,
@@ -452,7 +522,7 @@ function Picker.build_item_table(state, handlers, opts)
     handlers = handlers or {}
     opts = opts or {}
     local selected = Picker.count(state)
-    local translated = Picker.translated_files(state)
+    local translated = Picker.translated_rows(state)
     local files = state.file_count or 0
     local entry_mode = state.entry_mode == true
     -- When several TOC labels share one spine item and the list shows them
@@ -474,7 +544,9 @@ function Picker.build_item_table(state, handlers, opts)
         unit_word = _("章")
     end
     if translated > 0 then
-        status_text = status_text .. string.format(_(" · 已译 %d"), translated)
+        -- One unit everywhere: in entry mode the count is entries, not files.
+        local translated_text = entry_mode and _(" · 已译 %d 条") or _(" · 已译 %d 章")
+        status_text = status_text .. string.format(translated_text, translated)
     end
     status_text = status_text .. string.format(_(" · 已选 %d %s"), selected, unit_word)
     -- P3: the same picker exports an MCP job, so the confirm row's wording
@@ -511,6 +583,9 @@ function Picker.build_item_table(state, handlers, opts)
             full_title = chapter.title,
             toc_entries = chapter.toc_entries,
             anchor = chapter.anchor,
+            -- Carried for the long-press detail: the mark may come from the
+            -- entry's own range rather than from the whole file.
+            row_state = Picker.row_state(state, chapter),
             callback = function()
                 if handlers.on_toggle then handlers.on_toggle(chapter.key) end
             end,
@@ -644,12 +719,18 @@ function Picker.show(plugin, opts)
             end
             -- Say which engine the （已翻译） mark came from: the menu's engine
             -- selector and this list must agree on what "已翻译" means.  The
-            -- mark is per file, so a row sharing its file says 该文件.
+            -- mark may be the row's own range, so the wording follows the row
+            -- rather than the file.
             local engine = state.engine_label
-            local subject = item.sub_index and _("该文件") or _("本章")
-            if engine and state.full and state.full[item.chapter_index] then
+            -- With an entry map the mark belongs to this row; without one it
+            -- still comes from the file, and an entry-mode row must say so.
+            local tracked = state.entry_ranges
+                and type(state.entry_ranges[tostring(item.chapter_index)]) == "table"
+            local subject = tracked and _("本章")
+                or (item.sub_index and _("该文件") or _("本章"))
+            if engine and item.row_state == "full" then
                 text = text .. string.format(_("\n%s已有「%s」的译文"), subject, engine)
-            elseif engine and state.partial and state.partial[item.chapter_index] then
+            elseif engine and item.row_state == "partial" then
                 text = text .. string.format(_("\n%s已有「%s」的部分译文"), subject, engine)
             end
             -- Keep the menu's title bar (and its close button) uncovered: the

@@ -8,6 +8,7 @@ local JSON = require("json")
 local logger = require("logger")
 local Tools = require("dualtranslate_tools")
 local Overlay = require("dualtranslate_overlay")
+local Coverage = require("dualtranslate_coverage")
 local Lock = require("dualtranslate_lock")
 local Cache = require("dualtranslate_cache")
 
@@ -722,6 +723,44 @@ function Store.importResult(job, result, opts)
         table.sort(done)
         table.sort(partial)
         table.sort(failed)
+        -- Entry-level coverage for chapters exported by range: the picker
+        -- marks those TOC entries alone, instead of calling the shared file
+        -- partly translated everywhere.  Without this the import would be
+        -- indistinguishable from an older job that exported the whole file.
+        local coverage = {}
+        for index, list in pairs(type(previous.entry_ranges) == "table"
+            and previous.entry_ranges or {}) do
+            -- An empty list is a real record ("tracked per entry, nothing
+            -- covered yet"), so it is carried over instead of dropped.
+            if type(list) == "table" then
+                local key = tostring(index)
+                coverage[key] = Coverage.merge_ranges(coverage[key], list)
+            end
+        end
+        for _, chapter in ipairs(job.chapters or {}) do
+            local index = tonumber(chapter.index)
+            local ranges = type(chapter.ranges) == "table" and chapter.ranges or nil
+            if index and ranges and #ranges > 0 then
+                local total = parent_counts[index] or 0
+                local done_here = done_counts[index] or 0
+                -- Nothing arrived for this file: recording the ranges as
+                -- "partly done" would put a 部分 mark on chapters that were
+                -- never translated.  Same rule as the device-side checkpoint.
+                if done_here > 0 then
+                    -- A single failed paragraph leaves the range open for a
+                    -- retry, so `done` needs every segment of the chapter.
+                    local finished = total > 0 and done_here >= total
+                    local additions = {}
+                    for _, range in ipairs(ranges) do
+                        additions[#additions + 1] = { from = range.from,
+                            to = range.to, done = finished or nil }
+                    end
+                    coverage[tostring(index)] = Coverage.merge_ranges(
+                        coverage[tostring(index)], additions)
+                end
+            end
+        end
+        for _, index in ipairs(done) do coverage[tostring(index)] = nil end
 
         do
             local meta = cache.getProvider and cache:getProvider(provider_id) or nil
@@ -747,6 +786,7 @@ function Store.importResult(job, result, opts)
                 chapters = done,
                 partial_chapters = partial,
                 failed_chapters = failed,
+                entry_ranges = next(coverage) and coverage or nil,
                 complete = is_complete,
                 translated_count = count_unique_selectors(entries),
                 updated_at = now,

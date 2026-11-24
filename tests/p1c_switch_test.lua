@@ -168,7 +168,8 @@ local function seedV3(book, lang, specs)
         manifest.providers[spec.id] = {
             display_name = spec.display_name or spec.id, kind = spec.kind or "builtin",
             chapters = spec.chapters or {}, partial_chapters = spec.partial or {},
-            failed_chapters = spec.failed or {}, complete = spec.complete == true,
+            failed_chapters = spec.failed or {}, entry_ranges = spec.entry_ranges,
+            complete = spec.complete == true,
             translated_count = spec.count or 1, updated_at = 100, confirmed = true,
         }
         manifest.last_used_at[spec.id] = 100
@@ -266,6 +267,30 @@ do
     check("partial chapter re-queueable", attempt("system", "2") == true)
     check("failed chapter re-queueable", attempt("system", "3") == true)
     check("covered chapter still skipped", attempt("system", "1") == false)
+
+    -- 条目级：同一文件只有一条翻过时，翻到已翻的那条要跳过，翻到下一条要调度
+    seedV3(BOOK, lang, {
+        { id = "system", count = 1, complete = false, chapters = {},
+          partial = { 1 },
+          entry_ranges = { ["1"] = { { from = "a", to = "b", done = true } } } },
+    })
+    local rows = { { anchor = "a" }, { anchor = "b" }, { anchor = "c" } }
+    p.getCurrentFragment = nil
+    local function attempt_entry(pos)
+        p:saveSetting("mode", "system")
+        p._page_translation_last_fragment = nil
+        p._page_translation_overlay_state = nil
+        scheduled = nil
+        p.currentChapterRange = function()
+            return { index = 1, from = rows[pos].anchor }, "1." .. pos, rows
+        end
+        p:maybeSchedulePageTranslation(false)
+        return scheduled ~= nil
+    end
+    check("已翻条目跳过", attempt_entry(1) == false)
+    check("同文件未翻条目仍然调度", attempt_entry(3) == true)
+    p.currentChapterRange = function() return nil end
+    p.getCurrentFragment = function() return fragment end
     -- mcp_external never auto-schedules (7.4 guard)
     local real_getMode = p.getMode
     p.getMode = function() return "mcp_external" end

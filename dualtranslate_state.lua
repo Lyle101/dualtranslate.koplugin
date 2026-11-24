@@ -110,7 +110,10 @@ local function backfill_queue_item(item)
     elseif item.mode == "span" then
         item.span = tonumber(item.span) or 1
         item.chapter_indexes = nil
-        item.chapter_ranges = nil
+        -- A span job narrowed to one TOC entry still carries a range (the
+        -- current-chapter flow); a plain span covers whole files.
+        item.chapter_ranges = type(item.chapter_ranges) == "table"
+            and #item.chapter_ranges > 0 and item.chapter_ranges or nil
     elseif item.mode == "selection" then
         item.fragment = nil
         item.span = nil
@@ -179,20 +182,22 @@ end
 function State.enqueue(plugin, opts)
     opts = opts or {}
     local book_path = opts.book_path
-    if not book_path or not book_path:lower():match("%.epub$") then return end
+    -- Returns true when the job was queued.  Callers use it to keep a
+    -- page-turn dedupe key only for work that really entered the queue.
+    if not book_path or not book_path:lower():match("%.epub$") then return false end
     local mode = opts.mode or "all"
     local silent = opts.silent == true
     if plugin._translation_migration_failed then
         if not silent then
             plugin.TranslationUI.showInfo("译文数据迁移失败，已保留备份，翻译暂不可用")
         end
-        return
+        return false
     end
     if plugin.isPluginEnabled and not plugin:isPluginEnabled() then
         if not silent then
             plugin.TranslationUI.showInfo("插件当前已禁用，请在 DualTranslate 菜单中启用后再翻译")
         end
-        return
+        return false
     end
     -- One job per book at a time, regardless of job type (whole-book vs
     -- chapter-mode follow).  A second job for the same book would duplicate
@@ -216,7 +221,7 @@ function State.enqueue(plugin, opts)
                     plugin.TranslationUI.showInfo("这本书已经在翻译队列中")
                 end
             end
-            return
+            return false
         end
     end
     local item = {
@@ -228,7 +233,9 @@ function State.enqueue(plugin, opts)
         -- Selection mode carries explicit chapter ranges ({index, from, to});
         -- older callers/tests may still hand in flat chapter_indexes.  Span
         -- mode carries the starting fragment plus the chapter count.
-        chapter_ranges = mode == "selection" and opts.chapter_ranges or nil,
+        chapter_ranges = (mode == "selection" or mode == "span")
+            and type(opts.chapter_ranges) == "table"
+            and #opts.chapter_ranges > 0 and opts.chapter_ranges or nil,
         chapter_indexes = mode == "selection" and opts.chapter_indexes or nil,
         fragment = mode == "span" and opts.fragment or nil,
         span = mode == "span" and (tonumber(opts.span) or 1) or nil,
@@ -245,6 +252,7 @@ function State.enqueue(plugin, opts)
         and (not plugin._translation_progress or plugin._translation_progress.item ~= item) then
         plugin.TranslationUI.showInfo("已加入翻译队列")
     end
+    return true
 end
 
 function State.progress(item)
