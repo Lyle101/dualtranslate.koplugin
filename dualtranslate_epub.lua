@@ -587,10 +587,11 @@ local function slice_range_groups(candidates, ranges, document)
         -- anchor widened the slice to the end of the file, so the checkpoint
         -- must not claim the original (narrower) end or the coverage map would
         -- mark nothing for a range that translated to EOF.
-        local to = original.to
+        local from, to = original.from, original.to
+        if from and not edge.from then from = nil end
         if to and not edge.to then to = nil end
         groups[position] = {
-            range = { index = original.index, from = original.from, to = to },
+            range = { index = original.index, from = from, to = to },
             candidates = {},
         }
     end
@@ -1886,16 +1887,34 @@ function ExportSession:_next_chapter()
         candidates = collect_overlay_candidates(document, relative, index, true, self.sheet)
     end
     local whole = self.whole_by_index[index] == true
+    local groups
     if #candidates > 0 and not whole then
         local total_before = #candidates
-        candidates = slice_candidates(candidates, self.ranges_by_index[index], document)
-        -- Same rule as the translation path: a slice that kept every candidate
-        -- covered the whole file, so the export may say "not partial".
-        if #candidates == total_before then
-            whole = true
-            self.whole_by_index[index] = true
+        groups = slice_range_groups(candidates, self.ranges_by_index[index], document)
+        if groups then
+            local kept = {}
+            for _, group in ipairs(groups) do
+                for _, candidate in ipairs(group.candidates) do
+                    kept[#kept + 1] = candidate
+                end
+            end
+            -- Same rule as the translation path: a slice that kept every
+            -- candidate covered the whole file, so the export may say
+            -- "not partial".
+            if #kept == total_before then
+                whole = true
+                self.whole_by_index[index] = true
+                groups = nil
+            else
+                candidates = kept
+            end
         end
     end
+    -- A range that kept no text at all (image-only span, anchors pointing into
+    -- an empty region) has nothing to export.  Shipping a partial chapter with
+    -- zero segments would make the importer file it as failed/partial and the
+    -- picker paint the whole file, so skip it instead.
+    if #candidates == 0 and not whole then return end
     local title = self.titles[index] or string.format("第 %d 章", index)
     -- `partial` is what keeps the importer from marking a whole file done
     -- when only one chapter inside it was exported.
@@ -1904,15 +1923,23 @@ function ExportSession:_next_chapter()
         chapter.partial = true
         -- Which chapters inside this file the job carries: the importer
         -- records them, so the picker can mark the entries that were exported
-        -- instead of calling the whole file partly translated.
-        local ranges = self.ranges_by_index[index]
-        if ranges and #ranges > 0 then
-            local copy = {}
-            for _, range in ipairs(ranges) do
-                copy[#copy + 1] = { from = range.from, to = range.to }
+        -- instead of calling the whole file partly translated.  The bounds are
+        -- the ones the slice really used (an anchor missing from the XHTML
+        -- widens to the file edge), not the requested ones — otherwise the
+        -- importer would mark a narrower range than was translated.
+        local ranges = {}
+        if groups then
+            for _, group in ipairs(groups) do
+                if #group.candidates > 0 then
+                    ranges[#ranges + 1] = { from = group.range.from, to = group.range.to }
+                end
             end
-            chapter.ranges = copy
+        else
+            for _, range in ipairs(self.ranges_by_index[index] or {}) do
+                ranges[#ranges + 1] = { from = range.from, to = range.to }
+            end
         end
+        if #ranges > 0 then chapter.ranges = ranges end
     end
     self.chapters[#self.chapters + 1] = chapter
     for _, candidate in ipairs(candidates) do

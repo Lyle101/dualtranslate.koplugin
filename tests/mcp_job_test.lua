@@ -307,6 +307,25 @@ do
     }
     check("锚点缺失时导出放宽到文件开头", missing ~= nil and #missing.segments == 2,
         missing and #missing.segments)
+    -- 记录的必须是切片真正用的边界（起点放宽为 nil），否则导入侧按原锚点换算，
+    -- 已经导出的段落会被显示成未译
+    check("缺失起点记录为放宽后的 nil", missing
+        and missing.chapters[1].ranges and missing.chapters[1].ranges[1].from == nil,
+        missing and missing.chapters[1].ranges
+            and tostring(missing.chapters[1].ranges[1].from))
+
+    local missing_to = Epub.collect_segments{
+        book_path = BOOK,
+        chapter_ranges = { { index = 1, from = "p1", to = "nope" } },
+        max_chars = 2000,
+    }
+    check("终点缺失时导出放宽到文件尾", missing_to ~= nil
+        and #missing_to.segments == 2, missing_to and #missing_to.segments)
+    check("缺失终点记录为放宽后的 nil", missing_to
+        and missing_to.chapters[1].ranges
+        and missing_to.chapters[1].ranges[1].to == nil,
+        missing_to and missing_to.chapters[1].ranges
+            and tostring(missing_to.chapters[1].ranges[1].to))
 
     -- 显式给了范围但全部无效：必须报错，不能悄悄退回「整本书」
     local none, none_err = Epub.collect_segments{

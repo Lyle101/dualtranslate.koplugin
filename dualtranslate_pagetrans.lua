@@ -102,6 +102,12 @@ function PageTrans.attach(plugin)
         local now = os.time()
         if not cached or cached.path ~= dir or now - cached.at > 3 then
             local index = Overlay.loadBookIndex(dir)
+            -- A replaced copy of the book must not drive the skip logic: its
+            -- chapters describe text that is no longer there.
+            if index and type(Overlay.isStale) == "function"
+                and Overlay.isStale(index, book_path) then
+                return
+            end
             local state = index and index.providers
                 and index.providers[self:getMode()]
             cached = {

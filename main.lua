@@ -779,6 +779,9 @@ function dualtranslate:onCloseDocument()
     -- Anchor -> page tables are pagination-specific; the next book re-renders
     -- with its own font settings.
     self._entry_page_cache = nil
+    -- "User stopped following" is per book, like the rest of this state: a
+    -- cancel in one book must not mute 逐章模式 in the next one.
+    self._page_translation_follow_cancelled = nil
     -- 7.2: the parsed outline belongs to the book that was just closed.
     self._book_outline_cache = nil
     self._style_refresh_scheduled = nil

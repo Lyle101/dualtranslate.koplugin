@@ -441,6 +441,28 @@ do
         and half_rows[1].from == "p1" and half_rows[1].done == nil,
         half_rows and tostring(half_rows[1] and half_rows[1].done))
 
+    -- 终点锚点在 XHTML 里不存在：切片放宽到文件尾，检查点必须记 to=nil，
+    -- 否则覆盖换算会按原来的窄终点标，后面翻过的条目显示未译
+    local output_dir_missing = "/tmp/dualtranslate_out_missing"
+    os.execute("rm -rf " .. output_dir_missing)
+    local missing_result = Epub2:translate_overlay({
+        book_path = "/books/x.epub", mode = "selection",
+        chapter_ranges = { { index = 1, from = "p1", to = "no-such-anchor" } },
+        source_lang = "auto", target_lang = "zh-Hans", provider = "microsoft_free",
+        progress_path = "/tmp/dualtranslate_prog_missing.txt",
+        output_dir = output_dir_missing,
+        translate = function(text) return "T:" .. text end,
+    })
+    check("缺终点锚点仍翻译到文件尾", missing_result ~= nil, tostring(missing_result))
+    local missing_state = last_manifest and last_manifest.providers
+        and last_manifest.providers.microsoft_free
+    local missing_rows = missing_state and missing_state.entry_ranges
+        and missing_state.entry_ranges["1"]
+    check("缺终点锚点时记录放宽后的终点",
+        type(missing_rows) == "table" and #missing_rows == 1
+        and missing_rows[1].from == "p1" and missing_rows[1].to == nil,
+        missing_rows and tostring(missing_rows[1] and missing_rows[1].to))
+
     -- 同一文件给整文件范围：覆盖度必须是「已翻译」
     local output_dir_whole = "/tmp/dualtranslate_out_whole"
     os.execute("rm -rf " .. output_dir_whole)

@@ -38,6 +38,14 @@ do
     check("未知终点放宽到文件末", first == 1 and last == 5)
     first, last = Coverage.range_span({ from = "c", to = "a" }, positions, #rows)
     check("倒序范围不覆盖任何条目", first == nil)
+    -- 目录重新解析/换书后锚点全变：两端都找不到时不能放宽到整文件，否则整本被
+    -- 标成已翻译、逐章模式永久跳过
+    first, last = Coverage.range_span({ from = "gone1", to = "gone2" }, positions, #rows)
+    check("两端锚点都漂移时不覆盖", first == nil,
+        tostring(first) .. "-" .. tostring(last))
+    -- 手改/截断的 manifest 里出现非表条目不能让选择器崩
+    local cleaned = Coverage.merge_ranges({ { 1, 2 }, { from = "a", to = "b" } }, {})
+    check("畸形范围条目被忽略", #cleaned == 1 and cleaned[1].from == "a", #cleaned)
 end
 
 print("== 2. 范围合并 ==")

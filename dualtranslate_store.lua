@@ -480,10 +480,16 @@ function Store.importResult(job, result, opts)
         return nil, "任务缺少目标语言"
     end
     -- Same fingerprint rule as Overlay.isStale (design 6.3): a replaced book
-    -- must never receive translations computed for the old text.
+    -- must never receive translations computed for the old text.  Size alone
+    -- accepts a same-length replacement, so mtime is compared too.
     local size = lfs.attributes(book_path, "size")
+    local mtime = lfs.attributes(book_path, "modification")
     if size and tonumber(book.file_size) and tonumber(book.file_size) ~= 0
         and size ~= tonumber(book.file_size) then
+        return nil, "书文件已变化，请重新导出任务"
+    end
+    if mtime and tonumber(book.file_mtime) and tonumber(book.file_mtime) ~= 0
+        and mtime ~= tonumber(book.file_mtime) then
         return nil, "书文件已变化，请重新导出任务"
     end
 

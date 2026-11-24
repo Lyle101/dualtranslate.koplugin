@@ -38,16 +38,16 @@ end
 -- outside the range.  Using the last occurrence would mark the earlier ones as
 -- translated and page-turn follow would then skip that chapter forever.
 function Coverage.range_span(range, positions, row_count)
-    local first = 1
-    if range.from then
-        local hit = positions[range.from]
-        if hit then first = hit.first end
-    end
-    local last = row_count
-    if range.to then
-        local hit = positions[range.to]
-        if hit then last = hit.first - 1 end
-    end
+    if type(range) ~= "table" then return nil end
+    local from_hit = range.from and positions[range.from] or nil
+    local to_hit = range.to and positions[range.to] or nil
+    -- Both anchors gone means the outline drifted (re-parsed from another TOC
+    -- source, or the book was replaced): widening to the whole file here would
+    -- paint every row as translated, and page-turn follow would skip chapters
+    -- forever.  A range that cannot be located is ignored instead.
+    if range.from and not from_hit and range.to and not to_hit then return nil end
+    local first = from_hit and from_hit.first or 1
+    local last = to_hit and (to_hit.first - 1) or row_count
     if last < first then return nil end
     return first, last
 end
@@ -63,14 +63,20 @@ function Coverage.merge_ranges(existing, additions)
     local merged, by_key = {}, {}
     for _, list in ipairs({ existing or {}, additions or {} }) do
         for _, range in ipairs(list) do
-            local key = range_key(range)
-            local at = by_key[key]
-            if at then
-                if range.done == true then merged[at].done = true end
-            else
-                merged[#merged + 1] = { from = range.from, to = range.to,
-                    done = range.done == true or nil }
-                by_key[key] = #merged
+            -- A hand-edited or truncated manifest can hold junk here; one bad
+            -- entry must not take down the chapter picker.
+            -- An array-shaped entry is not a range ({from, to} only); a
+            -- legitimate whole-file range has named fields and no [1].
+            if type(range) == "table" and range[1] == nil then
+                local key = range_key(range)
+                local at = by_key[key]
+                if at then
+                    if range.done == true then merged[at].done = true end
+                else
+                    merged[#merged + 1] = { from = range.from, to = range.to,
+                        done = range.done == true or nil }
+                    by_key[key] = #merged
+                end
             end
         end
     end
