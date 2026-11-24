@@ -236,6 +236,10 @@ function State.enqueue(plugin, opts)
         chapter_ranges = (mode == "selection" or mode == "span")
             and type(opts.chapter_ranges) == "table"
             and #opts.chapter_ranges > 0 and opts.chapter_ranges or nil,
+        -- How many TOC entries the user picked (a file can hold several); the
+        -- progress title speaks in chapters, range_files would count files.
+        chapter_count = (mode == "selection")
+            and (tonumber(opts.chapter_count) or nil) or nil,
         chapter_indexes = mode == "selection" and opts.chapter_indexes or nil,
         fragment = mode == "span" and opts.fragment or nil,
         span = mode == "span" and (tonumber(opts.span) or 1) or nil,

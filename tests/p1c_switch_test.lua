@@ -135,6 +135,9 @@ local Store = require("dualtranslate_store")
 local Cache = require("dualtranslate_cache")
 local State = require("dualtranslate_state")
 local dualtranslate = dofile(script_dir .. "/../main.lua")
+-- Section 2 replaces translateCurrentChapter with a recorder; keep the real
+-- one for the page-turn dedupe test at the end of that section.
+local real_translate_chapter = dualtranslate.translateCurrentChapter
 
 -- A real book file so lfs.attributes(size/mtime) is meaningful.
 local BOOK = ROOT .. "/book.epub"
@@ -235,7 +238,9 @@ do
     p._page_translation_follow_active = true
     p._translation_progress = nil
     local scheduled
-    p.translateCurrentChapter = function(_, silent, auto) scheduled = { silent = silent, auto = auto } end
+    p.translateCurrentChapter = function(_, silent, auto, key)
+        scheduled = { silent = silent, auto = auto, key = key }
+    end
     local fragment = "1"
     p.getCurrentFragment = function() return fragment end
     local function attempt(mode, frag)
@@ -304,9 +309,12 @@ do
         and p._page_translation_follow_active == true
         and p._page_translation_last_fragment == nil,
         tostring(p._page_translation_follow_active))
-    check("开启时给出提示", notifications[1] ~= nil
-        and tostring(notifications[1]):find("逐章模式已开启", 1, true) ~= nil,
-        notifications[1])
+    -- 武装时会预热目录，可能先弹一条「正在解析目录…」；提示要在其中。
+    local announced = false
+    for _, notice in ipairs(notifications) do
+        if tostring(notice):find("逐章模式已开启", 1, true) then announced = true end
+    end
+    check("开启时给出提示", announced, notifications[1])
     notifications = {}
     p:togglePageTranslation()
     check("取消勾选即解除续译", p:isPageTranslationEnabled() == false
@@ -324,6 +332,22 @@ do
     p:maybeSchedulePageTranslation(false)
     check("mcp_external guard", scheduled == nil)
     p.getMode = real_getMode
+
+    -- 页面映射不到目录条目时，pagetrans 必须把自己的去重键交给
+    -- translateCurrentChapter：reader 侧没有映射键可记，收不到 fallback 就会
+    -- 让「每翻一页重排同一章」重现。
+    p:saveSetting("mode", "microsoft_free")
+    p:saveSetting("page_translation", true)
+    p._page_translation_follow_active = true
+    p._page_translation_last_fragment = nil
+    p._page_translation_overlay_state = nil
+    scheduled = nil
+    fragment = "1"
+    p.currentChapterRange = function() return nil end
+    p:maybeSchedulePageTranslation(false)
+    check("映射失败仍转发去重键",
+        scheduled ~= nil and scheduled.key == "1",
+        scheduled and tostring(scheduled.key))
 end
 
 -- ============================================================

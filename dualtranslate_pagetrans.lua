@@ -40,7 +40,17 @@ function PageTrans.attach(plugin)
         if enabled then
             self._page_translation_follow_active = true
             self._page_translation_last_fragment = nil
-            TranslationUI.showInfo(_("逐章模式已开启：翻页时自动翻译新到达的章节"))
+            -- Re-checking the box is an explicit decision to follow again.
+            self._page_translation_follow_cancelled = nil
+            -- Warm the outline after the toast is on screen (one cold parse
+            -- with its notice) instead of freezing the first page turn that
+            -- needs the entry table.
+            if self.getBookOutline then
+                UIManager:scheduleIn(0.5, function()
+                    pcall(self.getBookOutline, self)
+                end)
+            end
+            TranslationUI.showInfo(_("逐章模式已开启：翻页时自动翻译当前与后续章节"))
         else
             self._page_translation_follow_active = nil
             TranslationUI.showInfo(_("逐章模式已关闭：翻页不再自动翻译"))
@@ -129,8 +139,9 @@ function PageTrans.attach(plugin)
         -- progress dialog); `auto` marks the job as page-turn driven and only
         -- suppresses the completion toast — a toast on every chapter would be
         -- noise.
-        -- translateCurrentChapter records the key once the job is queued.
-        self:translateCurrentChapter(silent == true, true)
+        -- translateCurrentChapter records the key once the job is queued; hand
+        -- it ours so an unmappable page still remembers what it scheduled.
+        self:translateCurrentChapter(silent == true, true, fragment_key)
     end
 end
 

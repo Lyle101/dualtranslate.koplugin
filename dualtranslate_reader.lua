@@ -333,15 +333,17 @@ function dualtranslate:chapterEntryPages(book_path, index, rows)
         if ok and type(value) == "number" and value > 0 then return value end
         return nil
     end
+    local missing = {}
     for position, row in ipairs(rows) do
-        local path = row.anchor and paths[row.anchor]
-        if path then
+        local anchor = row.anchor
+        if anchor then
+            local path = paths[anchor]
             -- Same xpointer spelling the overlay uses: [N] only past the
             -- first DocFragment.
-            local xp = "/body/DocFragment"
-                .. (index > 1 and ("[" .. index .. "]") or "") .. path
-            local page = page_of(xp)
-            if not page then
+            local xp = path and ("/body/DocFragment"
+                .. (index > 1 and ("[" .. index .. "]") or "") .. path) or nil
+            local page = xp and page_of(xp)
+            if not page and xp then
                 -- The renderer rebuilt the tree differently (invalid nesting,
                 -- an entity inside an attribute), yet the anchor's parent is
                 -- still addressable and starts at the same place.  Falling
@@ -356,13 +358,19 @@ function dualtranslate:chapterEntryPages(book_path, index, rows)
                 -- Keep the address: the page alone cannot tell a chapter
                 -- heading at the top of a page from one at the bottom.
                 pages[#pages + 1] = { position = position, page = page,
-                    anchor = row.anchor, xp = xp }
+                    anchor = anchor, xp = xp }
+            else
+                missing[#missing + 1] = anchor
             end
         end
     end
-    if #pages == 0 then
-        logger.warn("dualtranslate: no TOC anchor of chapter", index,
-            "could be located by CREngine; keeping the whole file")
+    -- One unlocatable anchor poisons the whole mapping: the entries after it
+    -- would be attributed to the previous one, whose range ends exactly at the
+    -- missing anchor — that chapter would never be scheduled and page-turn
+    -- follow would skip it for good.  Fall back to the file and say why.
+    if #pages == 0 or #missing > 0 then
+        logger.warn("dualtranslate: chapter", index, "anchors not located:",
+            table.concat(missing, ","), "— keeping the whole file")
         self._entry_page_cache = { book_path = book_path, index = index,
             pages = {} }
         return nil
@@ -498,12 +506,17 @@ function dualtranslate:translateWholeBook(silent, auto)
         silent = silent, auto = auto })
 end
 
-function dualtranslate:translateCurrentChapter(silent, auto)
+-- fallback_key: the caller's own dedupe key (page turns pass one).  When the
+-- page cannot be mapped onto a TOC anchor this function has no key of its own,
+-- and without one the page-turn guard can never remember that it already
+-- scheduled this chapter: every page turn re-queues the same job.
+function dualtranslate:translateCurrentChapter(silent, auto, fallback_key)
     if not self:isEpub() then return end
     -- The current entry, not the whole file: a XHTML holding nine chapters
     -- used to hand all nine to the job.  The range falls back to the file when
     -- the page cannot be mapped onto a TOC anchor.
-    local range, key = self:currentChapterRange()
+    local range, mapped_key = self:currentChapterRange()
+    local key = mapped_key or fallback_key
     if self:getMode() == "mcp_external" then
         local index = self:currentChapterIndex()
         self:confirmMcpExport(range and { range } or (index and { index } or nil))
@@ -520,6 +533,8 @@ function dualtranslate:translateCurrentChapter(silent, auto)
     -- forever.
     if self:isPageTranslationEnabled() then
         self._page_translation_follow_active = true
+        -- An explicit start cancels an earlier "user stopped following".
+        self._page_translation_follow_cancelled = nil
     end
     local queued = self:enqueueTranslation({ book_path = book_path, mode = "span",
         fragment = fragment, span = 1, chapter_ranges = range and { range } or nil,
@@ -568,16 +583,17 @@ end
 -- range list is the first argument here — `silent` comes second.  Each range
 -- is {index, from, to} (anchors nil at the file edges), so picking one chapter
 -- out of a nine-chapter XHTML now translates that chapter only.
-function dualtranslate:translateSelectedChapters(ranges, silent, auto)
+function dualtranslate:translateSelectedChapters(ranges, silent, auto, chapter_count)
     if not self:isEpub() then return end
     ranges = chapter_range_list(ranges)
     if self:getMode() == "mcp_external" then
-        self:confirmMcpExport(ranges)
+        self:confirmMcpExport(ranges, nil, chapter_count)
         return
     end
     local book_path = self.ui.document.file
     self:enqueueTranslation({ book_path = book_path, mode = "selection",
-        chapter_ranges = ranges, silent = silent, auto = auto })
+        chapter_ranges = ranges, silent = silent, auto = auto,
+        chapter_count = chapter_count })
 end
 
 ------------------------------------------------------------------------
@@ -588,11 +604,20 @@ end
 ------------------------------------------------------------------------
 
 -- privacy notice required before the book text leaves the device (10.10).
-function dualtranslate:confirmMcpExport(ranges, menu)
-    -- Ranges are chapters; several can live in one spine file, so the notice
-    -- counts the files the job will actually read.
-    local scope = ranges and string.format(_("所选 %d 个文件"), range_files(ranges))
-        or _("整本书")
+function dualtranslate:confirmMcpExport(ranges, menu, chapter_count)
+    -- Ranges are chapters; several can live in one spine file.  The notice has
+    -- to speak in chapters (what the user picked), with the file count only as
+    -- a parenthetical when a file is read for more than one chapter.
+    local scope = _("整本书")
+    if ranges then
+        local files = range_files(ranges)
+        local chapters = tonumber(chapter_count) or files
+        if files > 1 then
+            scope = string.format(_("所选 %d 章（%d 个文件）"), chapters, files)
+        else
+            scope = string.format(_("所选 %d 章"), chapters)
+        end
+    end
     local dialog
     dialog = ButtonDialog:new{
         title = string.format(
@@ -1284,7 +1309,9 @@ function dualtranslate:buildMcpMenu()
                     -- set to, so the picker's 已翻译 marks must reflect the
                     -- MCP providers (one per model), not the current engine.
                     engine = "mcp_external",
-                    on_start = function(ranges) self:confirmMcpExport(ranges, menu) end,
+                    on_start = function(ranges, chapters)
+                        self:confirmMcpExport(ranges, menu, chapters)
+                    end,
                 })
             end,
         },
@@ -1388,14 +1415,21 @@ end
 function dualtranslate:_runTranslation(item)
     local book_path = item.book_path
     local mode = item.mode or "all"
-    local selection_count = range_files(item.chapter_ranges)
-    if selection_count == 0 and type(item.chapter_indexes) == "table" then
-        selection_count = #item.chapter_indexes
+    local file_count = range_files(item.chapter_ranges)
+    if file_count == 0 and type(item.chapter_indexes) == "table" then
+        file_count = #item.chapter_indexes
     end
+    -- Chapters, not files: the picker counts TOC entries and queued items from
+    -- before this field existed fall back to the file count.
+    local selection_count = tonumber(item.chapter_count) or file_count
     local function progress_title()
         if mode == "all" then return "正在翻译整本书…" end
         if mode == "selection" then
-            return string.format("正在翻译所选 %d 个文件…", selection_count)
+            if file_count > 1 then
+                return string.format("正在翻译所选 %d 章（%d 个文件）…",
+                    selection_count, file_count)
+            end
+            return string.format("正在翻译所选 %d 章…", selection_count)
         end
         return "正在翻译当前章节…"
     end
@@ -1723,6 +1757,13 @@ function dualtranslate:_runTranslation(item)
                 end
                 self:saveTranslationQueue()
                 pcall(function() UIManager:close(progress_dialog, "partial") end)
+                -- Cancelling means "stop translating this book now".  Leaving
+                -- 逐章模式 armed turned the next page turn into the same job
+                -- (the box stays checked); the flag also keeps a reopened book
+                -- from auto-resuming this session without a fresh decision.
+                self._page_translation_follow_active = nil
+                self._page_translation_last_fragment = nil
+                self._page_translation_follow_cancelled = true
                 if not item.silent then
                     UIManager:show(Notification:new{ text = "已取消翻译。", timeout = 2 })
                 end
@@ -1786,8 +1827,13 @@ function dualtranslate:_runTranslation(item)
             -- A span job narrowed to one TOC entry says nothing about the rest
             -- of that last file, so it must not disarm: the remaining entries
             -- still need to be scheduled as they are reached.
-            local narrowed = type(item.chapter_ranges) == "table"
-                and #item.chapter_ranges > 0
+            -- A whole-file range ({index = n}) is the fallback, not a
+            -- narrowing: it says the last chapter is done, so follow must end.
+            local narrowed = false
+            if type(item.chapter_ranges) == "table" and item.chapter_ranges[1] then
+                local first = item.chapter_ranges[1]
+                narrowed = first.from ~= nil or first.to ~= nil
+            end
             if mode == "span" and result.last_chapter and not narrowed then
                 self._page_translation_follow_active = nil
             end

@@ -217,8 +217,8 @@ function Epub:resolve(book_path, work_dir, fragment)
 end
 
 -- One place for temp unpacking: sweeps leftovers from killed runs, then makes
--- a fresh overlay_/outline_/job_ directory.
-local WORK_PREFIXES = { "overlay_", "outline_", "job_" }
+-- a fresh overlay_/outline_/job_/spine_/anchor_ directory.
+local WORK_PREFIXES = { "overlay_", "outline_", "job_", "spine_", "anchor_" }
 local WORK_MAX_AGE = 6 * 3600
 
 local function new_work_dir(prefix)
@@ -505,10 +505,12 @@ Epub.normalize_ranges = normalize_ranges
 -- grows.  Missing ids are absent from the result.
 local function tag_anchor_id(raw)
     -- `[%s]id=` rather than plain `id=`: data-id and its cousins are not ids.
-    -- `name=` also matches unrelated attributes (a meta generator); a hit can
-    -- only move a boundary earlier, i.e. widen the slice.
-    return raw:match("[%s]id%s*=%s*[\"']([^\"']+)[\"']")
-        or raw:match("[%s]name%s*=%s*[\"']([^\"']+)[\"']")
+    -- Markup is case-insensitive (ID=) and EPUB3 XHTML also uses xml:id, so
+    -- both spellings count; `name=` is the EPUB2 anchor and also matches
+    -- unrelated attributes (a meta generator), which can only widen the slice.
+    return raw:match("[%s][Ii][Dd]%s*=%s*[\"']([^\"']+)[\"']")
+        or raw:match("[%s][Xx][Mm][Ll]:[Ii][Dd]%s*=%s*[\"']([^\"']+)[\"']")
+        or raw:match("[%s][Nn][Aa][Mm][Ee]%s*=%s*[\"']([^\"']+)[\"']")
 end
 Epub.tag_anchor_id = tag_anchor_id
 
@@ -580,7 +582,17 @@ local function slice_range_groups(candidates, ranges, document)
     end
     local groups = {}
     for position = 1, #edges do
-        groups[position] = { range = ranges[position], candidates = {} }
+        local edge, original = edges[position], ranges[position]
+        -- Record what the slice really did: a missing or out-of-order end
+        -- anchor widened the slice to the end of the file, so the checkpoint
+        -- must not claim the original (narrower) end or the coverage map would
+        -- mark nothing for a range that translated to EOF.
+        local to = original.to
+        if to and not edge.to then to = nil end
+        groups[position] = {
+            range = { index = original.index, from = original.from, to = to },
+            candidates = {},
+        }
     end
     local seen = {}
     for _, candidate in ipairs(candidates) do
@@ -1767,8 +1779,12 @@ local anchor_path_cache
 function Epub.chapter_anchor_paths(book_path, index)
     index = tonumber(index)
     if not index then return nil end
+    -- A replaced file must not reuse the previous copy's element paths.
+    local size = lfs.attributes(book_path, "size")
+    local mtime = lfs.attributes(book_path, "modification")
     local cached = anchor_path_cache
-    if cached and cached.book_path == book_path and cached.index == index then
+    if cached and cached.book_path == book_path and cached.index == index
+        and cached.size == size and cached.mtime == mtime then
         return cached.paths
     end
     local spine = Epub.spine(book_path)
@@ -1808,7 +1824,8 @@ function Epub.chapter_anchor_paths(book_path, index)
     end)
     Tools.rmtree(work_dir)
     if not ok or type(paths) ~= "table" then return nil end
-    anchor_path_cache = { book_path = book_path, index = index, paths = paths }
+    anchor_path_cache = { book_path = book_path, index = index, paths = paths,
+        size = size, mtime = mtime }
     return paths
 end
 

@@ -347,8 +347,13 @@ do
     check("允许部分导入", summary ~= nil, tostring(err))
     local manifest = Overlay.loadManifest(Store.bookDir(fail_book, "zh-Hans"))
     local provider = manifest and manifest.providers["mcp:gpt-5"]
-    check("一段都没回来时不写条目覆盖", provider
-        and provider.entry_ranges == nil, provider and type(provider.entry_ranges))
+    -- 设备侧检查点对「一段都没成功」的范围写空表（表示该文件按条目记账、
+    -- 但一条都没覆盖），导入必须一致，否则文件级「部分」会溢到没请求过的行。
+    check("一段都没回来的范围仍留空覆盖表", provider
+        and type(provider.entry_ranges) == "table"
+        and type(provider.entry_ranges["1"]) == "table"
+        and #provider.entry_ranges["1"] == 0,
+        provider and type(provider.entry_ranges))
     check("范围内全失败落 failed_chapters", provider
         and #(provider.failed_chapters or {}) == 1 and provider.failed_chapters[1] == 1
         and #(provider.partial_chapters or {}) == 0,

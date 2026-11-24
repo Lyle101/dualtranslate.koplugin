@@ -58,8 +58,16 @@ end
 --
 -- opts.timeout: seconds before it closes itself (default 10).
 -- opts.below:   height of a bar to stay clear of (the picker's title bar).
+-- One detail box at a time: a second long-press replaces the first instead of
+-- stacking modal boxes the user has to dismiss one by one.
+local active_detail
+
 function TranslationUI.showDetail(message, opts)
     opts = opts or {}
+    if active_detail then
+        pcall(function() UIManager:close(active_detail) end)
+        active_detail = nil
+    end
     local InfoMessage = require("ui/widget/infomessage")
     local Screen = require("device").screen
     local Size = require("ui/size")
@@ -79,7 +87,11 @@ function TranslationUI.showDetail(message, opts)
         top_margin = (opts.below or 0) + Size.margin.default,
         detail[1][1],
     }
+    detail.dismiss_callback = function()
+        if active_detail == detail then active_detail = nil end
+    end
     UIManager:show(detail)
+    active_detail = detail
 end
 
 return TranslationUI

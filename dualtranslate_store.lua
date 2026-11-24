@@ -757,6 +757,12 @@ function Store.importResult(job, result, opts)
                     end
                     coverage[tostring(index)] = Coverage.merge_ranges(
                         coverage[tostring(index)], additions)
+                else
+                    -- Every segment of the range failed.  Keep the file
+                    -- entry-tracked with an empty list: the device-side
+                    -- checkpoint does the same, and without it the file-level
+                    -- "partial" would paint rows that were never translated.
+                    coverage[tostring(index)] = coverage[tostring(index)] or {}
                 end
             end
         end

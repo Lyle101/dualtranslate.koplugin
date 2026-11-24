@@ -246,10 +246,11 @@ function dualtranslate:buildMenuTable()
             },
         },
         {
-            -- "逐章模式" preference: only governs whether "翻译当前章节" arms
-            -- page-turn follow (turning pages then translates each newly
-            -- reached chapter, progress dialog included, minus the per-chapter
-            -- completion notice).  Whole-book translation is unaffected.
+            -- "逐章模式": checking it arms page-turn follow directly, so the
+            -- next page turn translates the entry being read and every entry
+            -- reached afterwards (progress dialog included, minus the
+            -- per-chapter completion notice).  Whole-book translation is
+            -- unaffected.  Unchecking, or cancelling a job, disarms it.
             text = "逐章模式（翻页自动续译）",
             checkbox = true,
             checked_func = function() return self:isPageTranslationEnabled() end,
@@ -634,6 +635,12 @@ function dualtranslate:buildProviderSelector()
             radio = true,
             callback = function()
                 self:saveSetting("mode", pid)
+                -- A different engine has its own overlay and its own next
+                -- entry: drop the page-turn guards, or the entry being read
+                -- would not be scheduled until the reader changes chapter.
+                self._page_translation_last_fragment = nil
+                self._page_translation_overlay_state = nil
+                self._page_translation_follow_cancelled = nil
                 TranslationUI.showInfo(T(_("Provider: %1"), pname))
             end,
         })
@@ -675,6 +682,11 @@ function dualtranslate:buildLanguageMenu(which)
             end,
             callback = function()
                 self:saveSetting(is_target and "target_lang" or "source_lang", code)
+                -- Language is part of the overlay identity: the dedupe key and
+                -- the cached overlay belong to the old language.
+                self._page_translation_last_fragment = nil
+                self._page_translation_overlay_state = nil
+                self._page_translation_follow_cancelled = nil
             end,
         })
     end
@@ -819,7 +831,10 @@ function dualtranslate:onReadSettings()
     -- nothing, which reads as a broken checkbox.  Resume follow for a book
     -- that already carries this engine's translations; a fresh book still
     -- waits for an explicit 翻译当前章节 so opening it never starts a job.
-    if self:isPageTranslationEnabled() and not self._translation_stale then
+    -- 取消过续译的会话不再自动恢复：否则取消后重开这本书，第一次翻页又会
+    -- 开始同一件事。重新勾选或点「翻译当前章节」会清掉这个标记。
+    if self:isPageTranslationEnabled() and not self._translation_stale
+        and not self._page_translation_follow_cancelled then
         local provider = manifest and manifest.providers
             and manifest.providers[self:getMode()]
         if provider and (tonumber(provider.translated_count) or 0) > 0 then

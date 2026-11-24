@@ -204,7 +204,11 @@ function Picker.apply_entry_coverage(state)
                         and partial[key] == true) or nil
                 end
                 -- The rows carry the precise mark now; the file-level
-                -- "partial" must not spill onto the untranslated ones.
+                -- "partial" must not spill onto the untranslated ones.  The
+                -- entry map is the authority once it exists (an empty list
+                -- included).  Known corner: a file whose earlier whole-file run
+                -- left a bare partial_chapters entry, then got a ranged run,
+                -- loses the older mark on the rows outside the new ranges.
                 state.partial = state.partial or {}
                 state.partial[index] = nil
             end
@@ -257,6 +261,11 @@ function Picker.coverage(plugin, book_path, engine)
     if not mode or type(Overlay.loadBookIndex) ~= "function" then return nil end
     local index = Overlay.loadBookIndex(plugin:getBookCacheDirectory(book_path))
     if type(index) ~= "table" or type(index.providers) ~= "table" then
+        return nil
+    end
+    -- A manifest from a replaced copy of the book describes text that is no
+    -- longer in the file; its chapters must not be painted as translated.
+    if type(Overlay.isStale) == "function" and Overlay.isStale(index, book_path) then
         return nil
     end
     local full, partial, ranges, matched, first_name = {}, {}, {}, 0, nil
@@ -611,9 +620,12 @@ local function book_display_name(book_path)
     return (name:gsub("%.[Ee][Pp][Uu][Bb]$", ""))
 end
 
--- opts.on_start(ranges) overrides the default translate action; opts.start_text
--- changes the confirm row (e.g. "导出任务（%d 章）").  MCP export reuses the
--- picker unchanged so chapter identity is chosen by exactly one implementation.
+-- opts.on_start(ranges, chapters) overrides the default translate action;
+-- ranges are the {index, from, to} list the worker takes, chapters is the
+-- number of TOC entries the user ticked (a file can hold several).  opts.engine
+-- picks the engine whose coverage marks the rows; opts.start_text changes the
+-- confirm row (e.g. "导出任务（%d 章）").  MCP export reuses the picker unchanged
+-- so chapter identity is chosen by exactly one implementation.
 function Picker.show(plugin, opts)
     opts = opts or {}
     local book_path = plugin.currentBookPath and plugin:currentBookPath()
@@ -675,11 +687,14 @@ function Picker.show(plugin, opts)
         on_start = function()
             local ranges = Picker.selected_ranges(state)
             if #ranges == 0 then return end
+            -- Rows are chapters, ranges are runs: the caller's wording speaks
+            -- in chapters, so both numbers travel.
+            local chapters = Picker.count(state)
             UIManager:close(menu)
             if opts.on_start then
-                opts.on_start(ranges)
+                opts.on_start(ranges, chapters)
             else
-                plugin:translateSelectedChapters(ranges)
+                plugin:translateSelectedChapters(ranges, nil, nil, chapters)
             end
         end,
     }

@@ -233,6 +233,12 @@ do
     check("导出按 MCP 引擎标记已译", picker_opts ~= nil
         and picker_opts.engine == "mcp_external",
         picker_opts and tostring(picker_opts.engine))
+    -- 隐私框按章计数（选择器按 TOC 条目选），文件数只在多文件时作括号。
+    dualtranslate:confirmMcpExport({ { index = 1 }, { index = 2 } }, nil, 3)
+    check("隐私框按章计数", last_dialog ~= nil
+        and tostring(last_dialog.title):find("3 章", 1, true) ~= nil
+        and tostring(last_dialog.title):find("2 个文件", 1, true) ~= nil,
+        last_dialog and tostring(last_dialog.title))
     local job_items = items[2].sub_item_table_func()
     check("空任务列表有占位行", #job_items == 1 and job_items[1].text == "没有任务")
     -- The menu builder runs twice per open; the second call must hit the cache.

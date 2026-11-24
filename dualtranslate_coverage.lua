@@ -31,6 +31,12 @@ end
 -- Entry positions a stored range covers: `first, last` inclusive, or nil when
 -- the range cannot own an entry.  A missing anchor widens to the file edge:
 -- too much coverage is recoverable, a hidden chapter is not.
+--
+-- The end anchor is excluded from its FIRST occurrence, not its last: the
+-- slicer stops before every element carrying that id, so adjacent TOC entries
+-- that share one anchor (a file with two labels on the same heading) are all
+-- outside the range.  Using the last occurrence would mark the earlier ones as
+-- translated and page-turn follow would then skip that chapter forever.
 function Coverage.range_span(range, positions, row_count)
     local first = 1
     if range.from then
@@ -40,7 +46,7 @@ function Coverage.range_span(range, positions, row_count)
     local last = row_count
     if range.to then
         local hit = positions[range.to]
-        if hit then last = hit.last - 1 end
+        if hit then last = hit.first - 1 end
     end
     if last < first then return nil end
     return first, last

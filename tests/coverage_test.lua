@@ -27,8 +27,11 @@ do
     first, last = Coverage.range_span({ from = "b", to = nil }, positions, #rows)
     check("缺终点 = 到文件末", first == 2 and last == 5)
     first, last = Coverage.range_span({ from = nil, to = "b" }, positions, #rows)
-    -- 终点是重复锚点的最后一次出现，共用该锚点的后一条不算覆盖
-    check("缺起点 = 从文件头", first == 1 and last == 2)
+    -- 终点锚点被两条目录条目共用时，两条都在范围之外（切片停在锚点之前）
+    check("共用的终点锚点整组排除", first == 1 and last == 1,
+        tostring(first) .. "-" .. tostring(last))
+    first, last = Coverage.range_span({ from = "a", to = "b" }, positions, #rows)
+    check("终点前的条目仍被覆盖", first == 1 and last == 1)
     first, last = Coverage.range_span({ from = "zz", to = nil }, positions, #rows)
     check("未知起点放宽到文件头", first == 1 and last == 5)
     first, last = Coverage.range_span({ from = "a", to = "zz" }, positions, #rows)
