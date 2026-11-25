@@ -240,7 +240,16 @@ local overlay_target_tags = {
     -- List items are paragraphs too; leaving them out silently skipped every
     -- bullet in the book (both google_free and MCP had no text for them).
     li = true,
+    -- Quoted blocks are paragraphs too: a bare <blockquote>text</blockquote>
+    -- has no child paragraph to attach to and was skipped entirely.
+    blockquote = true,
 }
+
+-- A quote is skipped only when its own text belongs to child candidates that
+-- are collected separately.  Containers that are not targets (div, table,
+-- pre, ...) own no candidate, so a quote wrapping them is still the paragraph
+-- to translate and must be kept.
+local block_child_tags = overlay_target_tags
 
 local void_tags = {
     area = true, base = true, br = true, col = true, embed = true, hr = true,
@@ -250,6 +259,21 @@ local void_tags = {
 
 local function css_attribute(value)
     return tostring(value or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+end
+
+-- Whether the raw inner markup holds a block-level target element.  Scanned
+-- as text because the child may sit several levels down.  Prefixes are
+-- stripped like the main parser does (html:p is a p), comments and CDATA are
+-- not markup, and a tag name only counts when followed by whitespace, ">"
+-- or "/" so "partition" in prose is not a <p>.
+local function contains_block_child(inner)
+    local markup = inner:lower()
+        :gsub("<!%-%-.-%-%->", " ")
+        :gsub("<!%[CDATA%[.-%]%]>", " ")
+    for tag in markup:gmatch("<%s*([%w_:%-]+)[%s/>]") do
+        if block_child_tags[tag:gsub("^.-:", "")] then return true end
+    end
+    return false
 end
 
 -- Build selectors from the original XHTML tree.  These selectors address
@@ -337,6 +361,13 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                                     pseudo = "::before"
                                     anchor_path = node.child_list_path
                                 end
+                            elseif name == "blockquote" and contains_block_child(inner) then
+                                -- Its text belongs to child paragraphs that
+                                -- are collected on their own; collecting the
+                                -- quote too would duplicate them.  Text next
+                                -- to those children is dropped, like a list
+                                -- item's.
+                                inner = ""
                             end
                             local source = html_to_text(inner)
                             if looks_translatable(source) then
@@ -354,6 +385,7 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                                     -- range slicing: an anchor inside this
                                     -- element still belongs to its paragraph.
                                     span_end = tag_end,
+                                    tag = name,
                                     source = source,
                                     list_indent = list_indent,
                                     selector = 'DocFragment[Source="' .. css_attribute(relative)
@@ -441,6 +473,60 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
     -- would otherwise come before its parent (and shift every id/prev/next).
     table.sort(candidates, function(a, b) return (a.order or 0) < (b.order or 0) end)
     return candidates
+end
+-- Exposed like slice_candidates/normalize_* so tests can assert the exact
+-- parser the overlay and the job export share.
+Epub.collect_candidates = collect_overlay_candidates
+
+-- A chapter written as <div> paragraphs has no recognised target tag, so the
+-- whole file is parsed again with divs as targets.  A quote is recognised
+-- now, and it must not silence that fallback for the divs around it: merge
+-- the two passes.  A div inside a quote is redundant (the quote covers it).
+-- A div that merely wraps a quote is the paragraph: it also owns the text
+-- around the quote, so the quote is dropped in its favour instead of losing
+-- that text.
+local function collect_chapter_candidates(document, relative, fragment_index, styles)
+    local candidates = collect_overlay_candidates(document, relative,
+        fragment_index, false, styles)
+    local has_paragraph = false
+    for _, candidate in ipairs(candidates) do
+        if candidate.tag ~= "blockquote" then has_paragraph = true; break end
+    end
+    if has_paragraph then return candidates end
+    local divs = collect_overlay_candidates(document, relative, fragment_index,
+        true, styles)
+    if #divs == 0 then return candidates end
+    local quotes = candidates
+    local kept_divs = {}
+    for _, div in ipairs(divs) do
+        local inside_quote = false
+        for _, quote in ipairs(quotes) do
+            if div.order and div.span_end and quote.order and quote.span_end
+                and quote.order <= div.order
+                and div.span_end <= quote.span_end then
+                inside_quote = true
+                break
+            end
+        end
+        if not inside_quote then kept_divs[#kept_divs + 1] = div end
+    end
+    local dropped = {}
+    for _, div in ipairs(kept_divs) do
+        for _, quote in ipairs(quotes) do
+            if div.order and div.span_end and quote.order and quote.span_end
+                and div.order <= quote.span_end
+                and quote.order <= div.span_end then
+                dropped[quote] = true
+            end
+        end
+    end
+    local merged = {}
+    for _, quote in ipairs(quotes) do
+        if not dropped[quote] then merged[#merged + 1] = quote end
+    end
+    for _, div in ipairs(kept_divs) do merged[#merged + 1] = div end
+    table.sort(merged, function(a, b) return (a.order or 0) < (b.order or 0) end)
+    return merged
 end
 
 -- 7.3: filter non-numbers / out-of-range / duplicates, then sort.  Spine
@@ -753,12 +839,8 @@ function Epub.translate_overlay(opts, ...)
             unreadable[current.index] = true
             unreadable_chapters = unreadable_chapters + 1
         end
-        local candidates = document and collect_overlay_candidates(document,
-            current.relative, current.index, false, styles) or {}
-        if #candidates == 0 and document then
-            candidates = collect_overlay_candidates(document, current.relative,
-                current.index, true, styles)
-        end
+        local candidates = document and collect_chapter_candidates(document,
+            current.relative, current.index, styles) or {}
         if document and #candidates > 0 and not current.whole then
             local total_before = #candidates
             local groups = slice_range_groups(candidates, current.ranges, document)
@@ -1869,7 +1951,8 @@ end
 -- The device exports the job because selectors must match CREngine's own
 -- DocFragment tree: a PC-side EPUB parser would drift and paste translations
 -- onto the wrong paragraphs.  Candidates therefore come from
--- collect_overlay_candidates, the exact parser the overlay uses.
+-- collect_chapter_candidates (collect_overlay_candidates plus the div
+-- fallback), the exact parser the overlay uses.
 --
 -- Long paragraphs are split at max_chars so no agent receives a 10k-character
 -- segment; every part keeps the parent's selector/xpointer and carries
@@ -1915,10 +1998,7 @@ function ExportSession:_next_chapter()
         self.unreadable = self.unreadable + 1
         return
     end
-    local candidates = collect_overlay_candidates(document, relative, index, false, self.sheet)
-    if #candidates == 0 then
-        candidates = collect_overlay_candidates(document, relative, index, true, self.sheet)
-    end
+    local candidates = collect_chapter_candidates(document, relative, index, self.sheet)
     local whole = self.whole_by_index[index] == true
     local groups
     if #candidates > 0 and not whole then

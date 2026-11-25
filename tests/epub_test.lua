@@ -383,6 +383,39 @@ do
     package.loaded["datastorage"] = nil
     local Epub2 = dofile("dualtranslate_epub.lua")
 
+    -- blockquote 白名单：纯文本引用块要收；含块级子元素的引用块只收子元素，
+    -- 否则同一段文字会在覆盖层里出现两次。div/命名空间前缀都不能制造重复。
+    local quote_doc = [[<html><body>
+      <blockquote id="q1">A plain quoted sentence.</blockquote>
+      <blockquote id="q2"><p>Quoted paragraph one.</p><p>Quoted paragraph two.</p></blockquote>
+      <blockquote id="q3"><div>Div-only quoted sentence.</div></blockquote>
+      <blockquote id="q4"><html:p>Prefixed quoted paragraph.</html:p></blockquote>
+    </body></html>]]
+    local quote_candidates = Epub2.collect_candidates(quote_doc,
+        "OEBPS/quote.xhtml", 1, false, nil)
+    local quote_sources = {}
+    for _, candidate in ipairs(quote_candidates) do
+        quote_sources[#quote_sources + 1] = candidate.source
+    end
+    check("纯文本 blockquote 被收集",
+        quote_candidates[1] ~= nil
+        and quote_candidates[1].source == "A plain quoted sentence."
+        and quote_candidates[1].selector
+            :find("> blockquote:nth-of-type(1)", 1, true) ~= nil
+        and quote_candidates[4] ~= nil
+        and quote_candidates[4].source == "Div-only quoted sentence."
+        and quote_candidates[4].selector
+            :find("> blockquote:nth-of-type(3)", 1, true) ~= nil,
+        quote_candidates[4] and quote_candidates[4].selector)
+    check("含块级子元素的 blockquote 不重复收集",
+        #quote_candidates == 5
+        and quote_sources[1] == "A plain quoted sentence."
+        and quote_sources[2] == "Quoted paragraph one."
+        and quote_sources[3] == "Quoted paragraph two."
+        and quote_sources[4] == "Div-only quoted sentence."
+        and quote_sources[5] == "Prefixed quoted paragraph.",
+        table.concat(quote_sources, " | "))
+
     -- 运行：整书翻译
     local output_dir = "/tmp/dualtranslate_out1"
     os.execute("rm -rf " .. output_dir)

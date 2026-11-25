@@ -394,6 +394,49 @@ do
         if chapter.index == 2 then has_two = true end
     end
     check("未选章节不出现", not has_two)
+
+    -- <div> 排版的书整本走 div 回退；其中出现一个引用块时，引用块不能把
+    -- 回退整体压掉（那会让周围的 div 段落一篇都不翻）。
+    local OPF1 = [[<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <manifest><item id="c1" href="chap1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>]]
+    local div_book = stub_book(ROOT .. "/books/divquote.epub", {
+        { "META-INF/container.xml", CONTAINER },
+        { "OEBPS/content.opf", OPF1 },
+        { "OEBPS/chap1.xhtml", xhtml(
+            "<blockquote>Bare quote.</blockquote><div>Div one.</div><div>Div two.</div>") },
+    })
+    local mixed = Epub.collect_segments{
+        book_path = div_book, chapter_indexes = { 1 }, max_chars = 2000,
+    }
+    local mixed_sources = {}
+    for _, segment in ipairs(mixed and mixed.segments or {}) do
+        mixed_sources[#mixed_sources + 1] = segment.source
+    end
+    check("引用块不压掉 div 回退", mixed ~= nil and #mixed.segments == 3,
+        mixed and #mixed.segments)
+    check("引用块与 div 段落都在",
+        table.concat(mixed_sources, " | ") == "Bare quote. | Div one. | Div two.",
+        table.concat(mixed_sources, " | "))
+
+    -- div 自己带正文、里面又包一个引用块：div 才是这一段（它含引用块文字），
+    -- 引用块不能再单独收一遍，div 自有文字也不能丢。
+    local div_mixed_book = stub_book(ROOT .. "/books/divmixed.epub", {
+        { "META-INF/container.xml", CONTAINER },
+        { "OEBPS/content.opf", OPF1 },
+        { "OEBPS/chap1.xhtml", xhtml(
+            "<div>Intro text. <blockquote>Quote text.</blockquote> Outro text.</div>") },
+    })
+    local div_mixed = Epub.collect_segments{
+        book_path = div_mixed_book, chapter_indexes = { 1 }, max_chars = 2000,
+    }
+    check("div 含引用块时只收 div",
+        div_mixed ~= nil and #div_mixed.segments == 1
+        and div_mixed.segments[1].source == "Intro text. Quote text. Outro text.",
+        div_mixed and (#div_mixed.segments .. " "
+            .. tostring(div_mixed.segments[1] and div_mixed.segments[1].source)))
 end
 
 -- ============================================================
