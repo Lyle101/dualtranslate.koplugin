@@ -245,10 +245,10 @@ local overlay_target_tags = {
     blockquote = true,
 }
 
--- A quote is skipped only when its own text belongs to child candidates that
--- are collected separately.  Containers that are not targets (div, table,
--- pre, ...) own no candidate, so a quote wrapping them is still the paragraph
--- to translate and must be kept.
+-- A target element is skipped only when its own text belongs to child
+-- candidates that are collected separately.  Containers that are not targets
+-- (div, table, pre, ...) own no candidate, so a quote wrapping them is still
+-- the paragraph to translate and must be kept.
 local block_child_tags = overlay_target_tags
 
 local void_tags = {
@@ -337,13 +337,7 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                             if name == "li" then
                                 local lowered = inner:lower()
                                 local nested = lowered:find("<%s*[ou]l[%s>]")
-                                local block = lowered:find("<%s*p[%s>]")
-                                    or lowered:find("<%s*h%d[%s>]")
-                                if block then
-                                    -- A block child owns its own paragraph;
-                                    -- translating the item too would duplicate.
-                                    inner = ""
-                                elseif nested then
+                                if nested then
                                     -- The parent's text belongs between the
                                     -- item's own text and its child list.  CSS
                                     -- can only attach generated content to the
@@ -361,12 +355,18 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
                                     pseudo = "::before"
                                     anchor_path = node.child_list_path
                                 end
-                            elseif name == "blockquote" and contains_block_child(inner) then
-                                -- Its text belongs to child paragraphs that
-                                -- are collected on their own; collecting the
-                                -- quote too would duplicate them.  Text next
-                                -- to those children is dropped, like a list
-                                -- item's.
+                            end
+                            -- Any target that holds another target block owns
+                            -- only the text those children leave behind: a
+                            -- quote inside a list item or definition, a quote
+                            -- wrapping paragraphs, a definition holding one
+                            -- paragraph per sense.  Translating the parent as
+                            -- well would put the same sentence on screen
+                            -- twice (and pay for it twice).  The div pass is
+                            -- excluded: a div may be the paragraph that wraps
+                            -- a quote, and collect_chapter_candidates merges
+                            -- those two by position instead.
+                            if not div_fallback and contains_block_child(inner) then
                                 inner = ""
                             end
                             local source = html_to_text(inner)
@@ -474,8 +474,10 @@ local function collect_overlay_candidates(document, relative, fragment_index, di
     table.sort(candidates, function(a, b) return (a.order or 0) < (b.order or 0) end)
     return candidates
 end
--- Exposed like slice_candidates/normalize_* so tests can assert the exact
--- parser the overlay and the job export share.
+
+-- Exposed like slice_candidates/normalize_* so tests can assert the raw
+-- parser.  The overlay and the job export both call collect_chapter_candidates
+-- below, which runs this pass and then merges the div fallback.
 Epub.collect_candidates = collect_overlay_candidates
 
 -- A chapter written as <div> paragraphs has no recognised target tag, so the

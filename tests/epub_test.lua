@@ -390,6 +390,7 @@ do
       <blockquote id="q2"><p>Quoted paragraph one.</p><p>Quoted paragraph two.</p></blockquote>
       <blockquote id="q3"><div>Div-only quoted sentence.</div></blockquote>
       <blockquote id="q4"><html:p>Prefixed quoted paragraph.</html:p></blockquote>
+      <blockquote id="q5"><blockquote>Inner quoted sentence.</blockquote></blockquote>
     </body></html>]]
     local quote_candidates = Epub2.collect_candidates(quote_doc,
         "OEBPS/quote.xhtml", 1, false, nil)
@@ -408,13 +409,53 @@ do
             :find("> blockquote:nth-of-type(3)", 1, true) ~= nil,
         quote_candidates[4] and quote_candidates[4].selector)
     check("含块级子元素的 blockquote 不重复收集",
-        #quote_candidates == 5
+        #quote_candidates == 6
         and quote_sources[1] == "A plain quoted sentence."
         and quote_sources[2] == "Quoted paragraph one."
         and quote_sources[3] == "Quoted paragraph two."
         and quote_sources[4] == "Div-only quoted sentence."
-        and quote_sources[5] == "Prefixed quoted paragraph.",
+        and quote_sources[5] == "Prefixed quoted paragraph."
+        and quote_sources[6] == "Inner quoted sentence.",
         table.concat(quote_sources, " | "))
+
+    -- 嵌套引用块：外层看到里面的 blockquote 就跳过，只收最内层。
+    check("嵌套引用块只收最内层",
+        #quote_candidates == 6
+        and quote_candidates[6].selector
+            :find("> blockquote:nth-of-type(5) > blockquote:nth-of-type(1)", 1, true) ~= nil,
+        quote_candidates[6] and quote_candidates[6].selector)
+
+    -- 引用块被别的目标元素包住（li / dd）：父级和引用块的文字完全相同，
+    -- 只能收引用块那一条；以前 li 只查 p/h、dd 完全不查，同一句会收两条。
+    local parent_doc = [[<html><body>
+      <ul>
+        <li><blockquote>Quoted in a list item.</blockquote></li>
+        <li><html:p>Prefixed item paragraph.</html:p></li>
+      </ul>
+      <dl><dd><blockquote>Quoted in a definition.</blockquote></dd></dl>
+      <figure><figcaption><p>Captioned paragraph.</p></figcaption></figure>
+    </body></html>]]
+    local parent_candidates = Epub2.collect_candidates(parent_doc,
+        "OEBPS/parent.xhtml", 1, false, nil)
+    local parent_rows = {}
+    for _, candidate in ipairs(parent_candidates) do
+        parent_rows[#parent_rows + 1] = candidate.source .. " @ " .. candidate.selector
+    end
+    check("父级目标元素里的引用块只收一次",
+        #parent_candidates == 4
+        and parent_candidates[1].source == "Quoted in a list item."
+        and parent_candidates[1].selector
+            :find("> li:nth-of-type(1) > blockquote", 1, true) ~= nil
+        and parent_candidates[2].source == "Prefixed item paragraph."
+        and parent_candidates[2].selector
+            :find("> li:nth-of-type(2) > p:nth-of-type(1)", 1, true) ~= nil
+        and parent_candidates[3].source == "Quoted in a definition."
+        and parent_candidates[3].selector
+            :find("> dd:nth-of-type(1) > blockquote", 1, true) ~= nil
+        and parent_candidates[4].source == "Captioned paragraph."
+        and parent_candidates[4].selector
+            :find("> figcaption:nth-of-type(1) > p:nth-of-type(1)", 1, true) ~= nil,
+        table.concat(parent_rows, " | "))
 
     -- 运行：整书翻译
     local output_dir = "/tmp/dualtranslate_out1"

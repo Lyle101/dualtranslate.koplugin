@@ -1204,7 +1204,7 @@ CREngine 把 `::before` / `::after` 的 `content` 实例化成**真实排版节�
 
 缩进量取自**这本书自己的样式表**（`dualtranslate_listindent.lua`：`ul.tight{padding-left:0}` 与 `epub.css` 默认 1em 得到的值不同）；`1.5em` 只是老 overlay 缺 `list_indent` 字段时的回退值。
 
-尚未验证：`td` / `th` / `caption` 里的 `display:block` 生成盒会不会撑破列宽（表格可能在窄列上重排）。候选段落白名单先只扩到 `blockquote`（块级，行为与 `p` 一致），表格单独一轮、用抓屏比对列宽再决定。
+尚未验证：`td` / `th` / `caption` 里的 `display:block` 生成盒会不会撑破列宽（表格可能在窄列上重排），表格单独一轮、用抓屏比对列宽再决定。候选段落白名单已扩到 `blockquote`（块级，行为与 `p` 一致）：纯文本引用块单独收集；带块级子元素的引用块只收子元素；父级目标元素（`li` / `dd` / `figcaption` 等）发现内部还有目标块时跳过自己，避免同一段被父级和子元素各收一次。
 
 ---
 
