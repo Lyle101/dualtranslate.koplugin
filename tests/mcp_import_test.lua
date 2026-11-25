@@ -450,10 +450,15 @@ do
     })
     local summary, err = Store.importResult(job, result)
     check("size 变化拒绝", summary == nil and tostring(err):find("已变化") ~= nil, tostring(err))
-    -- Restore the original size for the remaining cases.
+    -- Restore the original size for the remaining cases.  The job fingerprint
+    -- must describe the restored file: mtime has one-second resolution, so a
+    -- restore that crosses a second boundary makes every later import fail
+    -- with "书文件已变化" (this suite used to go red whenever that happened).
     local trim = io.open(BOOK, "wb")
     trim:write(string.rep("x", 4096))
     trim:close()
+    job.book.file_size = lfs.attributes(BOOK, "size")
+    job.book.file_mtime = lfs.attributes(BOOK, "modification") or 0
 end
 
 -- ============================================================
