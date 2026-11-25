@@ -60,6 +60,38 @@ write("OEBPS/chap2.xhtml", [[<?xml version="1.0"?>
 <html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter 2</title></head>
 <body><p>Chapter two content.</p></body></html>]])
 
+-- 四章的小书，单独一个目录。 锚点路径缓存只有 3 槽，必须凑到第 4 个不同
+-- 章节才能把最久未用的一项挤出去，而上面的两章书要留给整书翻译的计数断言。
+local CACHE_DIR = "/tmp/dualtranslate_epub_cache_test"
+os.execute("rm -rf " .. CACHE_DIR)
+os.execute("mkdir -p " .. CACHE_DIR .. "/META-INF " .. CACHE_DIR .. "/OEBPS")
+local function write_cache(p, content)
+    local f = io.open(CACHE_DIR .. "/" .. p, "w")
+    f:write(content); f:close()
+end
+write_cache("META-INF/container.xml", [[<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>]])
+local manifest = {}
+for i = 1, 4 do
+    manifest[#manifest + 1] = string.format(
+        '<item id="c%d" href="c%d.xhtml" media-type="application/xhtml+xml"/>', i, i)
+end
+write_cache("OEBPS/content.opf", '<?xml version="1.0"?>\n'
+    .. '<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><manifest>'
+    .. table.concat(manifest)
+    .. '</manifest><spine>'
+    .. '<itemref idref="c1"/><itemref idref="c2"/><itemref idref="c3"/><itemref idref="c4"/>'
+    .. '</spine></package>')
+for i = 1, 4 do
+    write_cache(string.format("OEBPS/c%d.xhtml", i), string.format(
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body><h2 id="h%d">C%d</h2><p id="p%d">text</p></body></html>',
+        i, i, i))
+end
+
 -- ============================================================
 -- 1. Epub.resolve
 -- ============================================================
@@ -99,15 +131,18 @@ end
 print("== 1b. 锚点元素路径 ==")
 do
     package.loaded["dualtranslate_tools"] = nil
+    local extractions = 0
     package.preload["dualtranslate_tools"] = function()
         return {
             mkdir_p = function() return true end,
             rmtree = function() return true end,
             unzip_to = function() return true end,
             stable_path_hash = function() return "x" end,
-            extract_entries = function(_, _, wanted)
+            extract_entries = function(book_path, _, wanted)
+                extractions = extractions + 1
+                local base = book_path == "/books/cache.epub" and CACHE_DIR or TEST_DIR
                 local out = {}
-                for key in pairs(wanted) do out[key] = TEST_DIR .. "/" .. key end
+                for key in pairs(wanted) do out[key] = base .. "/" .. key end
                 return out
             end,
         }
@@ -126,6 +161,40 @@ do
     check("每章解析结果缓存", Epub2.chapter_anchor_paths("/books/x.epub", 1) == paths)
     local second = Epub2.chapter_anchor_paths("/books/x.epub", 2)
     check("换章重新解析", second ~= nil and second ~= paths)
+
+    -- 3 槽缓存：回翻到上一章（逐章模式最常见的动作）不再解包。
+    -- 换一本四章的书，避免动上面两章书的计数断言。
+    local cache_book = "/books/cache.epub"
+    local c1 = Epub2.chapter_anchor_paths(cache_book, 1)
+    -- 这本书的章节是 <h2 id="h1"> + <p id="p1">，路径照元素标签写。
+    check("四章书第一章可解析",
+        c1 ~= nil and c1.h1 == "/body/h2" and c1.p1 == "/body/p",
+        c1 and (tostring(c1.h1) .. " " .. tostring(c1.p1)))
+    local before = extractions
+    local c2 = Epub2.chapter_anchor_paths(cache_book, 2)
+    check("换章解析一次文件", extractions == before + 1,
+        tostring(extractions - before))
+    local after_second = extractions
+    check("回翻命中缓存", Epub2.chapter_anchor_paths(cache_book, 1) == c1)
+    check("回翻不再解包", extractions == after_second,
+        tostring(extractions - after_second))
+    local c3 = Epub2.chapter_anchor_paths(cache_book, 3)
+    check("再进新章解包一次", c3 ~= nil and extractions == after_second + 1,
+        tostring(extractions - after_second))
+    -- 3 槽：第 1、2、3 章必须同时在缓存里（只有 2 槽时这里会失败）。
+    local before_touch = extractions
+    check("3 章同时在缓存里",
+        Epub2.chapter_anchor_paths(cache_book, 1) == c1
+        and Epub2.chapter_anchor_paths(cache_book, 2) == c2
+        and Epub2.chapter_anchor_paths(cache_book, 3) == c3
+        and extractions == before_touch, tostring(extractions - before_touch))
+    -- 第 4 章把最久未用的第 1 章挤出去（4 槽时这里会失败）。
+    Epub2.chapter_anchor_paths(cache_book, 4)
+    local before_reload = extractions
+    local reloaded = Epub2.chapter_anchor_paths(cache_book, 1)
+    check("第 4 章挤掉最久未用的一章", reloaded ~= c1)
+    check("被挤出后重新解析", extractions == before_reload + 1,
+        tostring(extractions - before_reload))
 end
 
 -- ============================================================

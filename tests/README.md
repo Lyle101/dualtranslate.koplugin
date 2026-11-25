@@ -4,10 +4,10 @@
 
     lua tests/loadtest.lua      # 加载 + init + 设置读写 + 菜单构建 + 全项渲染
     lua tests/fulltest.lua      # 文本切分 / Overlay CSS / Tools hash / Languages / 队列 / Providers
-    lua tests/epub_test.lua     # EPUB resolve / 段落收集 / translate_overlay 完整流程
+    lua tests/epub_test.lua     # EPUB resolve / 段落收集 / 锚点路径缓存（3 槽 LRU）/ translate_overlay 完整流程
     lua tests/listindent_test.lua # 列表父项缩进：书 CSS / 内联 style / marker 宽度 / 选择器匹配
     lua tests/outline_test.lua  # P2-a：extract_entries 按需抽取 / NCX/nav/spine 目录 / 映射去重 / 失败清理 / outline 磁盘缓存 / 100 章性能
-    lua tests/chapter_picker_test.lua # P2-b：getBookOutline 内存缓存 / 选择器状态与分页 / 对话框流程
+    lua tests/chapter_picker_test.lua # P2-b：getBookOutline 内存缓存 / 目录条目页号缓存（3 槽 LRU）/ 选择器状态与分页 / 对话框流程
     lua tests/state2_test.lua   # loadConfig 迁移 / loadQueue 边界
     lua tests/cache_test.lua    # SQLite cache（mock）
     lua tests/cache_provider_test.lua  # P0：缓存查询按 provider 隔离

@@ -208,6 +208,81 @@ do
     check("磁盘缓存命中不提示", disk_hit == outline and #notifications == 0 and repaints == 0)
 end
 
+-- ============================================================
+print("== 1b. 目录条目页号缓存 ==")
+do
+    local plugin = {}
+    Reader.attach(plugin)
+    local paths = { a = "/body/p", b = "/body/p[2]", c = "/body/p[3]" }
+    local parses, probes = 0, 0
+    plugin.epub = {
+        chapter_anchor_paths = function(book_path, index)
+            parses = parses + 1
+            -- 定位失败的章节：两个锚点都拿不到页号
+            if index == 5 then return { a = "/body/x", b = "/body/y" } end
+            return paths
+        end,
+    }
+    -- 页号由 DocFragment 下标决定，和 CREngine 一样带在地址里，所以一章的
+    -- 路径表可以复用；0 表示“在文档里但这一页不存在”。
+    plugin.ui = { document = { getPageFromXPointer = function(_, address)
+        probes = probes + 1
+        if address:find("/body/x", 1, true) or address:find("/body/y", 1, true) then
+            return 0
+        end
+        local fragment = tonumber(address:match("DocFragment%[(%d+)%]")) or 1
+        -- 路径尾部的 [N] 是元素序号；DocFragment 的下标在中间，不会被这里匹配。
+        local nth = tonumber(address:match("%[(%d+)%]$")) or 1
+        return (fragment - 1) * 3 + nth
+    end } }
+
+    local rows = { { anchor = "a" }, { anchor = "b" }, { anchor = "c" } }
+    local first = plugin:chapterEntryPages("/books/one.epub", 1, rows)
+    check("首次探测全部锚点", first ~= nil and #first == 3 and probes == 3,
+        tostring(probes))
+    check("页号来自 CREngine", first and first[1].page == 1 and first[3].page == 3,
+        first and (tostring(first[1].page) .. "/" .. tostring(first[3].page)))
+    check("同章命中缓存", plugin:chapterEntryPages("/books/one.epub", 1, rows) == first
+        and probes == 3 and parses == 1, tostring(probes) .. "/" .. tostring(parses))
+
+    local second = plugin:chapterEntryPages("/books/one.epub", 2, rows)
+    check("换章重新探测", second ~= nil and #second == 3 and probes == 6,
+        tostring(probes))
+    -- 3 槽缓存：逐章模式回翻一章不再重新解包、重新探测 N 个锚点。
+    check("回翻命中缓存", plugin:chapterEntryPages("/books/one.epub", 1, rows) == first
+        and probes == 6, tostring(probes))
+
+    -- 3 槽：第 1、2、3 章必须同时在缓存里（只有 2 槽时这里会失败）。
+    local third = plugin:chapterEntryPages("/books/one.epub", 3, rows)
+    local before_touch = probes
+    check("3 章同时在缓存里",
+        plugin:chapterEntryPages("/books/one.epub", 1, rows) == first
+        and plugin:chapterEntryPages("/books/one.epub", 2, rows) == second
+        and plugin:chapterEntryPages("/books/one.epub", 3, rows) == third
+        and probes == before_touch, tostring(probes - before_touch))
+    -- 第 4 章把最久未用的第 1 章挤出去（4 槽时这里会失败）。
+    plugin:chapterEntryPages("/books/one.epub", 4, rows)
+    local before_reload = probes
+    check("第 4 章挤掉最久未用的一章",
+        plugin:chapterEntryPages("/books/one.epub", 1, rows) ~= first
+        and probes == before_reload + 3, tostring(probes - before_reload))
+
+    -- 定位失败也要记住：每个翻页都重试 N 次探测不会让 CREngine 找到锚点。
+    local bad = plugin:chapterEntryPages("/books/one.epub", 5,
+        { { anchor = "a" }, { anchor = "b" } })
+    local after_bad = probes
+    check("锚点定位失败退回整文件", bad == nil)
+    check("失败结果也缓存",
+        plugin:chapterEntryPages("/books/one.epub", 5,
+            { { anchor = "a" }, { anchor = "b" } }) == nil
+        and probes == after_bad, tostring(probes - after_bad))
+    -- 负缓存只占自己那一槽，不能把相邻章的页表挤掉或污染。
+    local before_neighbour = probes
+    check("负缓存不影响相邻章",
+        plugin:chapterEntryPages("/books/one.epub", 4, rows) ~= nil
+        and probes == before_neighbour, tostring(probes - before_neighbour))
+end
+
 local Picker = require("dualtranslate_picker")
 
 -- ============================================================

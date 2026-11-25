@@ -313,11 +313,40 @@ end
 -- answer comes from CREngine itself (getPageFromXPointer on the element path
 -- the anchor lives at), so it follows the renderer's own pagination; the
 -- chapter is parsed once for its paths, never per page turn.
+--
+-- Three slots, like the anchor path cache in the EPUB module: page-turn
+-- follow moves across chapter boundaries, and turning back over one used to
+-- re-probe every anchor of the chapter just left.  A remembered failure (no
+-- page for some anchor) occupies a slot too: retrying N probes on every page
+-- turn would not make CREngine find the anchors.
+local ENTRY_PAGE_CACHE_SLOTS = 3
+
+-- Most recently used first; the tail is the chapter left longest ago.
+local function entry_page_cache_get(cache, book_path, index)
+    for position, entry in ipairs(cache) do
+        if entry.book_path == book_path and entry.index == index then
+            if position > 1 then
+                table.remove(cache, position)
+                table.insert(cache, 1, entry)
+            end
+            return entry
+        end
+    end
+end
+
+local function entry_page_cache_put(cache, entry)
+    table.insert(cache, 1, entry)
+    while #cache > ENTRY_PAGE_CACHE_SLOTS do table.remove(cache) end
+end
+
 function dualtranslate:chapterEntryPages(book_path, index, rows)
-    local cached = self._entry_page_cache
-    if cached and cached.book_path == book_path and cached.index == index then
-        -- An empty cached list is a remembered failure: retrying N probes on
-        -- every page turn would not make CREngine find the anchors.
+    local cache = self._entry_page_cache
+    if type(cache) ~= "table" then
+        cache = {}
+        self._entry_page_cache = cache
+    end
+    local cached = entry_page_cache_get(cache, book_path, index)
+    if cached then
         if #cached.pages == 0 then return nil end
         return cached.pages
     end
@@ -371,16 +400,16 @@ function dualtranslate:chapterEntryPages(book_path, index, rows)
     if #pages == 0 or #missing > 0 then
         logger.warn("dualtranslate: chapter", index, "anchors not located:",
             table.concat(missing, ","), "— keeping the whole file")
-        self._entry_page_cache = { book_path = book_path, index = index,
-            pages = {} }
+        entry_page_cache_put(cache, { book_path = book_path, index = index,
+            pages = {} })
         return nil
     end
     -- INFO, not dbg: when page-turn follow "does nothing", this line says
     -- whether the anchors were located at all.  Once per chapter change.
     logger.info("dualtranslate: entry pages for chapter", index, #pages, "of",
         #rows, "anchors")
-    self._entry_page_cache = { book_path = book_path, index = index,
-        pages = pages }
+    entry_page_cache_put(cache, { book_path = book_path, index = index,
+        pages = pages })
     return pages
 end
 

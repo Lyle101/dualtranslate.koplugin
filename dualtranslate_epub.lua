@@ -1773,21 +1773,54 @@ function Epub.spine(book_path)
     return spine
 end
 
-local anchor_path_cache
 -- Anchor id -> element path under body ("/body/div[2]/h1"), for one spine
--- item.  Only the page the user is reading is parsed, and the result is kept
--- until the chapter changes.
+-- item.  Only the page the user is reading is parsed, but keeping a single
+-- entry re-unpacked the file every time the reader crossed a chapter
+-- boundary and turned back (chapter mode follows the page, so "last page of
+-- the chapter, then its first again" is a normal reading pattern).  Three
+-- slots hold the chapter being read plus its neighbours; the fourth oldest
+-- is dropped, which costs one unpack the next time it is entered.
+local ANCHOR_PATH_CACHE_SLOTS = 3
+local anchor_path_cache = {}
+
+-- Most recently used first, so the eviction at the tail is the chapter the
+-- reader left longest ago.
+local function anchor_path_cache_get(book_path, index, size, mtime)
+    for position, entry in ipairs(anchor_path_cache) do
+        if entry.book_path == book_path and entry.index == index
+            and entry.size == size and entry.mtime == mtime then
+            if position > 1 then
+                table.remove(anchor_path_cache, position)
+                table.insert(anchor_path_cache, 1, entry)
+            end
+            return entry.paths
+        end
+    end
+end
+
+local function anchor_path_cache_put(entry)
+    -- A replaced file leaves an entry whose size/mtime can never match again.
+    -- Drop it rather than let it hold one of the three slots.
+    for position = #anchor_path_cache, 1, -1 do
+        local existing = anchor_path_cache[position]
+        if existing.book_path == entry.book_path and existing.index == entry.index then
+            table.remove(anchor_path_cache, position)
+        end
+    end
+    table.insert(anchor_path_cache, 1, entry)
+    while #anchor_path_cache > ANCHOR_PATH_CACHE_SLOTS do
+        table.remove(anchor_path_cache)
+    end
+end
+
 function Epub.chapter_anchor_paths(book_path, index)
     index = tonumber(index)
     if not index then return nil end
     -- A replaced file must not reuse the previous copy's element paths.
     local size = lfs.attributes(book_path, "size")
     local mtime = lfs.attributes(book_path, "modification")
-    local cached = anchor_path_cache
-    if cached and cached.book_path == book_path and cached.index == index
-        and cached.size == size and cached.mtime == mtime then
-        return cached.paths
-    end
+    local cached = anchor_path_cache_get(book_path, index, size, mtime)
+    if cached then return cached end
     local spine = Epub.spine(book_path)
     local relative = spine and spine[index]
     if not relative then return nil end
@@ -1825,8 +1858,8 @@ function Epub.chapter_anchor_paths(book_path, index)
     end)
     Tools.rmtree(work_dir)
     if not ok or type(paths) ~= "table" then return nil end
-    anchor_path_cache = { book_path = book_path, index = index, paths = paths,
-        size = size, mtime = mtime }
+    anchor_path_cache_put({ book_path = book_path, index = index, paths = paths,
+        size = size, mtime = mtime })
     return paths
 end
 
