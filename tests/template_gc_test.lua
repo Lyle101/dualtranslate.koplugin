@@ -251,6 +251,33 @@ do
     end
 end
 
+-- ============================================================
+print("== 6. 根目录/当前书路径的重复分隔符 ==")
+do
+    os.execute('rm -rf "' .. BOOKS .. '"')
+    mkdir(BOOKS)
+    local current = book("slashed")
+    local current_template = template(current, 1024)
+    age(current_template, 40)
+    -- Both spellings a caller could reasonably hand in: duplicate separators
+    -- must not defeat the "never delete the book being read" guard.
+    local report = Overlay.reclaimCssTemplates(BOOKS .. "//", current .. "//", {
+        force = true, max_age_days = 30, max_bytes = 10 * 1024 * 1024,
+    })
+    check("重复分隔符仍识别当前书", report and report.removed == 0
+        and exists(current_template),
+        report and string.format("removed=%d skipped=%s", report.removed,
+            tostring(report.skipped)))
+
+    report = Overlay.reclaimCssTemplates(ROOT .. "//books", nil, {
+        force = true, max_age_days = 30, max_bytes = 10 * 1024 * 1024,
+    })
+    check("根目录重复分隔符仍可扫描", report and report.removed == 1
+        and not exists(current_template),
+        report and string.format("removed=%d skipped=%s", report.removed,
+            tostring(report.skipped)))
+end
+
 print(string.format("\n==== 模板回收测试：%d 通过，%d 失败 ====", passed, failed))
 if failed == 0 then
     os.execute('rm -rf "' .. ROOT .. '"')

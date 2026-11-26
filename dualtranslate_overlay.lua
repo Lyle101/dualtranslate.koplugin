@@ -368,6 +368,10 @@ local template_write_failures = {}
 
 local function normalize_dir(dir)
     if not dir or dir == "" then return dir end
+    -- Collapse duplicate separators as well as a trailing one: the reclaimer
+    -- compares the current book by string equality, and a caller that builds
+    -- the path as ".../books//<hash>" must not quietly lose that protection.
+    dir = dir:gsub("//+", "/")
     if dir ~= "/" then dir = dir:gsub("/+$", "") end
     -- Store.bookDir may hand back "./cache/..." while a CLI/bench passes an
     -- absolute path.  The template key embeds dir, so resolve both to the same
