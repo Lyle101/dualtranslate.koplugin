@@ -119,6 +119,14 @@ def test_local_job_status_prefers_meta_options(tmp_path: Path) -> None:
     assert status["options"]["glossary"] == []
     assert status["options"]["max_chars_per_segment"] == 4500
 
+    # An unusable meta (wrong schema) must be ignored like dtctl's loadMeta,
+    # so the job.json options still reach the agent.
+    meta.write_text(json.dumps({"schema": "something-else", "total": 1}),
+                    encoding="utf-8")
+    status = LocalTransport(KO_ROOT, str(device)).rpc(["job-status", "--job", remote_job])
+    assert status["options"]["glossary"] == []
+    assert status["options"]["max_chars_per_segment"] == 4500
+
 
 def test_local_rpc_refuses_write_and_escape(tmp_path: Path) -> None:
     device = tmp_path / "device"

@@ -168,7 +168,7 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
     local lfs = require("libs/libkoreader-lfs")
     local data_dir = DataStorage:getDataDir()
     local books_root = data_dir .. "/cache/dualtranslate/books/"
-    local removed = 0
+    local removed, kept = 0, 0
     local function belongs_to_book(dir)
         local manifest = Overlay.loadManifest(dir)
         if manifest then return manifest.book_path == book_path end
@@ -203,6 +203,7 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
             -- Keep the whole directory: deleting it would destroy the only
             -- copy of the user's terms.
             removed = math.max(0, removed - 1)
+            kept = kept + 1
             logger.warn("dualtranslate: glossary unreadable, keep cache dir:",
                 current_dir)
         else
@@ -223,6 +224,7 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
                 if dir ~= current_dir and belongs_to_book(dir) then
                     local glossary, unreadable = take_glossary(dir)
                     if unreadable then
+                        kept = kept + 1
                         logger.warn(
                             "dualtranslate: glossary unreadable, keep cache dir:", dir)
                     else
@@ -234,7 +236,9 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
             end
         end
     end
-    return removed
+    -- kept: directories left in place because their glossary could not be
+    -- preserved; the caller must not report a complete wipe.
+    return removed, kept > 0 and kept or nil
 end
 
 -- Single entry point for "clear this book": overlay files and the SQLite
@@ -243,11 +247,11 @@ end
 -- passed the cache directory to Cache:clearForBook).
 function dualtranslate:clearBookTranslationData(book_path)
     if not book_path then return 0 end
-    local removed = self:removeTranslationFilesForBook(book_path)
+    local removed, kept = self:removeTranslationFilesForBook(book_path)
     if self.cache and self.cache.clearForBook then
         self.cache:clearForBook(book_path)
     end
-    return removed
+    return removed, kept
 end
 
 -- Best-effort detection of the current spine chapter index.  CREngine

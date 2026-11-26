@@ -735,7 +735,7 @@ function dualtranslate:confirmClearCache(menu)
                             TranslationUI.showInfo(_("删除失败：") .. tostring(ok and err or result))
                             return
                         end
-                        local removed = self:clearBookTranslationData(book_path)
+                        local removed, kept = self:clearBookTranslationData(book_path)
                         -- 10.2: job.json carries the book's source text, so
                         -- "delete every translation" must take the job too.
                         pcall(function()
@@ -758,9 +758,17 @@ function dualtranslate:confirmClearCache(menu)
                         -- Nothing is left to delete: rebuild the page so its
                         -- rows and enabled state match, and keep it open.
                         self:refreshMenuPage(menu)
-                        TranslationUI.showInfo(removed > 0
-                            and "已彻底删除本书译文"
-                            or "已清除本书译文数据库记录")
+                        if kept then
+                            -- The DB/entries are gone but a cache directory
+                            -- stayed behind to protect an unreadable
+                            -- glossary; saying "彻底删除" would be a lie.
+                            TranslationUI.showInfo(
+                                "已清除本书译文记录\n术语表无法读取，相关缓存目录已保留，请检查后重试")
+                        else
+                            TranslationUI.showInfo(removed > 0
+                                and "已彻底删除本书译文"
+                                or "已清除本书译文数据库记录")
+                        end
                     end,
                 },
             },

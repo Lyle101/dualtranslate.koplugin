@@ -259,6 +259,7 @@ function Glossary.stash(dir)
     if not file then return nil, "unreadable" end
     local raw = file:read("*a")
     file:close()
+    if raw == nil then return nil, "unreadable" end
     return { data = raw }
 end
 
@@ -266,9 +267,20 @@ function Glossary.unstash(dir, stashed)
     if type(dir) ~= "string" or dir == "" or stashed == nil then return true end
     if not Tools.mkdir_p(dir) then return false end
     if stashed.keep then
+        -- A failed rename leaves the keep file where it is: recover_stash
+        -- will put it back on the next load, so no bytes are lost.
         return os.rename(stashed.keep, dir .. "/" .. Glossary.FILE) ~= nil
     end
-    return Glossary.saveRaw(dir, stashed.data)
+    if Glossary.saveRaw(dir, stashed.data) then return true end
+    -- The directory is gone and the normal write failed.  Park the bytes next
+    -- to it so recover_stash can still bring them back later.
+    local keep = Glossary.keepPath(dir)
+    local out = io.open(keep, "wb")
+    if out then
+        out:write(stashed.data)
+        out:close()
+    end
+    return false
 end
 
 Glossary.normalizeTerms = function(list)

@@ -22,6 +22,7 @@ from .models import validate_job
 
 
 JOB_ID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
+META_SCHEMA = "dualtranslate.job.meta.v1"
 CAT_NAMES = {"job.json", "state.json", "result.json", "result.partial.json"}
 CM_FLAGS = {"context", "allow-partial"}
 # list-providers opens the cache DB, and opening a v2 DB migrates it (a
@@ -169,13 +170,18 @@ class LocalTransport:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 meta = {}
-            if isinstance(meta.get("options"), dict):
-                options = meta["options"]
-            else:
-                # Old meta: only the top-level max_chars survived.  Do not fall
-                # back to job.options here -- dtctl answers from meta, and both
-                # transports must return the same thing for the same job.
-                options = {"max_chars_per_segment": meta.get("max_chars_per_segment")}
+            # dtctl's loadMeta rejects a meta with another schema and falls
+            # back to the whole job; mirror that so a corrupt index cannot
+            # silently empty the glossary on a USB mount.
+            if meta.get("schema") == META_SCHEMA:
+                if isinstance(meta.get("options"), dict):
+                    options = meta["options"]
+                else:
+                    # Old meta: only the top-level max_chars survived.  Do not
+                    # fall back to job.options here -- dtctl answers from meta,
+                    # and both transports must agree for the same job.
+                    options = {"max_chars_per_segment":
+                               meta.get("max_chars_per_segment")}
         if options is None:
             options = job.get("options")
         if not isinstance(options, dict):

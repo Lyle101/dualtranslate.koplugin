@@ -261,11 +261,25 @@ do
     check("暂存是重命名", stashed ~= nil and stashed.keep == Glossary.keepPath(dir))
     check("目录内文件已移走", not exists(dir .. "/glossary.json"))
     check("暂存文件在旁边", exists(Glossary.keepPath(dir)))
+
     os.execute('rm -rf "' .. dir .. '"') -- simulate the cache sweep
     check("恢复成功", Glossary.unstash(dir, stashed) == true)
     local loaded = Glossary.load(dir)
     check("恢复后术语还在", #loaded.terms == 1 and loaded.terms[1].source == "Darcy"
         and loaded.style_guide == "风格", loaded.style_guide)
+
+    -- A stale keep from an older crash is replaced by the next stash, not
+    -- merged with it.
+    local stale = ROOT .. "/book_stale"
+    write(Glossary.keepPath(stale), "stale")
+    Glossary.save(stale, { terms = { { source = "New", target = "新" } } })
+    local replaced = Glossary.stash(stale)
+    local kept_raw = read(Glossary.keepPath(stale)) or ""
+    check("旧 keep 被覆盖", replaced ~= nil
+        and kept_raw:find('"source":"New"', 1, true) ~= nil
+        and kept_raw:find("stale", 1, true) == nil, kept_raw)
+    check("恢复覆盖后的 keep", Glossary.unstash(stale, replaced) == true
+        and Glossary.load(stale).terms[1].source == "New")
 
     -- A crash between the sweep and the restore must not lose the terms: the
     -- next load puts the orphaned keep file back.
