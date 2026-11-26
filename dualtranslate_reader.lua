@@ -839,6 +839,14 @@ function dualtranslate:checkExternalReload(force)
     end
     self._last_reload_signal_seq = signal.seq
     self._page_translation_overlay_state = nil
+    -- The import ran in another process (dtctl / MCP server), so this process
+    -- cannot have dropped the parsed entries doc from its own write path.  The
+    -- signal is the only reliable invalidation: FAT32 mtime is ~2 s coarse and
+    -- the new file can have the same size.  A display switch only re-points the
+    -- manifest, so it keeps the parsed docs.
+    if signal.op ~= "display" then
+        Overlay.clearEntriesCache()
+    end
     self:refreshDocumentStyles()
     return signal
 end

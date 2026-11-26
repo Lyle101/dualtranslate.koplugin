@@ -100,6 +100,16 @@ local before_clear = stats()
 Overlay.loadEntries(dir, "system")
 check("清空后重新解码", stats().entries_loads == before_clear.entries_loads + 1)
 
+-- 样式缓存与解析缓存解耦：切换显示服务/字号只需要重建样式表，不该把
+-- 已解析的 1.2 MB doc 一起丢掉（写入方已经按路径失效）。
+local before_css_clear = stats()
+local cached_doc = Overlay.loadEntries(dir, "system")
+Overlay.clearCssCache()
+local after_css_clear = Overlay.loadEntries(dir, "system")
+check("clearCssCache 不清 entries", rawequal(cached_doc, after_css_clear)
+    and stats().entries_loads == before_css_clear.entries_loads,
+    tostring(stats().entries_loads - before_css_clear.entries_loads))
+
 -- ============================================================
 print("== 5. 预算淘汰最旧 doc ==")
 local big = string.rep("字", 1500000) -- ~4.5 MB UTF-8

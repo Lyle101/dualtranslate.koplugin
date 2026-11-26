@@ -98,7 +98,7 @@
 ## 5. 结论
 
 - **目录解析**：冷解析 679.4 ms – 2.47 s；按目录章节线性折算 100 章 165.7 ms – 747.3 ms，§15.4 目标 < 500 ms，未达标（1 本超目标）。解包与 OPF 是固定开销，线性折算只作量级参考；解析完成后命中磁盘缓存。
-- **CSS 构建**：单 provider 冷构建 3.35 s – 4.42 s（目标 < 200 ms，未达标）；fallback 三家均分 3000 段 2.26 s – 2.61 s（目标 < 500 ms，未达标）；三家各持 3000 条（9000 条加载）5.65 s – 6.35 s（无目标）。分解：entries 读取（JSON 解码 + 去重）1.23 s – 1.38 s，同参数命中 1.8 ms – 2.2 ms——阅读中重绘不贵，改字号/切服务才会走冷路径。
+- **CSS 构建**：单 provider 冷构建 3.35 s – 4.42 s（目标 < 200 ms，未达标）；fallback 三家均分 3000 段 2.26 s – 2.61 s（目标 < 500 ms，未达标）；三家各持 3000 条（9000 条加载）5.65 s – 6.35 s（无目标）。分解：entries 读取（JSON 解码 + 去重）1.23 s – 1.38 s，同参数命中 1.8 ms – 2.2 ms——阅读中重绘不贵；解码只在冷构建/导入后付一次，改字号/切服务命中解析缓存（`--overlay` 约 112 ms）。
 - **MCP 导入**：3000 段 2.69 s – 2.80 s，§15.4 目标 < 5 s，达标。
 - **锚点页表**：单章冷解析 150.3 ms – 620.5 ms（基线，无 §15.4 目标）；取锚点最多的章节，最重一章有 23 条 TOC 锚点。CREngine 的逐锚点 `getPageFromXPointer` 探测未计入，真机阅读时每章另加 N 次渲染器调用。
 - **overlay 体积**：单 provider 940 KB（§15.4 参考 3,000 段 0.8–1.5 MB）；fallback 均分与全量两行各是三份 entries 之和；entries 每段都带 source/translation/xpointer。
@@ -106,19 +106,18 @@
 ## 6. 口径与限制
 
 - **outline**：每次删除 `data/cache/dualtranslate/outline/<hash>.json` 后冷解析；「100 章 ≈」= 中位数 × 100 / 目录章节数（线性折算）。解包、OPF 解析和 spine 映射是固定开销，折算只用于和 §15.4 的 100 章目标对照，不作为精确预测。前面的书形状探测已读过同一文件，文件页缓存是热的。
-- **CSS**：合成 3000 条 entries，selector 采用生产写法（`DocFragment[Source="…"] > body > div:nth-of-type(n) > p:nth-of-type(n)`，约 1% 为列表父项的 `… > ol:nth-of-type(1)::before`，各生成 3 条规则）；每次 `Overlay.clearCssCache()` 后 `Overlay.buildCss`。fallback 有两个夹具：① §15.4 口径的「3,000 段分给三家」（1,000/1,000/1,000，selector 互不相交，合并后 3,000 条规则）；② 三家都翻完整本（各 3,000 条，9,000 条加载、合并后仍是 3,000 条规则），这是存储与 JSON 解码的最坏形态，只报数不判定；三家各翻不同段落会得到 9,000 条规则，那等价于一本 9,000 段的书，不在 3,000 段口径内。「entries 读取」是同一份文件的 JSON 解码 + 去重；「CSS 命中」是 entries 落盘超过 3 秒后同参数再调用（阅读中翻页/重绘的稳态）。注意 `build_css_v3` 在参数（颜色/字号/服务）变化时会重新解析 entries，所以改字号/切服务属于「冷」这一列。同一份 entries 拆成三份后 JSON 解析会明显变快（LuaJSON 1.3.5 的大文档开销），因此「三服务均分」行低于单 provider 行是文件布局差异，不代表 fallback 更快。CSS 夹具与书内容无关；同轮不同书之间的差异与夹具无关，判定按整轮最大值。
+- **CSS**：合成 3000 条 entries，selector 采用生产写法（`DocFragment[Source="…"] > body > div:nth-of-type(n) > p:nth-of-type(n)`，约 1% 为列表父项的 `… > ol:nth-of-type(1)::before`，各生成 3 条规则）；每次 `Overlay.clearCssCache()` + `Overlay.clearEntriesCache()` 后 `Overlay.buildCss`（冷构建包含 entries 解码）。fallback 有两个夹具：① §15.4 口径的「3,000 段分给三家」（1,000/1,000/1,000，selector 互不相交，合并后 3,000 条规则）；② 三家都翻完整本（各 3,000 条，9,000 条加载、合并后仍是 3,000 条规则），这是存储与 JSON 解码的最坏形态，只报数不判定；三家各翻不同段落会得到 9,000 条规则，那等价于一本 9,000 段的书，不在 3,000 段口径内。「entries 读取」是同一份文件的 JSON 解码 + 去重；「CSS 命中」是 entries 落盘超过 3 秒后同参数再调用（阅读中翻页/重绘的稳态）。注意「冷构建」含解码（真机约 0.5 s）；生产中改字号/切服务命中解析缓存后只要约 112 ms，见 §7。同一份 entries 拆成三份后 JSON 解析会明显变快（LuaJSON 1.3.5 的大文档开销），因此「三服务均分」行低于单 provider 行是文件布局差异，不代表 fallback 更快。CSS 夹具与书内容无关；同轮不同书之间的差异与夹具无关，判定按整轮最大值。
 - **导入**：`Store.importResult` 全链路（书锁、SQLite 事务、entries/manifest/signal 写入）；每次前清空该书 overlay 目录与 DB 行，但复用同一个基准库（WAL 与页缓存是热的），不等价于空库首次导入。
 - **锚点页表**：`Epub.chapter_anchor_paths` 冷解析目录锚点最多的 5 个章节（各不同，3 槽 LRU 不会命中），中位数为单章成本；这是最坏单章，不是均匀抽样。CREngine 的 `getPageFromXPointer` 探测（每章 N 次）无法在 headless 复现，未计入。
 - **未覆盖**：章节选择器打开（< 1 s）、DB v3 迁移（100k 行 < 10 s）、内存增量（< 20 / 40 MB）、以及「相对旧版不劣化 20%」所需的历史基线——本次只记录绝对值。
 
-## 7. 按章 CSS 探针（P0，真机）
+## 7. 按章 CSS 与 entries 解析缓存（真机）
 
-> 这一节不是 `tools/bench.lua` 的输出：用一个临时探针在正在运行的阅读器里测得
-> （Kindle Voyage，KOReader 自带 luajit，JIT 开）。样本书：
-> *JavaScript for Impatient Programmers*（entries 1.2 MB、3,133 段、1,420 页）
+> 本节有两组数据：前半节的「reader 探针」（已随 193e3bf 下线，数字保留作对照）
+> 在正在运行的阅读器里测 `setStyleSheet` 与重绘；后半节的 `--overlay` 数字可以用
+> `tools/bench.lua` 随时复跑。设备均为 Kindle Voyage，KOReader 自带 luajit，JIT 开。
+> 样本书：*JavaScript for Impatient Programmers*（entries 1.2 MB、3,133 段、1,420 页）
 > 与 *Pride and Prejudice*（193 段、690 页，overlay 95 KB）。
-> 探针在 `setStyleSheet` 后显式 `getPageCount()` 强制分页，再用 `forceRePaint()`
-> 等一次整屏刷新结束，因此「重绘」列包含 e-ink 本身的开销。
 
 | 场景（JavaScript 书，章 8） | 章 CSS（56 条 / 21 KB） | 全书 CSS（3,133 条 / 1.18 MB） |
 | --- | --- | --- |
@@ -132,20 +131,29 @@
 *Pride and Prejudice* 的 overlay 只有 193 段，章 CSS 与全书 CSS 相同（95 KB）：
 构建 53–55 ms、`setStyleSheet` 11.8 ms、重绘 677 ms（与无样式变化的基线 677 ms 相同）。
 
-**加 entries 解析缓存后**（同一本书，`tools/bench.lua --overlay`）：
+**加 entries 解析缓存后**（同一本书，`tools/bench.lua --overlay`，5 次中位数，可复跑）：
 
-| 场景 | 耗时 | 规则 |
+| 场景（全书） | 耗时 | 规则 |
 | --- | --- | --- |
-| 冷构建（清 CSS + entries 缓存） | 625.8 ms | 3,133 |
+| 冷构建（清 CSS + entries 缓存） | 610.4 ms | 3,133 |
 | 样式变化重建（entries 命中） | **111.9 ms** | 3,133 |
-| 同参数命中 | 2.6 ms | 3,133 |
+| 同参数命中 | 2.1 ms | 3,133 |
+
+同一条命令加 `--chapter 8` 测按章过滤：
+
+| 场景（章 8） | 耗时 | 规则 |
+| --- | --- | --- |
+| 冷构建（清 CSS + entries 缓存） | 491.7 ms | 56 |
+| 样式变化重建（entries 命中） | **6.6 ms** | 56 |
+| 同参数命中 | 2.5 ms | 56 |
 
 读数含义：
 
 - **缓存前构建由 entries 解码主导**：章 CSS 只有 56 条也要 475.9 ms，全书 598.5 ms；
-  加上解析缓存后章构建降到 **8.2 ms**、全书 **111.9 ms**（进入 §15.4 的 200 ms 目标），
-  解码只在冷构建/导入后付一次。
-- **`setStyleSheet` 很便宜，且与表大小无关**（9 ms vs 26 ms）。
+  加上解析缓存后章重建 **6.6 ms**、全书 **111.9 ms**（进入 §15.4 的 200 ms 目标），
+  解码只在冷构建/导入后付一次。早期 reader 内探针在同一本书上读到 8.2 / 126.3 ms，
+  探针已下线，数字仅作旁证。
+- **`setStyleSheet` 本身很小**（9 ms vs 26 ms，随表大小略增，但不是瓶颈）。
 - **没有观察到整书重排**：页数和当前页在重绘前后都是 1420 / 72；注意 `getPageCount()`
   在重绘前读的是缓存（0.0 ms），结论以重绘后的读数为准。
 - **强制重绘 1.2–1.4 s 与 CSS 大小无关**，是 e-ink 首帧/整屏刷新的成本；真实翻页

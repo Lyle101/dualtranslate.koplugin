@@ -274,6 +274,10 @@ local function entries_cache_store(path, emtime, esize, doc)
     }
     entries_total = entries_total + esize
     table.insert(entries_order, 1, path)
+    -- Evict least recently used until the budget fits, but always keep the doc
+    -- just stored: a single entries file larger than 8 MB (a 10k+ paragraph
+    -- book) is still cheaper to hold than to re-decode on every style change.
+    -- The budget is therefore a soft cap for that one case.
     while entries_total > ENTRIES_CACHE_BYTES and #entries_order > 1 do
         entries_cache_drop(table.remove(entries_order))
     end
@@ -305,6 +309,9 @@ function Overlay.loadEntries(dir, provider_id)
     if emtime and esize then
         entries_cache_store(path, emtime, esize, data)
     end
+    -- The returned doc can be the cached table itself: callers must treat it
+    -- as read-only and copy the rows they want to change (the import and
+    -- checkpoint paths already build a fresh array).
     return data
 end
 
@@ -560,9 +567,13 @@ function Overlay.clearCssCache()
     css_cache = {}
     cache_order = {}
     cache_total = 0
-    -- Callers use this after imports/deletes, where the parsed entries doc is
-    -- stale too; keeping it would silently serve the previous file's rows.
-    Overlay.clearEntriesCache()
+    -- Parsed entries are not cleared here on purpose: their writers
+    -- (saveEntries / deleteEntries) drop the exact path, and callers such as
+    -- the display-provider switch only change which provider is drawn.  Wiping
+    -- every doc there would re-decode 1.2 MB (~450 ms) for nothing.
+    -- The one write that bypasses those helpers (reconcile removing an orphan
+    -- entries file) is covered by the stat check in loadEntries: the file is
+    -- gone, so mtime/size are nil and the cache is not consulted.
 end
 
 -- Diagnostics for tests and tools: counters plus current cache occupancy.

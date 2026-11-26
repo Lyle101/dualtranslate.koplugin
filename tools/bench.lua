@@ -580,7 +580,11 @@ local function bench_css(dir, provider, fallback, backdated)
     end
     local samples, bytes = {}, 0
     for _ = 1, opts.runs do
+        -- Cold means cold: clear the parsed entries too, otherwise these
+        -- samples would silently measure the style rebuild (entries hit) and
+        -- §6's "cold build includes decode" would be wrong.
         Overlay.clearCssCache()
+        Overlay.clearEntriesCache()
         collectgarbage("collect")
         local started = clock()
         local css = Overlay.buildCss(dir, options)
@@ -1122,7 +1126,8 @@ local function render_markdown(environment, books, results)
     add(string.format("- **CSS 构建**：单 provider 冷构建 %s（目标 < 200 ms，%s）；"
         .. "fallback 三家均分 %d 段 %s（目标 < 500 ms，%s）；三家各持 %d 条"
         .. "（%d 条加载）%s（无目标）。分解：entries 读取（JSON 解码 + 去重）%s，"
-        .. "同参数命中 %s——阅读中重绘不贵，改字号/切服务才会走冷路径。",
+        .. "同参数命中 %s——阅读中重绘不贵；解码只在冷构建/导入后付一次，"
+        .. "改字号/切服务命中解析缓存（`--overlay` 约 112 ms）。",
         fmt_range(css_single_low, css_single_high), css_single_status,
         environment.css_segments,
         fmt_range(css_fallback_low, css_fallback_high), css_fallback_status,
@@ -1172,18 +1177,19 @@ local function render_markdown(environment, books, results)
     add("- **CSS**：合成 " .. environment.css_segments .. " 条 entries，selector 采用生产写法"
         .. "（`DocFragment[Source=\"…\"] > body > div:nth-of-type(n) > p:nth-of-type(n)`，"
         .. "约 1% 为列表父项的 `… > ol:nth-of-type(1)::before`，各生成 3 条规则）；"
-        .. "每次 `Overlay.clearCssCache()` 后 `Overlay.buildCss`。fallback 有两个夹具："
+        .. "每次 `Overlay.clearCssCache()` + `Overlay.clearEntriesCache()` 后 "
+        .. "`Overlay.buildCss`（冷构建包含 entries 解码）。fallback 有两个夹具："
         .. "① §15.4 口径的「3,000 段分给三家」（1,000/1,000/1,000，selector 互不相交，"
         .. "合并后 3,000 条规则）；② 三家都翻完整本（各 3,000 条，9,000 条加载、"
         .. "合并后仍是 3,000 条规则），这是存储与 JSON 解码的最坏形态，只报数不判定；"
         .. "三家各翻不同段落会得到 9,000 条规则，那等价于一本 9,000 段的书，不在 3,000 段口径内。"
         .. "「entries 读取」是同一份文件的 JSON 解码 + 去重；「CSS 命中」是 entries 落盘超过 "
-        .. "3 秒后同参数再调用（阅读中翻页/重绘的稳态）。注意 `build_css_v3` 在参数"
-        .. "（颜色/字号/服务）变化时会重新解析 entries，所以改字号/切服务属于「冷」这一列。"
+        .. "3 秒后同参数再调用（阅读中翻页/重绘的稳态）。注意本表的「冷构建」在清掉解析缓存后"
+        .. "测量，包含解码；生产中改字号/切服务命中解析缓存，约 112 ms（`--overlay`，见 §7）。"
         .. "同一份 entries 拆成三份后 JSON 解析会明显变快（LuaJSON 1.3.5 的大文档开销），"
         .. "因此「三服务均分」行低于单 provider 行是文件布局差异，不代表 fallback 更快。"
         .. "CSS 夹具与书内容无关；同轮不同书之间的差异与夹具无关，判定按整轮最大值。"
-        .. "本表的冷构建包含 entries 解码（真机约 450 ms），不能直接对照 200 ms；"
+        .. "本表的冷构建包含 entries 解码（真机约 0.5 s），不能直接对照 200 ms；"
         .. "entries 命中后的样式重建请用 `--overlay` 测（真机约 112 ms）。")
     add("- **导入**：`Store.importResult` 全链路（书锁、SQLite 事务、entries/manifest/signal "
         .. "写入）；每次前清空该书 overlay 目录与 DB 行，但复用同一个基准库（WAL 与页缓存是热的），"
@@ -1302,14 +1308,37 @@ if opts.overlay then
         local css = Overlay.buildCss(dir, options_table)
         return (clock() - started) * 1000, css
     end
-    Overlay.clearCssCache()
-    Overlay.clearEntriesCache()
+    -- Same rule as the rest of the tool: no single reading becomes a
+    -- conclusion.  Cold clears both caches before every run; warm changes the
+    -- colour so the CSS key misses while the parsed entries stay cached; the
+    -- hit phase primes one option table and rebuilds it repeatedly.
+    local runs = opts.runs
+    local cold, warm, hit = {}, {}, {}
+    local cold_css, warm_css, hit_css
     local before = Overlay.cacheStats()
-    local cold_ms, cold_css = timed(options("#666666"))
+    for _ = 1, runs do
+        Overlay.clearCssCache()
+        Overlay.clearEntriesCache()
+        local ms, css = timed(options("#666666"))
+        cold[#cold + 1] = ms
+        cold_css = css
+    end
     local after_cold = Overlay.cacheStats()
-    local warm_ms, warm_css = timed(options("#4d4d4d"))
+    for index = 1, runs do
+        -- Distinct colours keep the stylesheet key cold (17, 34, ... never
+        -- repeat for the default five runs).
+        local ms, css = timed(options(string.format("#%02x4d4d", (index * 17) % 256)))
+        warm[#warm + 1] = ms
+        warm_css = css
+    end
     local after_warm = Overlay.cacheStats()
-    local hit_ms, hit_css = timed(options("#4d4d4d"))
+    local hit_options = options("#4d4dff")
+    Overlay.buildCss(dir, hit_options)
+    for _ = 1, runs do
+        local ms, css = timed(hit_options)
+        hit[#hit + 1] = ms
+        hit_css = css
+    end
     local after_hit = Overlay.cacheStats()
     local entries_size = lfs.attributes(Overlay.entriesPath(dir, provider), "size") or 0
     print(string.format("overlay: %s", dir))
@@ -1317,20 +1346,26 @@ if opts.overlay then
         provider, tostring(fallback), chapter and tostring(chapter) or "all",
         fmt_kb(entries_size)))
     print("")
-    print("| 场景 | 耗时 | 规则 | CSS |")
+    print(string.format("| 场景（%d 次中位数） | 耗时 | 规则 | CSS |", runs))
     print("| --- | --- | --- | --- |")
     print(string.format("| 冷构建（清 CSS + entries 缓存） | %s | %d | %s |",
-        fmt_ms(cold_ms), rule_count(cold_css), fmt_kb(#cold_css)))
+        fmt_ms(median(cold)), rule_count(cold_css), fmt_kb(#cold_css)))
     print(string.format("| 样式变化重建（entries 命中） | %s | %d | %s |",
-        fmt_ms(warm_ms), rule_count(warm_css), fmt_kb(#warm_css)))
+        fmt_ms(median(warm)), rule_count(warm_css), fmt_kb(#warm_css)))
     print(string.format("| 同参数命中 | %s | %d | %s |",
-        fmt_ms(hit_ms), rule_count(hit_css), fmt_kb(#hit_css)))
+        fmt_ms(median(hit)), rule_count(hit_css), fmt_kb(#hit_css)))
     print("")
-    print(string.format("entries 解码：冷 %d、样式重建 %d、同参数 %d；命中 %d 次",
+    print("样本：冷 " .. fmt_samples(cold))
+    print("      暖 " .. fmt_samples(warm))
+    print("      命中 " .. fmt_samples(hit))
+    print(string.format("entries：冷 解码 %d / 命中 %d；暖 解码 %d / 命中 %d；命中段 解码 %d / 命中 %d"
+        .. "（命中段的 1 次来自预热；fallback 时每个 provider 各算一次）",
         after_cold.entries_loads - before.entries_loads,
+        after_cold.entries_hits - before.entries_hits,
         after_warm.entries_loads - after_cold.entries_loads,
+        after_warm.entries_hits - after_cold.entries_hits,
         after_hit.entries_loads - after_warm.entries_loads,
-        after_hit.entries_hits - before.entries_hits))
+        after_hit.entries_hits - after_warm.entries_hits))
     print(string.format("CSS：构建 %d、同参数命中 %d",
         after_hit.css_builds - before.css_builds,
         after_hit.css_hits - before.css_hits))
