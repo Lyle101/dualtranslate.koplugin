@@ -1127,7 +1127,8 @@ local function render_markdown(environment, books, results)
         .. "fallback 三家均分 %d 段 %s（目标 < 500 ms，%s）；三家各持 %d 条"
         .. "（%d 条加载）%s（无目标）。分解：entries 读取（JSON 解码 + 去重）%s，"
         .. "同参数命中 %s——阅读中重绘不贵；解码只在冷构建/导入后付一次，"
-        .. "改字号/切服务由预编译模板替换（`--overlay` 32.3 ms），冷启动 56.2 ms。",
+        .. "改字号/换颜色/换字体由预编译模板替换（`--overlay` 32.3 ms）；"
+        .. "切换显示服务会换模板键、重建一次（约 0.3–0.85 s），冷启动 56.2 ms。",
         fmt_range(css_single_low, css_single_high), css_single_status,
         environment.css_segments,
         fmt_range(css_fallback_low, css_fallback_high), css_fallback_status,
@@ -1185,8 +1186,9 @@ local function render_markdown(environment, books, results)
         .. "三家各翻不同段落会得到 9,000 条规则，那等价于一本 9,000 段的书，不在 3,000 段口径内。"
         .. "「entries 读取」是同一份文件的 JSON 解码 + 去重；「CSS 命中」是 entries 落盘超过 "
         .. "3 秒后同参数再调用（阅读中翻页/重绘的稳态）。注意本表的「冷构建」在清掉解析缓存后"
-        .. "测量，包含解码；生产中改字号/切服务由 `css-template.css` 替换样式，"
-        .. "约 32.3 ms（`--overlay`，见 §7）。"
+        .. "测量，包含解码；生产中改字号/换颜色/换字体由 `css-template.css` 替换样式"
+        .. "（约 32.3 ms，`--overlay` 见 §7）；切换显示服务会换模板键、重建一次"
+        .. "（约 0.3–0.85 s）。"
         .. "同一份 entries 拆成三份后 JSON 解析会明显变快（LuaJSON 1.3.5 的大文档开销），"
         .. "因此「三服务均分」行低于单 provider 行是文件布局差异，不代表 fallback 更快。"
         .. "CSS 夹具与书内容无关；同轮不同书之间的差异与夹具无关，判定按整轮最大值。"
