@@ -2439,8 +2439,9 @@ SSH 直连、MCP elicitation、自动刷新作为第二阶段增强。这样即�
 > 设计层面的选择已上移到 5.4（D1…D13），这里只列需要外部条件或产品确认的问题；与 3.5 非目标重复的选项不再重复列出。
 >
 > **3.2.2 状态**：Q1/Q2 已解决（SSH 双 key 与 elicitation 已在真机联调）；Q4 采用默认口径
-> （当前书 + 当前目标语言）；Q6 不做（整书流程不用旧表）；Q7 关闭（按章 CSS 已按 D14 删除，
-> ndjson 实测比整份解码更慢）。**Q5 仍未做**：`Mcp.exportJob` 会写
+> （当前书 + 当前目标语言）；Q6 不做（整书流程不用旧表）；Q7 暂不评估（ndjson 实测比整份
+> 解码更慢，entries 解析缓存 + 模板已把 3,133 段冷启动降到 56 ms，10k+ 段尚未测；按章 CSS
+> 另按 D14 删除）。**Q5 仍未做**：`Mcp.exportJob` 会写
 > `options.glossary` / `style_guide`，但导出入口没有传入，`meta.json`、`dtctl job-status`
 > 与 PC 的 `dt_get_job` 也都没有返回 options，Agent 读不到；要做成「按书编辑 → 导出注入 →
 > PC 可读」三件事，缺一不可。Q3 仍不做。
