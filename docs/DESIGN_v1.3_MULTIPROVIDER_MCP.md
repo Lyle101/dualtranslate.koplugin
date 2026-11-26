@@ -1163,6 +1163,13 @@ visible | color | size | font_family
 - `clearCssCache` 只清进程内 CSS；entries 缓存与模板缓存独立失效。模板命中时不再调用
   `loadEntries`；`--overlay` 的四段数据见 PERF §7。
 - 按章 CSS 过滤已删除（D14）：跨章换表与内存开销不划算，全书模板替换已足够。
+- 磁盘回收：读取模板时 touch mtime 作为「最近使用」；开书 10 s 后扫描
+  `cache/dualtranslate/books/`，删除 30 天未使用的模板，再按 50 MB 总量上限从最旧
+  开始删。当前书跳过，只删 `css-template.css`，不动 manifest/entries；每进程 6 h
+  最多扫描一次，每轮最多删 20 份（避免一次 unlink 太多卡住 UI）；未删完的下次开书
+  且距上次 ≥6h 后继续，同一会话不追赶。被删的书每次重开付一次冷构建（约 0.84 s）；
+  1.2 MB 的重书超过约 41 本时，
+  50 MB 上限会让最旧的那本周期性重建——这是总量上限与只留一份模板的取舍。
 - 用户手动切换 `display_provider` 时，除写 manifest 外还清空进程内 `css_cache`，保证立即生效。
 - `css_cache` 的容量策略同步调整：**每书 1 条 + 全局总大小上限 8 MB**，超出按 LRU 淘汰。当前「16 条 × 每条约 1–3 MB」的写法在 fallback 打开时会到 30–50 MB（见 15.4）。
 
@@ -2267,6 +2274,7 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 | `mcp_parts_test.lua` | 长段 part 切分与回填：缺 part 不写 entry、拼回顺序、parent 计数 |
 | `chapter_complete_test.lua` | 0 候选章节计入 `chapters`；`complete` 可达 |
 | `overlay_revision_test.lua` | entries revision 与 manifest 不同步时 CSS 缓存必须失效 |
+| `template_gc_test.lua` | CSS 模板过期/总量上限/当前书/单轮上限/节流/符号链接边界 |
 | `lock_test.lua` | 并发持锁、stale 超时、`fn` 抛错后解锁 |
 
 ### 15.2 MCP Server 测试（Python）

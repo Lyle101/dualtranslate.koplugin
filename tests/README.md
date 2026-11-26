@@ -16,6 +16,7 @@
     lua tests/overlay_v3_test.lua # P1-b：manifest/entries 读写 / buildCss v3 / 迁移分支
     lua tests/overlay_entries_cache_test.lua # entries 解析缓存：命中 / save/delete/mtime 失效 / 预算淘汰
     lua tests/overlay_revision_test.lua # revision 缓存键 / 模板替换 / 命中与失效 / 8MB LRU
+    lua tests/template_gc_test.lua # 模板磁盘回收：过期 / 50MB 上限 / 跳过当前书 / 节流
     lua tests/store_delete_test.lua # P1-b：真实 SQLite 的按 provider 删除 / intent 收尾 / reconcile
     lua tests/p1c_switch_test.lua # P1-c：按服务切换主链（State/PageTrans/Reader v3/Epub checkpoint/菜单）
     lua tests/context_test.lua    # P1-c：context 透传契约（Epub → translate(_batch) / 缓存 meta / 只切分一次）
@@ -55,7 +56,7 @@ reader 进程，macOS 的 SDL 版连 `socketutil → device` 都过不去（`SDL
   它们已收进 `.gitignore`（不进 `git status`）；想跑完连目录都不留，先在 shell 里
   `export KO_HOME=/tmp/dt_kohome`（datastorage 优先读这个变量）。
 - migration_test.lua / store_delete_test.lua / p1c_switch_test.lua 用真实 SQLite；lock_test.lua /
-  overlay_v3_test.lua / overlay_revision_test.lua / outline_test.lua 用真实 lfs + json。
+  overlay_v3_test.lua / overlay_revision_test.lua / template_gc_test.lua / outline_test.lua 用真实 lfs + json。
   均依赖 KOReader 自带库（默认 /Applications/KOReader.app/Contents/koreader，可用 KO_ROOT 覆盖），
   需用 luajit 运行，缺失时打印 SKIP 并退出 0；
   checkpoint 冲突用例要等 busy_timeout 重试，migration_test 整体约 20 秒。

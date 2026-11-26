@@ -796,6 +796,29 @@ function dualtranslate:onReaderReady()
     UIManager:nextTick(function()
         self:refreshDocumentStyles()
     end)
+    -- Templates are ~1.2 MB per book and never expire on their own.  Record
+    -- that this book was opened even when translations are hidden (no template
+    -- read), then scan for old ones once per 6 h.  The current book is always
+    -- skipped; the 10 s delay keeps cleanup away from the first render.
+    local path = self.ui and self.ui.document and self.ui.document.file
+    if not path then return end
+    local current_dir = self:getBookCacheDirectory(path)
+    if Overlay.touchCssTemplate then Overlay.touchCssTemplate(current_dir) end
+    UIManager:scheduleIn(10, function()
+        local ok, err = pcall(function()
+            local root = require("datastorage"):getDataDir()
+                .. "/cache/dualtranslate/books"
+            local report = Overlay.reclaimCssTemplates(root, current_dir)
+            if report and (report.removed or 0) > 0 then
+                logger.info(string.format(
+                    "dualtranslate: reclaimed %d CSS template(s), %d KB",
+                    report.removed, math.floor((report.freed_bytes or 0) / 1024)))
+            end
+        end)
+        if not ok then
+            logger.warn("dualtranslate: CSS template reclaim failed:", tostring(err))
+        end
+    end)
 end
 
 -- Restore the saved translation layer while CREngine is still loading its

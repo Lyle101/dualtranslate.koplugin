@@ -346,6 +346,17 @@ local TEMPLATE_KIND_COLOR = 1
 local TEMPLATE_KIND_SIZE = 2
 local TEMPLATE_KIND_FONT = 3
 
+-- On-disk templates live next to each book's entries (~1.2 MB each), so a
+-- large library can pin tens of megabytes forever.  Reclaim templates that
+-- have not been used for 30 days, then enforce a 50 MB total cap (oldest
+-- first); the book currently open is never touched.  Usage updates mtime when
+-- a template is read, so the age is "last opened", not "last written".
+local TEMPLATE_GC_MAX_AGE_DAYS = 30
+local TEMPLATE_GC_MAX_BYTES = 50 * 1024 * 1024
+local TEMPLATE_GC_MAX_REMOVE = 20
+local TEMPLATE_GC_INTERVAL = 6 * 60 * 60
+local last_template_gc = 0
+
 -- Only the most recent book is kept: this is the hot path for repeated font
 -- size changes, and one extra 1.2 MB string is cheaper than re-reading and
 -- re-indexing the file every time.
@@ -424,6 +435,28 @@ local function read_template(dir)
     }
 end
 
+-- mtime is the template's last-use marker for the reclaimer below.  Failure
+-- (read-only card) is harmless: the file simply ages out sooner.
+local function touch_template(dir)
+    if not lfs.touch then return false end
+    local path = template_path(dir)
+    -- Only touch an existing template (defensive: keep some lfs builds from
+    -- creating a 0-byte placeholder on touch).
+    if not lfs.attributes(path, "size") then return false end
+    local now = os.time()
+    return pcall(lfs.touch, path, now, now)
+end
+
+-- Record "this book was opened" for the reclaimer, even when translations are
+-- hidden and no template is read.  A missing template remains missing.
+function Overlay.touchCssTemplate(dir)
+    if not dir or dir == "" then return false end
+    if dir:match("manifest%.json$") then
+        dir = dir:match("^(.*)/manifest%.json$") or dir
+    end
+    return touch_template(normalize_dir(dir))
+end
+
 local function load_template(dir, key)
     if template_cache.dir == dir and template_cache.key == key and template_cache.template then
         return template_cache.template
@@ -434,6 +467,7 @@ local function load_template(dir, key)
     local saved_key, template = read_template(dir)
     if saved_key == key then
         template_cache = { dir = dir, key = key, template = template }
+        touch_template(dir)
         return template
     end
     return nil
@@ -514,6 +548,108 @@ local function apply_style(template, color, size, font_css)
     end
     if previous <= #data then parts[#parts + 1] = data:sub(previous) end
     return table.concat(parts)
+end
+
+-- Reclaim on-disk templates.  Two independent limits:
+--   1) templates not read for max_age_days;
+--   2) total bytes above max_bytes, deleting the least recently used first.
+-- The current book is skipped, and only the exact css-template.css file is
+-- removed: entries and manifest stay intact.  Throttled per process unless
+-- opts.force is set.  Returns a report instead of failing the caller.
+function Overlay.reclaimCssTemplates(books_root, current_dir, opts)
+    opts = opts or {}
+    if not books_root or books_root == "" then
+        return { skipped = "no_root" }
+    end
+    books_root = normalize_dir(books_root)
+    if books_root ~= "books" and not books_root:match("/books$") then
+        return { skipped = "not_books" }
+    end
+    local now = os.time()
+    local interval = tonumber(opts.interval) or TEMPLATE_GC_INTERVAL
+    if not opts.force and last_template_gc > 0 and now - last_template_gc < interval then
+        return { skipped = "throttled" }
+    end
+    current_dir = current_dir and normalize_dir(current_dir) or nil
+    local max_age = (tonumber(opts.max_age_days) or TEMPLATE_GC_MAX_AGE_DAYS) * 86400
+    local max_bytes = tonumber(opts.max_bytes) or TEMPLATE_GC_MAX_BYTES
+    local max_remove = tonumber(opts.max_remove) or TEMPLATE_GC_MAX_REMOVE
+    local candidates = {}
+    local removed, freed, deferred = 0, 0, false
+    local ok, iterator, state = pcall(lfs.dir, books_root)
+    if not ok or not iterator then
+        return { skipped = "no_books_dir" }
+    end
+    local function entry_mode(path)
+        -- Current KOReader builds ship symlinkattributes.  If an older build
+        -- lacks it, this follows links; the books root is still the same
+        -- internal cache path, so the fallback only loses link hardening.
+        if lfs.symlinkattributes then return lfs.symlinkattributes(path, "mode") end
+        return lfs.attributes(path, "mode")
+    end
+    for name in iterator, state do
+        if name ~= "." and name ~= ".." then
+            local dir = books_root .. "/" .. name
+            -- symlinkattributes: a symlinked cache dir or template must never
+            -- lead the reclaimer outside the books root.
+            if entry_mode(dir) == "directory" then
+                local path = dir .. "/" .. CSS_TEMPLATE_FILE
+                if entry_mode(path) == "file" then
+                    local mtime = lfs.attributes(path, "modification")
+                    local size = lfs.attributes(path, "size")
+                    if mtime and size then
+                        local current = current_dir ~= nil and normalize_dir(dir) == current_dir
+                        if not current and mtime < now - max_age then
+                            if removed < max_remove and os.remove(path) then
+                                removed = removed + 1
+                                freed = freed + size
+                            else
+                                if removed >= max_remove then deferred = true end
+                                candidates[#candidates + 1] = {
+                                    path = path, mtime = mtime, size = size, current = current,
+                                }
+                            end
+                        else
+                            candidates[#candidates + 1] = {
+                                path = path, mtime = mtime, size = size, current = current,
+                            }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local total, kept = 0, #candidates
+    for _, item in ipairs(candidates) do total = total + item.size end
+    if total > max_bytes then
+        table.sort(candidates, function(a, b)
+            if a.mtime == b.mtime then return a.path < b.path end
+            return a.mtime < b.mtime
+        end)
+        for _, item in ipairs(candidates) do
+            if total <= max_bytes then break end
+            if not item.current then
+                if removed >= max_remove then
+                    deferred = true
+                    break
+                end
+                if os.remove(item.path) then
+                    removed = removed + 1
+                    freed = freed + item.size
+                    total = total - item.size
+                    kept = kept - 1
+                end
+            end
+        end
+    end
+    last_template_gc = now
+    return {
+        removed = removed,
+        freed_bytes = freed,
+        total_bytes = total,
+        kept = kept,
+        deferred = deferred,
+    }
 end
 
 -- LuaJSON emits table keys in hash order, so revision is sometimes before the
@@ -1116,7 +1252,10 @@ function Overlay.warmCssTemplate(dir, entries_doc, entries_provider)
     end
     local key = template_key(dir, manifest, provider, fallback, selected, revisions)
     if not key then return false end
-    if read_template_key(dir) == key then return true end
+    if read_template_key(dir) == key then
+        touch_template(dir)
+        return true
+    end
     local body = render_v3(dir, selected, docs,
         TEMPLATE_COLOR, TEMPLATE_SIZE, TEMPLATE_FONT_CSS)
     local index, data, count, data_len = encode_template(body)

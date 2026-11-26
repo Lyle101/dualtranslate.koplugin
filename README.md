@@ -127,7 +127,7 @@ command=".../tools/dtctl.sh rpc",no-pty,...            ssh-ed25519 AAAA... dualt
 
 ## 数据位置
 
-- 译文数据：KOReader 数据目录 `cache/dualtranslate/books/<hash>/` 下的 `manifest.json`（服务列表、完成度、显示选择）、`entries/<provider>.json`（各服务的译文条目）与 `css-template.css`（预编译的样式规则，约 1.2 MB/书，可安全删除，下次打开/导入会自动重建）；旧版 `overlay.json` 迁移后保留为 `overlay.v2.bak`
+- 译文数据：KOReader 数据目录 `cache/dualtranslate/books/<hash>/` 下的 `manifest.json`（服务列表、完成度、显示选择）、`entries/<provider>.json`（各服务的译文条目）与 `css-template.css`（预编译的样式规则，约 1.2 MB/书，可安全删除，下次打开/导入会自动重建；打开书后会自动回收 30 天未使用或总量超过 50 MB 的旧模板，跳过当前书，每轮最多删 20 份，未删完的下次开书且距上次 ≥6h 继续；活跃大书超过约 41 本时可能周期性重建）；旧版 `overlay.json` 迁移后保留为 `overlay.v2.bak`
 - 译文数据库：KOReader 数据目录 `dualtranslate_cache.sqlite3`（WAL 模式）
 - MCP 任务：`cache/dualtranslate/mcp/jobs/<job_id>/`（`job.json` 含原文、`state.json`、`result.json`）
 - 进度文件：`cache/dualtranslate/progress_*.txt`
@@ -159,6 +159,7 @@ lua tests/mcp_job_test.lua      # MCP 任务导出（需 KO_ROOT）
 lua tests/mcp_import_test.lua   # MCP 结果导入（需真实 SQLite）
 lua tests/mcp_menu_test.lua     # MCP 菜单与 reload seq
 lua tests/dtctl_test.lua        # headless CLI（真实子进程）
+lua tests/template_gc_test.lua  # CSS 模板磁盘回收（过期/50MB 上限/当前书/节流）
 
 # PC 端 MCP Server 测试
 cd mcp-server && pip install -e ".[dev]" && pytest
