@@ -7,13 +7,15 @@
 --
 -- 口径：outline / css / import 各跑 --runs 次（默认 5）取中位数；anchor 每个 run
 -- 解析一个不同章节（共 --runs 章）后取中位数。不拿单次读数下结论。
+-- 注意：CSS 合成夹具是上界（高度规律的字符串会放大渲染开销，实测约 5 倍）；
+-- 真实 overlay 在 entries 解析缓存命中后的重建约 112 ms，用 --overlay 直接测。
 -- 目标是 §15.4 的 Kindle 真机 P50 参考值，本脚本只负责测量与判定。
 --
 -- 真机（KOReader 自带 luajit，必须用 KO_ROOT 下的 libs）：
 --   cd /mnt/us/koreader
 --   KO_ROOT=/mnt/us/koreader DT_PLUGIN=/mnt/us/koreader/plugins/dualtranslate.koplugin \
 --     ./luajit /mnt/us/koreader/plugins/dualtranslate.koplugin/tools/bench.lua \
---     --device "Kindle PW2" \
+--     --device "Kindle Voyage" \
 --     --book "/mnt/us/documents/Z-Lib/吴军作品.epub" \
 --     --book "/mnt/us/documents/programming/C++编程思想.epub" \
 --     --book "/mnt/us/documents/electron/PHP和MySQL Web开发(原书第4版).epub" \
@@ -28,9 +30,14 @@
 -- 先看有哪些书、形状如何（不跑基准）：
 --   luajit tools/bench.lua --list --list-dir /mnt/us/documents
 --
+-- 直接测真实缓存目录（生产值，不受合成夹具影响）：
+--   luajit tools/bench.lua --overlay \
+--     /mnt/us/koreader/cache/dualtranslate/books/<hash> [--provider ID] [--chapter N]
+--
 -- 参数：--book EPUB（可重复）| --runs N | --segments N | --css-segments N
 --       --only outline,css,import,anchor | --work DIR | --md PATH | --json PATH
---       --device NAME（默认读 DT_DEVICE）| --list [--list-dir DIR] | --keep | --help
+--       --device NAME（默认读 DT_DEVICE）| --list [--list-dir DIR]
+--       --overlay DIR [--provider ID] [--chapter N] | --keep | --help
 --
 -- 安全：只写 --work 目录（默认设备 /mnt/us/dtbench，桌面 /tmp/dt_bench），
 -- 目录里有 .dtbench 标记才会清理 data/ 与 css/；--work 与 KO_ROOT 重叠会被拒绝。
@@ -72,6 +79,9 @@ local opts = {
     list_dir = nil,
     list = false,
     keep = false,
+    overlay = nil,
+    provider = nil,
+    chapter = nil,
 }
 do
     local index = 1
@@ -97,12 +107,16 @@ do
         elseif item == "--device" then opts.device = next_value(item)
         elseif item == "--list" then opts.list = true
         elseif item == "--list-dir" then opts.list_dir = next_value(item)
+        elseif item == "--overlay" then opts.overlay = next_value(item)
+        elseif item == "--provider" then opts.provider = next_value(item)
+        elseif item == "--chapter" then opts.chapter = tonumber(next_value(item))
         elseif item == "--keep" then opts.keep = true
         elseif item == "--help" or item == "-h" then
             print("用法: luajit tools/bench.lua [--book EPUB]... [--runs N] [--segments N]")
             print("      [--css-segments N] [--only outline,css,import,anchor] [--work DIR]")
             print("      [--md PATH] [--json PATH] [--device NAME] [--keep]")
             print("      luajit tools/bench.lua --list [--list-dir DIR]")
+            print("      luajit tools/bench.lua --overlay DIR [--provider ID] [--chapter N]")
             os.exit(0)
         else
             io.stderr:write("忽略未知参数: " .. tostring(item) .. "\n")
@@ -177,6 +191,7 @@ PLUGIN = absolute(PLUGIN):gsub("/+$", "")
 package.path = PLUGIN .. "/?.lua;" .. package.path
 opts.md = absolute(opts.md)
 opts.json = absolute(opts.json)
+opts.overlay = absolute(opts.overlay)
 if opts.md == "" then opts.md = nil end
 if opts.json == "" then opts.json = nil end
 for position, book in ipairs(opts.books) do opts.books[position] = absolute(book) end
@@ -353,6 +368,10 @@ local function fmt_samples(samples)
     local parts = {}
     for _, value in ipairs(sorted) do parts[#parts + 1] = fmt_ms(value) end
     return table.concat(parts, " / ")
+end
+
+local function rule_count(css)
+    return select(2, tostring(css or ""):gsub("{", ""))
 end
 
 local function outline_cache_path(book_path)
@@ -547,10 +566,12 @@ local function bench_css(dir, provider, fallback, backdated)
         provider = provider,
         fallback = fallback,
     }
-    -- Entry decode alone: this is the part the CSS cache cannot skip when the
-    -- option key changes (see build_css_v3), so it is reported on its own.
+    -- Entry decode alone, measured with both caches cleared each time: this
+    -- is the worst case a first build after an import still pays, and the part
+    -- the parsed-entries cache removes from later style rebuilds.
     local load_samples = {}
     for _ = 1, opts.runs do
+        Overlay.clearEntriesCache()
         collectgarbage("collect")
         local started = clock()
         local doc = Overlay.loadEntries(dir, provider)
@@ -1161,7 +1182,9 @@ local function render_markdown(environment, books, results)
         .. "（颜色/字号/服务）变化时会重新解析 entries，所以改字号/切服务属于「冷」这一列。"
         .. "同一份 entries 拆成三份后 JSON 解析会明显变快（LuaJSON 1.3.5 的大文档开销），"
         .. "因此「三服务均分」行低于单 provider 行是文件布局差异，不代表 fallback 更快。"
-        .. "CSS 夹具与书内容无关；同轮不同书之间的差异与夹具无关，判定按整轮最大值。")
+        .. "CSS 夹具与书内容无关；同轮不同书之间的差异与夹具无关，判定按整轮最大值。"
+        .. "本表的冷构建包含 entries 解码（真机约 450 ms），不能直接对照 200 ms；"
+        .. "entries 命中后的样式重建请用 `--overlay` 测（真机约 112 ms）。")
     add("- **导入**：`Store.importResult` 全链路（书锁、SQLite 事务、entries/manifest/signal "
         .. "写入）；每次前清空该书 overlay 目录与 DB 行，但复用同一个基准库（WAL 与页缓存是热的），"
         .. "不等价于空库首次导入。")
@@ -1175,39 +1198,42 @@ local function render_markdown(environment, books, results)
 end
 
 -- ---------------- main ----------------
-mkdir_p(opts.work)
-local marker = opts.work .. "/.dtbench"
-local known_work = read_file(marker) ~= nil
--- A pre-existing data/ or css/ that this tool did not create must never be
--- deleted by cleanup_work(); refuse the directory instead of trusting a
--- marker this very run would write.  A non-empty directory without the
--- marker is somebody else's (e.g. --work /mnt/us/documents), so refuse it too.
-for _, owned in ipairs({ "data", "css" }) do
-    if lfs.attributes(opts.work .. "/" .. owned, "mode") and not known_work then
-        io.stderr:write("拒绝 --work=" .. opts.work .. "：已存在 " .. owned
-            .. "/ 且没有 .dtbench 标记\n")
-        os.exit(2)
-    end
-end
-if not known_work then
-    local foreign = 0
-    local ok, iterator, state = pcall(lfs.dir, opts.work)
-    if ok and iterator then
-        for name in iterator, state do
-            if name ~= "." and name ~= ".." then foreign = foreign + 1 end
+-- Overlay mode reads an existing book cache and needs no scratch directory.
+if not opts.overlay then
+    mkdir_p(opts.work)
+    local marker = opts.work .. "/.dtbench"
+    local known_work = read_file(marker) ~= nil
+    -- A pre-existing data/ or css/ that this tool did not create must never be
+    -- deleted by cleanup_work(); refuse the directory instead of trusting a
+    -- marker this very run would write.  A non-empty directory without the
+    -- marker is somebody else's (e.g. --work /mnt/us/documents), so refuse it too.
+    for _, owned in ipairs({ "data", "css" }) do
+        if lfs.attributes(opts.work .. "/" .. owned, "mode") and not known_work then
+            io.stderr:write("拒绝 --work=" .. opts.work .. "：已存在 " .. owned
+                .. "/ 且没有 .dtbench 标记\n")
+            os.exit(2)
         end
     end
-    if foreign > 0 then
-        io.stderr:write("拒绝 --work=" .. opts.work .. "：目录非空且没有 .dtbench 标记\n")
+    if not known_work then
+        local foreign = 0
+        local ok, iterator, state = pcall(lfs.dir, opts.work)
+        if ok and iterator then
+            for name in iterator, state do
+                if name ~= "." and name ~= ".." then foreign = foreign + 1 end
+            end
+        end
+        if foreign > 0 then
+            io.stderr:write("拒绝 --work=" .. opts.work .. "：目录非空且没有 .dtbench 标记\n")
+            os.exit(2)
+        end
+    end
+    if not write_file(marker, "dualtranslate bench work dir\n") then
+        io.stderr:write("无法写 .dtbench 标记: " .. marker .. "\n")
         os.exit(2)
     end
+    mkdir_p(data_dir)
+    mkdir_p(data_dir .. "/cache/dualtranslate/outline")
 end
-if not write_file(marker, "dualtranslate bench work dir\n") then
-    io.stderr:write("无法写 .dtbench 标记: " .. marker .. "\n")
-    os.exit(2)
-end
-mkdir_p(data_dir)
-mkdir_p(data_dir .. "/cache/dualtranslate/outline")
 
 -- Remove only the fixtures this tool owns; the marker stops a mistyped --work
 -- from deleting an unrelated data/ or css/ directory.
@@ -1233,6 +1259,81 @@ if opts.list then
         end
     end
     cleanup_work()
+    os.exit(0)
+end
+
+-- Real overlay mode: production numbers, free of the synthetic fixture.
+-- Cold = both caches cleared; warm = only the style options changed, so the
+-- parsed entries doc must come from the new cache.
+if opts.overlay then
+    local dir = opts.overlay
+    local manifest = Overlay.loadManifest(dir)
+    if not manifest then
+        io.stderr:write("不是 v3 overlay 目录（缺 manifest.json）: " .. dir .. "\n")
+        os.exit(2)
+    end
+    local provider = opts.provider or manifest.display_provider
+    if not provider or not manifest.providers[provider] then
+        provider = nil
+        for pid in pairs(manifest.providers or {}) do
+            provider = pid
+            break
+        end
+    end
+    if not provider then
+        io.stderr:write("overlay 没有可用的 provider\n")
+        os.exit(2)
+    end
+    local chapter = tonumber(opts.chapter)
+    local fallback = manifest.display_fallback == true
+    local function options(color)
+        return {
+            translation_visible = true,
+            translation_color = color,
+            translation_size = "1em",
+            provider = provider,
+            fallback = fallback,
+            chapter_index = chapter,
+        }
+    end
+    local function timed(options_table)
+        collectgarbage("collect")
+        local started = clock()
+        local css = Overlay.buildCss(dir, options_table)
+        return (clock() - started) * 1000, css
+    end
+    Overlay.clearCssCache()
+    Overlay.clearEntriesCache()
+    local before = Overlay.cacheStats()
+    local cold_ms, cold_css = timed(options("#666666"))
+    local after_cold = Overlay.cacheStats()
+    local warm_ms, warm_css = timed(options("#4d4d4d"))
+    local after_warm = Overlay.cacheStats()
+    local hit_ms, hit_css = timed(options("#4d4d4d"))
+    local after_hit = Overlay.cacheStats()
+    local entries_size = lfs.attributes(Overlay.entriesPath(dir, provider), "size") or 0
+    print(string.format("overlay: %s", dir))
+    print(string.format("provider: %s  fallback=%s  chapter=%s  entries=%s",
+        provider, tostring(fallback), chapter and tostring(chapter) or "all",
+        fmt_kb(entries_size)))
+    print("")
+    print("| 场景 | 耗时 | 规则 | CSS |")
+    print("| --- | --- | --- | --- |")
+    print(string.format("| 冷构建（清 CSS + entries 缓存） | %s | %d | %s |",
+        fmt_ms(cold_ms), rule_count(cold_css), fmt_kb(#cold_css)))
+    print(string.format("| 样式变化重建（entries 命中） | %s | %d | %s |",
+        fmt_ms(warm_ms), rule_count(warm_css), fmt_kb(#warm_css)))
+    print(string.format("| 同参数命中 | %s | %d | %s |",
+        fmt_ms(hit_ms), rule_count(hit_css), fmt_kb(#hit_css)))
+    print("")
+    print(string.format("entries 解码：冷 %d、样式重建 %d、同参数 %d；命中 %d 次",
+        after_cold.entries_loads - before.entries_loads,
+        after_warm.entries_loads - after_cold.entries_loads,
+        after_hit.entries_loads - after_warm.entries_loads,
+        after_hit.entries_hits - before.entries_hits))
+    print(string.format("CSS：构建 %d、同参数命中 %d",
+        after_hit.css_builds - before.css_builds,
+        after_hit.css_hits - before.css_hits))
     os.exit(0)
 end
 

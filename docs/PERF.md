@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 设备 | Kindle Paperwhite 2 (PW2) |
+| 设备 | Kindle Voyage |
 | 内核 | Linux 3.0.35-lab126 armv7l |
 | KOReader | v2026.07.2-306-gb166eb5_2026-11-02_kindlepw2 |
 | LuaJIT | LuaJIT 2.1.1792588164 |
@@ -24,6 +24,11 @@
 | PHP和MySQL Web开发(原书第4版) | 6431 KB | 641 | 335 | 377 | ncx |
 
 ## 3. 结果
+
+> 注意：本节的 CSS 数字来自 3,000 条合成夹具（字符串高度规律）。同一台设备上，
+> 真实 overlay 的全书重建只要 112–126 ms（见 §7），合成夹具把渲染放大约 5 倍。
+> 因此 §3 的 CSS 行只作为回归基线与上界，不代表生产值；生产值请用
+> `tools/bench.lua --overlay <book-cache-dir>` 测。
 
 ### 吴军作品
 
@@ -105,3 +110,48 @@
 - **导入**：`Store.importResult` 全链路（书锁、SQLite 事务、entries/manifest/signal 写入）；每次前清空该书 overlay 目录与 DB 行，但复用同一个基准库（WAL 与页缓存是热的），不等价于空库首次导入。
 - **锚点页表**：`Epub.chapter_anchor_paths` 冷解析目录锚点最多的 5 个章节（各不同，3 槽 LRU 不会命中），中位数为单章成本；这是最坏单章，不是均匀抽样。CREngine 的 `getPageFromXPointer` 探测（每章 N 次）无法在 headless 复现，未计入。
 - **未覆盖**：章节选择器打开（< 1 s）、DB v3 迁移（100k 行 < 10 s）、内存增量（< 20 / 40 MB）、以及「相对旧版不劣化 20%」所需的历史基线——本次只记录绝对值。
+
+## 7. 按章 CSS 探针（P0，真机）
+
+> 这一节不是 `tools/bench.lua` 的输出：用一个临时探针在正在运行的阅读器里测得
+> （Kindle Voyage，KOReader 自带 luajit，JIT 开）。样本书：
+> *JavaScript for Impatient Programmers*（entries 1.2 MB、3,133 段、1,420 页）
+> 与 *Pride and Prejudice*（193 段、690 页，overlay 95 KB）。
+> 探针在 `setStyleSheet` 后显式 `getPageCount()` 强制分页，再用 `forceRePaint()`
+> 等一次整屏刷新结束，因此「重绘」列包含 e-ink 本身的开销。
+
+| 场景（JavaScript 书，章 8） | 章 CSS（56 条 / 21 KB） | 全书 CSS（3,133 条 / 1.18 MB） |
+| --- | --- | --- |
+| 冷构建（每次重新解码 entries） | 475.9 ms | 598.5 ms |
+| `setStyleSheet` | 8.5–9.9 ms | 25–28 ms |
+| `getPageCount()`（强制分页） | 0.0 ms | 0.0 ms |
+| 强制重绘（无样式基线 1.2–1.4 s，噪声大） | 1.18–1.41 s | 1.19 s |
+| 页数 / 当前页（重绘后再读一次） | 1420 → 1420 / 72 → 72 | 1420 → 1420 / 72 → 72 |
+| 进程 RSS | 289.9 → 386.2 MB（首次换表 +96 MB） | 再 +6 MB |
+
+*Pride and Prejudice* 的 overlay 只有 193 段，章 CSS 与全书 CSS 相同（95 KB）：
+构建 53–55 ms、`setStyleSheet` 11.8 ms、重绘 677 ms（与无样式变化的基线 677 ms 相同）。
+
+**加 entries 解析缓存后**（同一本书，`tools/bench.lua --overlay`）：
+
+| 场景 | 耗时 | 规则 |
+| --- | --- | --- |
+| 冷构建（清 CSS + entries 缓存） | 625.8 ms | 3,133 |
+| 样式变化重建（entries 命中） | **111.9 ms** | 3,133 |
+| 同参数命中 | 2.6 ms | 3,133 |
+
+读数含义：
+
+- **缓存前构建由 entries 解码主导**：章 CSS 只有 56 条也要 475.9 ms，全书 598.5 ms；
+  加上解析缓存后章构建降到 **8.2 ms**、全书 **111.9 ms**（进入 §15.4 的 200 ms 目标），
+  解码只在冷构建/导入后付一次。
+- **`setStyleSheet` 很便宜，且与表大小无关**（9 ms vs 26 ms）。
+- **没有观察到整书重排**：页数和当前页在重绘前后都是 1420 / 72；注意 `getPageCount()`
+  在重绘前读的是缓存（0.0 ms），结论以重绘后的读数为准。
+- **强制重绘 1.2–1.4 s 与 CSS 大小无关**，是 e-ink 首帧/整屏刷新的成本；真实翻页
+  本身也要付一次刷新，不能把这段全部算给 CSS。
+- **首次换表 RSS +96 MB，之后稳定**（386 → 392 MB）；512 MB 设备上仍需做
+  「关书后是否回落」的 A/B。
+- **按章 CSS 不是必需**：全书重建 111.9 ms 已达标，而按章还要在每次跨章时多付一次
+  换表（`setStyleSheet` + 首次换表内存），因此暂缓。
+- 版本串里的 `kindlepw2` 是构建名，Voyage 也用这个构建，不代表机型。

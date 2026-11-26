@@ -221,8 +221,80 @@ function Overlay.removeManifest(dir)
     return not Overlay.exists(dir .. "/manifest.json")
 end
 
+-- Parsed-entries cache: every style rebuild used to re-decode the whole
+-- entries file (452 ms for 1.2 MB on a Kindle Voyage), which dominated the
+-- "CSS build" number.  Keep the decoded document keyed by path + stat, with
+-- its own budget (the JSON text is a fair proxy for the decoded tables, and
+-- the 8 MB CSS budget does not cover them).  Writers invalidate explicitly
+-- because FAT32 mtime has ~2 s granularity.
+local entries_cache = {}
+local entries_order = {}
+local entries_total = 0
+local ENTRIES_CACHE_BYTES = 8 * 1024 * 1024
+local cache_stats = {
+    css_builds = 0, css_hits = 0,
+    entries_loads = 0, entries_hits = 0,
+}
+
+local function entries_cache_drop(path)
+    local cached = entries_cache[path]
+    if not cached then return end
+    entries_total = entries_total - cached.bytes
+    entries_cache[path] = nil
+    for index, key in ipairs(entries_order) do
+        if key == path then
+            table.remove(entries_order, index)
+            break
+        end
+    end
+end
+
+local function entries_cache_get(path, emtime, esize)
+    local cached = entries_cache[path]
+    if not cached then return nil end
+    if cached.emtime ~= emtime or cached.esize ~= esize then
+        entries_cache_drop(path)
+        return nil
+    end
+    for index, key in ipairs(entries_order) do
+        if key == path then
+            table.remove(entries_order, index)
+            break
+        end
+    end
+    table.insert(entries_order, 1, path)
+    cache_stats.entries_hits = cache_stats.entries_hits + 1
+    return cached.doc
+end
+
+local function entries_cache_store(path, emtime, esize, doc)
+    entries_cache_drop(path)
+    entries_cache[path] = {
+        emtime = emtime, esize = esize, bytes = esize, doc = doc,
+    }
+    entries_total = entries_total + esize
+    table.insert(entries_order, 1, path)
+    while entries_total > ENTRIES_CACHE_BYTES and #entries_order > 1 do
+        entries_cache_drop(table.remove(entries_order))
+    end
+end
+
+function Overlay.clearEntriesCache()
+    entries_cache = {}
+    entries_order = {}
+    entries_total = 0
+end
+
 function Overlay.loadEntries(dir, provider_id)
-    local data = read_json(Overlay.entriesPath(dir, provider_id))
+    local path = Overlay.entriesPath(dir, provider_id)
+    local emtime = lfs.attributes(path, "modification")
+    local esize = lfs.attributes(path, "size")
+    if emtime and esize then
+        local cached = entries_cache_get(path, emtime, esize)
+        if cached then return cached end
+    end
+    cache_stats.entries_loads = cache_stats.entries_loads + 1
+    local data = read_json(path)
     if not data or data.version ~= 3 or type(data.entries) ~= "table" then
         return nil
     end
@@ -230,6 +302,9 @@ function Overlay.loadEntries(dir, provider_id)
     -- reading through the same rule as the writers means an upgraded book stops
     -- drawing both layers before it is ever re-translated.
     data.entries = Overlay.dedupeEntries(data.entries)
+    if emtime and esize then
+        entries_cache_store(path, emtime, esize, data)
+    end
     return data
 end
 
@@ -255,7 +330,12 @@ function Overlay.saveEntries(dir, provider_id, entries_doc)
     local ok, encoded = pcall(JSON.encode, doc)
     if not ok or not encoded then return false end
     if not mkdir_p(dir .. "/entries") then return false end
-    return write_file(Overlay.entriesPath(dir, provider_id), encoded)
+    local path = Overlay.entriesPath(dir, provider_id)
+    if not write_file(path, encoded) then return false end
+    -- Same-second rewrites may keep mtime and size, so drop the parsed doc
+    -- here instead of relying on the stat check in loadEntries.
+    entries_cache_drop(path)
+    return true
 end
 
 function Overlay.deleteEntries(dir, provider_id)
@@ -263,6 +343,7 @@ function Overlay.deleteEntries(dir, provider_id)
     local base = dir .. "/entries/" .. provider_slug(provider_id)
     os.remove(base .. ".json")
     os.remove(base .. ".ndjson")
+    entries_cache_drop(base .. ".json")
     return not Overlay.exists(base .. ".json") and not Overlay.exists(base .. ".ndjson")
 end
 
@@ -479,6 +560,23 @@ function Overlay.clearCssCache()
     css_cache = {}
     cache_order = {}
     cache_total = 0
+    -- Callers use this after imports/deletes, where the parsed entries doc is
+    -- stale too; keeping it would silently serve the previous file's rows.
+    Overlay.clearEntriesCache()
+end
+
+-- Diagnostics for tests and tools: counters plus current cache occupancy.
+function Overlay.cacheStats()
+    return {
+        css_builds = cache_stats.css_builds,
+        css_hits = cache_stats.css_hits,
+        entries_loads = cache_stats.entries_loads,
+        entries_hits = cache_stats.entries_hits,
+        entries_bytes = entries_total,
+        entries_budget = ENTRIES_CACHE_BYTES,
+        css_bytes = cache_total,
+        css_budget = CSS_CACHE_BYTES,
+    }
 end
 
 local function rule_style(options)
@@ -591,13 +689,25 @@ end
 
 local function render_v3(dir, manifest, provider, entries_doc, fallback, options)
     local color, size, font_family_css = rule_style(options)
+    -- A reader only needs the chapter it is displaying: pinning the sheet to
+    -- one spine item keeps the rebuild at tens of rules instead of thousands.
+    -- Rows written before chapter_index existed must never disappear.
+    -- Not wired into the reader yet: full-book rebuild is 111.9 ms with the
+    -- parsed-entries cache (docs/PERF.md §7); the filter stays for the 3.3
+    -- per-chapter experiment and its tests.
+    local chapter = tonumber(options.chapter_index)
+    local function in_chapter(entry)
+        if not chapter then return true end
+        local index = tonumber(entry.chapter_index)
+        return index == nil or index == chapter
+    end
     local by_selector, order = {}, {}
     local function add_entries(doc)
         if not doc then return end
         for _, entry in ipairs(doc.entries or {}) do
             local selector = entry.selector
             if selector and selector ~= "" and entry.translation and entry.translation ~= ""
-                and by_selector[selector] == nil then
+                and in_chapter(entry) and by_selector[selector] == nil then
                 by_selector[selector] = entry
                 order[#order + 1] = selector
             end
@@ -657,15 +767,18 @@ local function build_css_v3(manifest_path, options)
         fallback and "1" or "0",
         tostring(emtime), tostring(esize),
         "1",
+        tostring(tonumber(options.chapter_index) or 0),
         tostring(options.translation_color or ""),
         tostring(options.translation_size or ""),
         tostring(options.translation_font_family or ""),
     }, "|")
     if cached and cached.key == key then
+        cache_stats.css_hits = cache_stats.css_hits + 1
         cache_touch(manifest_path)
         return cached.css
     end
     if not entries_doc then entries_doc = Overlay.loadEntries(dir, provider) end
+    cache_stats.css_builds = cache_stats.css_builds + 1
     local css = render_v3(dir, manifest, provider, entries_doc, fallback, options)
     cache_store(manifest_path, {
         key = key, css = css, size = #css,

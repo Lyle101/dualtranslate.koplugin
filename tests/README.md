@@ -15,6 +15,8 @@
     lua tests/lock_test.lua     # P1-b：书目录锁（互斥/超时/陈旧回收/异常释放）
     lua tests/overlay_v3_test.lua # P1-b：manifest/entries 读写 / buildCss v3 / 迁移分支
     lua tests/overlay_revision_test.lua # P1-b：revision 缓存键 / 命中与失效 / 8MB LRU
+    lua tests/overlay_entries_cache_test.lua # entries 解析缓存：命中 / save/delete/mtime 失效 / 预算淘汰
+    lua tests/overlay_chapter_test.lua # 按章 CSS 过滤：chapter_index / 历史行保留 / 缓存键按章隔离
     lua tests/store_delete_test.lua # P1-b：真实 SQLite 的按 provider 删除 / intent 收尾 / reconcile
     lua tests/p1c_switch_test.lua # P1-c：按服务切换主链（State/PageTrans/Reader v3/Epub checkpoint/菜单）
     lua tests/context_test.lua    # P1-c：context 透传契约（Epub → translate(_batch) / 缓存 meta / 只切分一次）

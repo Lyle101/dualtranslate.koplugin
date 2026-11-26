@@ -26,17 +26,16 @@ os.execute('mkdir -p "' .. ROOT .. '"')
 local script_dir = (arg and arg[0] or ""):match("^(.*)/") or "."
 local Overlay = dofile(script_dir .. "/../dualtranslate_overlay.lua")
 
--- 统计 entries 文件被打开的次数：命中缓存时不应重新解析大文件
-local real_open = io.open
-local open_counts = {}
-io.open = function(path, mode)
-    if type(path) == "string" then
-        open_counts[path] = (open_counts[path] or 0) + 1
-    end
-    return real_open(path, mode)
+-- 统计 loadEntries 的调用次数（按 provider）：CSS 命中时不应走到 entries
+-- 加载；解析缓存自身的命中/失效由 overlay_entries_cache_test 覆盖。
+local real_load = Overlay.loadEntries
+local load_counts = {}
+Overlay.loadEntries = function(dir, provider_id)
+    load_counts[provider_id] = (load_counts[provider_id] or 0) + 1
+    return real_load(dir, provider_id)
 end
-local function opens(path) return open_counts[path] or 0 end
-local function resetOpens() open_counts = {} end
+local function loads(provider_id) return load_counts[provider_id] or 0 end
+local function resetLoads() load_counts = {} end
 
 local case_no = 0
 local function newBook(label, providers, display)
@@ -89,13 +88,13 @@ do
         == Overlay.loadEntries(dir, "system").revision)
     age(epath)
 
-    resetOpens()
+    resetLoads()
     local css1 = Overlay.buildCss(mpath, VISIBLE)
-    check("首次构建读取 entries", opens(epath) >= 1)
+    check("首次构建读取 entries", loads("system") >= 1)
     check("首次构建含译文", css1:find("第一版", 1, true) ~= nil)
-    resetOpens()
+    resetLoads()
     local css2 = Overlay.buildCss(mpath, VISIBLE)
-    check("revision 一致且文件未变 → 命中", opens(epath) == 0, tostring(opens(epath)))
+    check("revision 一致且文件未变 → 命中", loads("system") == 0, tostring(loads("system")))
     check("命中返回相同 CSS", css2 == css1)
 
     -- 模拟导入：entries 先写（revision 领先），manifest 尚未更新。
@@ -103,9 +102,9 @@ do
     Overlay.saveEntries(dir, "system", { entries = { entry("p[1]", "第二版") } })
     check("entries revision 领先 manifest", Overlay.loadEntries(dir, "system").revision
         > Overlay.loadManifest(dir).revision)
-    resetOpens()
+    resetLoads()
     local css3 = Overlay.buildCss(mpath, VISIBLE)
-    check("revision 不一致 → 失效重建", opens(epath) >= 1)
+    check("revision 不一致 → 失效重建", loads("system") >= 1)
     check("重建后是新译文", css3:find("第二版", 1, true) ~= nil
         and css3:find("第一版", 1, true) == nil)
 
@@ -113,9 +112,9 @@ do
     Overlay.saveManifest(dir, Overlay.loadManifest(dir))
     age(epath)
     Overlay.buildCss(mpath, VISIBLE)
-    resetOpens()
+    resetLoads()
     local css4 = Overlay.buildCss(mpath, VISIBLE)
-    check("追平后命中", opens(epath) == 0 and css4 == css3)
+    check("追平后命中", loads("system") == 0 and css4 == css3)
 end
 
 -- ============================================================
@@ -128,14 +127,14 @@ do
     local epath = Overlay.entriesPath(dir, "system")
     age(epath)
     Overlay.buildCss(mpath, VISIBLE)
-    resetOpens()
+    resetLoads()
     Overlay.buildCss(mpath, VISIBLE)
-    check("追平且内容未变 → 命中", opens(epath) == 0)
+    check("追平且内容未变 → 命中", loads("system") == 0)
     -- 只写 manifest（如显示切换），entries 不动
     Overlay.saveManifest(dir, Overlay.loadManifest(dir))
-    resetOpens()
+    resetLoads()
     Overlay.buildCss(mpath, VISIBLE)
-    check("manifest revision 变化 → 重建", opens(epath) >= 1)
+    check("manifest revision 变化 → 重建", loads("system") >= 1)
 end
 
 -- ============================================================
@@ -150,34 +149,34 @@ do
     age(mcp_path)
 
     local css_sys = Overlay.buildCss(mpath, VISIBLE)
-    resetOpens()
+    resetLoads()
     local css_mcp = Overlay.buildCss(mpath, { translation_visible = true, provider = "mcp:gpt-5" })
-    check("切换 provider → 重建", opens(mcp_path) >= 1)
+    check("切换 provider → 重建", loads("mcp:gpt-5") >= 1)
     check("切换后只显示新 provider", css_mcp:find("MCP", 1, true) ~= nil
         and css_mcp:find("内置二", 1, true) ~= nil and css_sys ~= css_mcp)
 
-    resetOpens()
+    resetLoads()
     Overlay.buildCss(mpath, { translation_visible = true, provider = "mcp:gpt-5", fallback = false })
-    check("fallback 开关影响 key → 重建", opens(mcp_path) >= 1)
-    resetOpens()
+    check("fallback 开关影响 key → 重建", loads("mcp:gpt-5") >= 1)
+    resetLoads()
     Overlay.buildCss(mpath, { translation_visible = true, provider = "mcp:gpt-5", fallback = false })
-    check("fallback 关闭稳定命中", opens(mcp_path) == 0)
-    check("fallback 关闭不加载其他 entries", opens(sys_path) == 0, tostring(opens(sys_path)))
+    check("fallback 关闭稳定命中", loads("mcp:gpt-5") == 0)
+    check("fallback 关闭不加载其他 entries", loads("system") == 0, tostring(loads("system")))
 
-    resetOpens()
+    resetLoads()
     Overlay.buildCss(mpath, { translation_visible = true, translation_color = "#333333" })
-    check("颜色变化 → 重建", opens(sys_path) >= 1)
-    resetOpens()
+    check("颜色变化 → 重建", loads("system") >= 1)
+    resetLoads()
     Overlay.buildCss(mpath, { translation_visible = true, translation_size = "0.8em" })
-    check("字号变化 → 重建", opens(sys_path) >= 1)
-    resetOpens()
+    check("字号变化 → 重建", loads("system") >= 1)
+    resetLoads()
     Overlay.buildCss(mpath, { translation_visible = true, translation_font_family = "serif" })
-    check("字体变化 → 重建", opens(sys_path) >= 1)
+    check("字体变化 → 重建", loads("system") >= 1)
 
     Overlay.clearCssCache()
-    resetOpens()
+    resetLoads()
     Overlay.buildCss(mpath, VISIBLE)
-    check("clearCssCache 强制重建", opens(sys_path) >= 1)
+    check("clearCssCache 强制重建", loads("system") >= 1)
 end
 
 -- ============================================================
@@ -190,9 +189,9 @@ do
     age(epath)
     Overlay.buildCss(mpath, { translation_visible = true, translation_color = "#111111" })
     Overlay.buildCss(mpath, { translation_visible = true, translation_color = "#222222" })
-    resetOpens()
+    resetLoads()
     Overlay.buildCss(mpath, { translation_visible = true, translation_color = "#111111" })
-    check("每书 1 条：回到旧选项需重建", opens(epath) >= 1)
+    check("每书 1 条：回到旧选项需重建", loads("system") >= 1)
 
     -- 两本大书超过 8MB → LRU 淘汰先前的书
     local big = string.rep("字", 1800000) -- ~5.4MB UTF-8
@@ -206,16 +205,15 @@ do
     local css_a = Overlay.buildCss(mpath_a, VISIBLE)
     check("大书 CSS 生成", #css_a > 5 * 1024 * 1024, tostring(#css_a))
     Overlay.buildCss(mpath_b, VISIBLE)
-    resetOpens()
+    resetLoads()
     Overlay.buildCss(mpath_b, VISIBLE)
-    check("最近使用的书仍在缓存", opens(Overlay.entriesPath(dir_b, "system")) == 0)
-    resetOpens()
+    check("最近使用的书仍在缓存", loads("system") == 0)
+    resetLoads()
     Overlay.buildCss(mpath_a, VISIBLE)
-    check("超 8MB 淘汰最旧的书", opens(epath_a) >= 1)
+    check("超 8MB 淘汰最旧的书", loads("system") >= 1)
 end
 
 print(string.format("\n==== revision 缓存测试：%d 通过，%d 失败 ====", passed, failed))
-io.open = real_open
 if failed == 0 then
     os.execute('rm -rf "' .. ROOT .. '"')
 else
