@@ -127,7 +127,7 @@ command=".../tools/dtctl.sh rpc",no-pty,...            ssh-ed25519 AAAA... dualt
 
 ## 数据位置
 
-- 译文数据：KOReader 数据目录 `cache/dualtranslate/books/<hash>/` 下的 `manifest.json`（服务列表、完成度、显示选择）与 `entries/<provider>.json`（各服务的译文条目）；旧版 `overlay.json` 迁移后保留为 `overlay.v2.bak`
+- 译文数据：KOReader 数据目录 `cache/dualtranslate/books/<hash>/` 下的 `manifest.json`（服务列表、完成度、显示选择）、`entries/<provider>.json`（各服务的译文条目）与 `css-template.css`（预编译的样式规则，约 1.2 MB/书，可安全删除，下次打开/导入会自动重建）；旧版 `overlay.json` 迁移后保留为 `overlay.v2.bak`
 - 译文数据库：KOReader 数据目录 `dualtranslate_cache.sqlite3`（WAL 模式）
 - MCP 任务：`cache/dualtranslate/mcp/jobs/<job_id>/`（`job.json` 含原文、`state.json`、`result.json`）
 - 进度文件：`cache/dualtranslate/progress_*.txt`

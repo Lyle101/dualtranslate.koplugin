@@ -14,9 +14,8 @@
     lua tests/migration_test.lua # P1-a：真实 SQLite 的 v3 schema / v2→v3 迁移 / providers
     lua tests/lock_test.lua     # P1-b：书目录锁（互斥/超时/陈旧回收/异常释放）
     lua tests/overlay_v3_test.lua # P1-b：manifest/entries 读写 / buildCss v3 / 迁移分支
-    lua tests/overlay_revision_test.lua # P1-b：revision 缓存键 / 命中与失效 / 8MB LRU
     lua tests/overlay_entries_cache_test.lua # entries 解析缓存：命中 / save/delete/mtime 失效 / 预算淘汰
-    lua tests/overlay_chapter_test.lua # 按章 CSS 过滤：chapter_index / 历史行保留 / 缓存键按章隔离
+    lua tests/overlay_revision_test.lua # revision 缓存键 / 模板替换 / 命中与失效 / 8MB LRU
     lua tests/store_delete_test.lua # P1-b：真实 SQLite 的按 provider 删除 / intent 收尾 / reconcile
     lua tests/p1c_switch_test.lua # P1-c：按服务切换主链（State/PageTrans/Reader v3/Epub checkpoint/菜单）
     lua tests/context_test.lua    # P1-c：context 透传契约（Epub → translate(_batch) / 缓存 meta / 只切分一次）
@@ -31,6 +30,7 @@
     lua tests/mcp_menu_test.lua # P3-c：mcp_external 分流 / 隐私确认 / reload seq / 任务列表 / 批量删除
     lua tests/manage_menu_test.lua # 管理译文：删除后菜单保持打开、原地重建（keep_menu_open / refreshMenuPage）
     lua tests/dtctl_test.lua    # P3-d：headless CLI 的 stdout / 白名单 / forced command
+    lua tests/bench_test.lua    # tools/bench.lua：--work 拒绝 / --only 校验 / .dtbench 清理 / --overlay 冒烟
     lua tests/callcheck.lua     # 方法调用完整性
 
 默认全部离线。唯一联网的是可选冒烟（默认 SKIP 并退出 0）：
@@ -59,6 +59,9 @@ reader 进程，macOS 的 SDL 版连 `socketutil → device` 都过不去（`SDL
   均依赖 KOReader 自带库（默认 /Applications/KOReader.app/Contents/koreader，可用 KO_ROOT 覆盖），
   需用 luajit 运行，缺失时打印 SKIP 并退出 0；
   checkpoint 冲突用例要等 busy_timeout 重试，migration_test 整体约 20 秒。
+- bench_test.lua 还会用 KO_ROOT 下的 luajit 启动 `tools/bench.lua` 子进程，检查
+  `--work/--only/.dtbench/--overlay` 的 CLI 边界；它依赖 POSIX shell（`sh`/`rm` 可用），
+  并在 `--overlay` 用例里验证基准结束会恢复原 `css-template.css`。
 - outline_test.lua 前半用 archiver stub（内存书）覆盖解析/映射/缓存全部分支，
   后半用真实 libarchive 造真 EPUB 跑端到端与 100 章性能（5 次冷解析取中位数），
   libarchive 不可用时只跳过后半。

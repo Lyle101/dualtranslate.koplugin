@@ -19,13 +19,40 @@ local function read_file(path)
     return data
 end
 
+local write_counter = 0
+-- Two processes may rewrite the same file (reader CSS build vs. dtctl import
+-- template).  A shared "<path>.tmp" would let them mix chunks into one inode,
+-- so every write gets a process-unique suffix; rename(2) stays the atomic
+-- commit point.  PID is the reliable part; the table address is only a
+-- fallback for hosts without /proc (and may collide without ASLR).
+local function make_process_tag()
+    local file = io.open("/proc/self/stat", "r")
+    if file then
+        local line = file:read("*l")
+        file:close()
+        local pid = line and line:match("^(%d+)")
+        if pid then return pid end
+    end
+    file = io.open("/dev/urandom", "rb")
+    if file then
+        local bytes = file:read(4)
+        file:close()
+        if bytes and #bytes == 4 then
+            return string.format("%02x%02x%02x%02x", bytes:byte(1, 4))
+        end
+    end
+    return tostring({}):match("0x(%x+)") or tostring(os.time())
+end
+local process_tag = make_process_tag()
+
 local function write_file(path, data)
     -- Atomic replacement: rename(2) overwrites the destination on POSIX, so
     -- there is no window where the old overlay is gone but the new one is
     -- not yet in place (a crash mid-checkpoint keeps the previous file).
     -- Durability: a failed write/close (e.g. full disk) must never rename a
     -- truncated tmp over the good file; drop the tmp and report failure.
-    local temporary = path .. ".tmp"
+    write_counter = write_counter + 1
+    local temporary = path .. ".tmp." .. process_tag .. "." .. write_counter
     local file = io.open(temporary, "wb")
     if not file then return false end
     local written = file:write(data)
@@ -234,6 +261,7 @@ local ENTRIES_CACHE_BYTES = 8 * 1024 * 1024
 local cache_stats = {
     css_builds = 0, css_hits = 0,
     entries_loads = 0, entries_hits = 0,
+    template_hits = 0, template_misses = 0, template_writes = 0,
 }
 
 local function entries_cache_drop(path)
@@ -289,6 +317,270 @@ function Overlay.clearEntriesCache()
     entries_total = 0
 end
 
+-- ---------------------------------------------------------------------------
+-- Precompiled rule template (style-independent)
+--
+-- Every generated rule differs only in three style values (colour, size, font
+-- stack).  Decoding the 1.2 MB entries JSON to re-format 3,000 rules costs
+-- ~450 ms on a Kindle Voyage; reading the precompiled rules and substituting
+-- the three values is an order of magnitude cheaper.  Store.importResult
+-- writes this file right after an import, and every cold build refreshes it,
+-- so the next process can skip the JSON decode entirely.
+--
+-- The placeholders are NUL-delimited: css_string() strips NUL from
+-- translations, so a translation can never collide with one.
+local CSS_TEMPLATE_FILE = "css-template.css"
+-- Bump whenever the rule text, placeholder set or on-disk layout changes;
+-- the key otherwise has no way to tell an old compiled sheet from a new one.
+local TEMPLATE_FORMAT = "2"
+local TEMPLATE_COLOR = "\0DT_COLOR\0"
+local TEMPLATE_SIZE = "\0DT_SIZE\0"
+local TEMPLATE_FONT_CSS = "\0DT_FONT_CSS\0"
+
+-- Solving the token substitution with gsub costs ~140 ms on the device: the
+-- pattern engine has to walk the whole 1.2 MB twice (scan + rebuild) and call
+-- into Lua for every rule.  The file therefore stores the static text and a
+-- 5-byte-per-token index (kind + uint32 offset) instead, and the sheet is
+-- rebuilt with string.sub + table.concat (~32 ms, no pattern scan).
+local TEMPLATE_KIND_COLOR = 1
+local TEMPLATE_KIND_SIZE = 2
+local TEMPLATE_KIND_FONT = 3
+
+-- Only the most recent book is kept: this is the hot path for repeated font
+-- size changes, and one extra 1.2 MB string is cheaper than re-reading and
+-- re-indexing the file every time.
+local template_cache = { dir = nil, key = nil, template = nil }
+-- Read-only cache dir / full disk: retrying a 1.2 MB write on every cold build
+-- makes things worse.  The in-memory template is still cached below, so style
+-- changes keep the fast path; only the on-disk copy is skipped.
+local template_write_failures = {}
+
+local function normalize_dir(dir)
+    if not dir or dir == "" then return dir end
+    if dir ~= "/" then dir = dir:gsub("/+$", "") end
+    -- Store.bookDir may hand back "./cache/..." while a CLI/bench passes an
+    -- absolute path.  The template key embeds dir, so resolve both to the same
+    -- string or the two processes would rewrite the same file under different
+    -- keys and never hit each other's work.
+    if dir ~= "/" and dir:sub(1, 1) ~= "/" then
+        local cwd = lfs.currentdir()
+        if cwd then
+            dir = cwd .. "/" .. dir:gsub("^%./", "")
+        end
+    end
+    return dir
+end
+
+local function template_path(dir)
+    return normalize_dir(dir) .. "/" .. CSS_TEMPLATE_FILE
+end
+
+local function read_template_key(dir)
+    local file = io.open(template_path(dir), "rb")
+    if not file then return nil end
+    local key = file:read("*l")
+    file:close()
+    return key
+end
+
+local function read_template(dir)
+    local raw = read_file(template_path(dir))
+    if not raw then return nil end
+    local first = raw:find("\n", 1, true)
+    if not first then return nil end
+    local second = raw:find("\n", first + 1, true)
+    if not second then return nil end
+    local key = raw:sub(1, first - 1)
+    local count, data_len = raw:sub(first + 1, second - 1):match("^v2 (%d+) (%d+)$")
+    if not count then return nil end
+    count, data_len = tonumber(count), tonumber(data_len)
+    local index_start = second + 1
+    local data_start = index_start + count * 5
+    if data_start - 1 > #raw then return nil end
+    local data = raw:sub(data_start)
+    if #data ~= data_len then return nil end
+    -- The writer's static text never contains NUL (css_string strips it), so a
+    -- NUL means the data section was truncated/zeroed without a length change;
+    -- reject it instead of emitting garbage and re-hitting the same file.
+    if data:find("\0", 1, true) then return nil end
+    local index = raw:sub(index_start, data_start - 1)
+    -- Reject a corrupted index instead of emitting mangled rules.  The check
+    -- is ~9k byte reads on a 3,133-rule book and runs once per cold read.
+    local previous = 0
+    for i = 0, count - 1 do
+        local kind, b1, b2, b3, b4 = index:byte(i * 5 + 1, i * 5 + 5)
+        if not kind or not b4 then return nil end
+        local offset = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+        if kind < TEMPLATE_KIND_COLOR or kind > TEMPLATE_KIND_FONT
+            or offset < previous or offset > data_len then
+            return nil
+        end
+        previous = offset
+    end
+    return key, {
+        index = index,
+        data = data,
+        count = count,
+    }
+end
+
+local function load_template(dir, key)
+    if template_cache.dir == dir and template_cache.key == key and template_cache.template then
+        return template_cache.template
+    end
+    -- Read the (tiny) key line first: after a checkpoint the key almost always
+    -- differs, and pulling 1.2 MB just to reject it would be wasted I/O.
+    if read_template_key(dir) ~= key then return nil end
+    local saved_key, template = read_template(dir)
+    if saved_key == key then
+        template_cache = { dir = dir, key = key, template = template }
+        return template
+    end
+    return nil
+end
+
+-- Turn the NUL-token form into (index, static text).  Offsets are 0-based
+-- byte positions in the static text.
+local function encode_template(body)
+    local chunks, index, count, offset = {}, {}, 0, 0
+    local pos = 1
+    while true do
+        local start, finish, name = body:find("%zDT_([A-Z_]+)%z", pos)
+        if not start then
+            chunks[#chunks + 1] = body:sub(pos)
+            offset = offset + #chunks[#chunks]
+            break
+        end
+        local text = body:sub(pos, start - 1)
+        chunks[#chunks + 1] = text
+        offset = offset + #text
+        local kind = name == "COLOR" and TEMPLATE_KIND_COLOR
+            or name == "SIZE" and TEMPLATE_KIND_SIZE or TEMPLATE_KIND_FONT
+        index[#index + 1] = string.char(kind,
+            offset % 256, math.floor(offset / 256) % 256,
+            math.floor(offset / 65536) % 256, math.floor(offset / 16777216) % 256)
+        count = count + 1
+        pos = finish + 1
+    end
+    return table.concat(index), table.concat(chunks), count, offset
+end
+
+local function cache_template(dir, key, index, data, count)
+    local template = { index = index, data = data, count = count }
+    template_cache = { dir = dir, key = key, template = template }
+    return template
+end
+
+local function write_template(dir, key, index, data, count, data_len)
+    local payload = string.format("%s\nv2 %d %d\n", key, count, data_len) .. index .. data
+    return write_file(template_path(dir), payload)
+end
+
+function Overlay.clearTemplateCache()
+    template_cache = { dir = nil, key = nil, template = nil }
+end
+
+function Overlay.removeCssTemplate(dir)
+    if not dir or dir == "" then return false end
+    if dir:match("manifest%.json$") then
+        dir = dir:match("^(.*)/manifest%.json$") or dir
+    end
+    dir = normalize_dir(dir)
+    if template_cache.dir == dir then
+        Overlay.clearTemplateCache()
+    end
+    template_write_failures[dir] = nil
+    os.remove(template_path(dir))
+    return not Overlay.exists(template_path(dir))
+end
+
+local function apply_style(template, color, size, font_css)
+    local values = {
+        [TEMPLATE_KIND_COLOR] = color,
+        [TEMPLATE_KIND_SIZE] = size,
+        [TEMPLATE_KIND_FONT] = font_css,
+    }
+    local index, data, count = template.index, template.data, template.count
+    local parts, previous = {}, 1
+    for i = 0, count - 1 do
+        local base = i * 5
+        local kind, b1, b2, b3, b4 = index:byte(base + 1, base + 5)
+        local offset = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216 + 1
+        if offset > previous then
+            parts[#parts + 1] = data:sub(previous, offset - 1)
+        end
+        parts[#parts + 1] = values[kind] or ""
+        previous = offset
+    end
+    if previous <= #data then parts[#parts + 1] = data:sub(previous) end
+    return table.concat(parts)
+end
+
+-- LuaJSON emits table keys in hash order, so revision is sometimes before the
+-- entries array and sometimes after it.  The fast path reads the first bytes;
+-- when that does not contain the header we scan the raw text (still much
+-- cheaper than decoding 1.2 MB of JSON).  An escaped quote inside a
+-- translation is skipped, so text like \"revision\":1 cannot be mistaken for
+-- the document field.
+local function revision_in_text(raw, from)
+    local pos = from or 1
+    while true do
+        local start, finish = raw:find('"revision"', pos, true)
+        if not start then return nil end
+        if raw:sub(start - 1, start - 1) ~= "\\" then
+            local value = tonumber(raw:sub(finish + 1, finish + 40):match("^%s*:%s*(%d+)"))
+            if value then return value end
+        end
+        pos = finish + 1
+    end
+end
+
+-- Fallback-heavy books can have several entries files.  Re-reading a file to
+-- find its revision on every colour/font change would defeat the template, so
+-- cache (path, mtime, size) -> revision.  Inside the FAT32 ~2 s window the
+-- stats are not trustworthy and the file is re-read; saveEntries/deleteEntries
+-- also drop the entry explicitly.
+local revision_cache = {}
+
+local function forget_revision(path)
+    revision_cache[path] = nil
+end
+
+local function peek_entries_revision(path)
+    local emtime = lfs.attributes(path, "modification")
+    local esize = lfs.attributes(path, "size")
+    local cached = revision_cache[path]
+    local trustworthy = emtime ~= nil and (os.time() - emtime) > 3
+    if cached and trustworthy and cached.emtime == emtime and cached.esize == esize then
+        return cached.revision
+    end
+    local file = io.open(path, "rb")
+    if not file then return nil end
+    local head = file:read(256)
+    if not head then
+        file:close()
+        return nil
+    end
+    local revision = revision_in_text(head)
+    if not revision then
+        -- The remainder alone does not know where head ended; seek back and
+        -- read the whole file.  Scanning a remainder from an offset would
+        -- silently skip the first ~244 bytes and could miss the only field.
+        file:seek("set", 0)
+        local raw = file:read("*a")
+        if raw then revision = revision_in_text(raw) end
+    end
+    file:close()
+    if revision and emtime and esize then
+        revision_cache[path] = { emtime = emtime, esize = esize, revision = revision }
+    end
+    return revision
+end
+
+function Overlay.clearRevisionCache()
+    revision_cache = {}
+end
+
 function Overlay.loadEntries(dir, provider_id)
     local path = Overlay.entriesPath(dir, provider_id)
     local emtime = lfs.attributes(path, "modification")
@@ -339,18 +631,27 @@ function Overlay.saveEntries(dir, provider_id, entries_doc)
     if not mkdir_p(dir .. "/entries") then return false end
     local path = Overlay.entriesPath(dir, provider_id)
     if not write_file(path, encoded) then return false end
+    -- A successful write means the filesystem is writable again; allow the
+    -- template write to recover after an earlier disk-full failure.
+    template_write_failures[dir] = nil
     -- Same-second rewrites may keep mtime and size, so drop the parsed doc
-    -- here instead of relying on the stat check in loadEntries.
+    -- and the revision peek here instead of relying on the stat check.
     entries_cache_drop(path)
+    forget_revision(path)
     return true
 end
 
 function Overlay.deleteEntries(dir, provider_id)
-    if not provider_id or provider_id == "" then return false end
+    if not dir or dir == "" or not provider_id or provider_id == "" then return false end
     local base = dir .. "/entries/" .. provider_slug(provider_id)
     os.remove(base .. ".json")
     os.remove(base .. ".ndjson")
     entries_cache_drop(base .. ".json")
+    forget_revision(base .. ".json")
+    -- The precompiled template merges every visible provider, so removing any
+    -- one of them makes the whole file stale.  Drop it (and the in-memory
+    -- copy) instead of keeping up to 1.2 MB of rules that can never be used.
+    Overlay.removeCssTemplate(dir)
     return not Overlay.exists(base .. ".json") and not Overlay.exists(base .. ".ndjson")
 end
 
@@ -585,8 +886,12 @@ function Overlay.cacheStats()
         entries_hits = cache_stats.entries_hits,
         entries_bytes = entries_total,
         entries_budget = ENTRIES_CACHE_BYTES,
+        css_entries = #cache_order,
         css_bytes = cache_total,
         css_budget = CSS_CACHE_BYTES,
+        template_hits = cache_stats.template_hits,
+        template_misses = cache_stats.template_misses,
+        template_writes = cache_stats.template_writes,
     }
 end
 
@@ -698,37 +1003,62 @@ local function build_css_legacy(path, options)
     return css
 end
 
-local function render_v3(dir, manifest, provider, entries_doc, fallback, options)
-    local color, size, font_family_css = rule_style(options)
-    -- A reader only needs the chapter it is displaying: pinning the sheet to
-    -- one spine item keeps the rebuild at tens of rules instead of thousands.
-    -- Rows written before chapter_index existed must never disappear.
-    -- Not wired into the reader yet: full-book rebuild is 111.9 ms with the
-    -- parsed-entries cache (docs/PERF.md §7); the filter stays for the 3.3
-    -- per-chapter experiment and its tests.
-    local chapter = tonumber(options.chapter_index)
-    local function in_chapter(entry)
-        if not chapter then return true end
-        local index = tonumber(entry.chapter_index)
-        return index == nil or index == chapter
-    end
-    local by_selector, order = {}, {}
-    local function add_entries(doc)
-        if not doc then return end
-        for _, entry in ipairs(doc.entries or {}) do
-            local selector = entry.selector
-            if selector and selector ~= "" and entry.translation and entry.translation ~= ""
-                and in_chapter(entry) and by_selector[selector] == nil then
-                by_selector[selector] = entry
-                order[#order + 1] = selector
+-- The providers whose entries actually enter one stylesheet, in display
+-- order (primary first, then the fallback list).  Missing files are skipped:
+-- they contribute no rules and must not keep the template key alive.
+local function selected_providers(dir, manifest, provider, fallback)
+    local selected = { provider }
+    if fallback then
+        for _, pid in ipairs(manifest.fallback_order or {}) do
+            if pid ~= provider and manifest.providers[pid]
+                and lfs.attributes(Overlay.entriesPath(dir, pid), "size") then
+                selected[#selected + 1] = pid
             end
         end
     end
-    add_entries(entries_doc)
-    if fallback then
-        for _, pid in ipairs(manifest.fallback_order or {}) do
-            if pid ~= provider and manifest.providers[pid] then
-                add_entries(Overlay.loadEntries(dir, pid))
+    return selected
+end
+
+-- Key for the on-disk rule template.  Style is intentionally absent: colour,
+-- size and font are substituted when the file is read.  Everything that
+-- changes which rules exist is present (display resolution, manifest
+-- revision, each provider's file identity and revision).
+local function template_key(dir, manifest, provider, fallback, selected, revisions)
+    local parts = {
+        dir,
+        TEMPLATE_FORMAT,
+        tostring(manifest.display_mode or "auto"),
+        tostring(tonumber(manifest.revision) or 0),
+        provider,
+        fallback and "1" or "0",
+    }
+    for _, pid in ipairs(selected) do
+        local path = Overlay.entriesPath(dir, pid)
+        local emtime = lfs.attributes(path, "modification")
+        local esize = lfs.attributes(path, "size")
+        if not emtime or not esize then return nil end
+        local revision = revisions and revisions[pid]
+        if revision == nil then revision = peek_entries_revision(path) end
+        if revision == nil then return nil end
+        parts[#parts + 1] = table.concat({
+            pid, tostring(emtime), tostring(esize), tostring(revision),
+        }, "\1")
+    end
+    return table.concat(parts, "\1")
+end
+
+local function render_v3(dir, selected, docs, color, size, font_family_css)
+    local by_selector, order = {}, {}
+    for _, pid in ipairs(selected) do
+        local doc = docs and docs[pid] or Overlay.loadEntries(dir, pid)
+        if doc then
+            for _, entry in ipairs(doc.entries or {}) do
+                local selector = entry.selector
+                if selector and selector ~= "" and entry.translation and entry.translation ~= ""
+                    and by_selector[selector] == nil then
+                    by_selector[selector] = entry
+                    order[#order + 1] = selector
+                end
             end
         end
     end
@@ -741,8 +1071,69 @@ local function render_v3(dir, manifest, provider, entries_doc, fallback, options
     return table.concat(rules, "\n")
 end
 
+-- Precompile the rules for the manifest's current display selection.  Called
+-- after an import so the first open (and every later cold start) can skip the
+-- entries JSON decode.  Style is not part of the key, so a later font-size or
+-- colour change still hits this file.
+function Overlay.warmCssTemplate(dir, entries_doc, entries_provider)
+    if not dir or dir == "" then return false end
+    if dir:match("manifest%.json$") then
+        dir = dir:match("^(.*)/manifest%.json$") or dir
+    end
+    dir = normalize_dir(dir)
+    local manifest = Overlay.loadManifest(dir)
+    if not manifest then return false end
+    local provider = resolve_display_provider(manifest)
+    if not provider or not manifest.providers[provider] then return false end
+    local fallback = manifest.display_fallback
+    if fallback == nil then fallback = true end
+    fallback = fallback == true
+    local selected = selected_providers(dir, manifest, provider, fallback)
+    local docs, revisions = {}, {}
+    if entries_doc and entries_provider then
+        -- The import/checkpoint already has the fresh rows in memory; using
+        -- them avoids a second 0.5 s decode inside the book lock.  This also
+        -- applies when the freshly written provider is a fallback, while the
+        -- display provider itself still comes from disk.
+        local doc = entries_doc.entries and entries_doc or { entries = entries_doc }
+        docs[entries_provider] = doc
+        -- The file is the source of truth for the revision; manifest.revision
+        -- may be behind in the crash window.
+        revisions[entries_provider] = peek_entries_revision(
+            Overlay.entriesPath(dir, entries_provider))
+            or tonumber(doc.revision) or tonumber(manifest.revision) or 0
+    end
+    local primary = docs[provider] or Overlay.loadEntries(dir, provider)
+    if not primary then return false end
+    docs[provider] = primary
+    revisions[provider] = revisions[provider] or tonumber(primary.revision) or 0
+    for _, pid in ipairs(selected) do
+        if pid ~= provider then
+            local doc = docs[pid] or Overlay.loadEntries(dir, pid)
+            docs[pid] = doc
+            revisions[pid] = doc and (tonumber(doc.revision) or 0) or nil
+        end
+    end
+    local key = template_key(dir, manifest, provider, fallback, selected, revisions)
+    if not key then return false end
+    if read_template_key(dir) == key then return true end
+    local body = render_v3(dir, selected, docs,
+        TEMPLATE_COLOR, TEMPLATE_SIZE, TEMPLATE_FONT_CSS)
+    local index, data, count, data_len = encode_template(body)
+    cache_template(dir, key, index, data, count)
+    if template_write_failures[dir] then return false end
+    local ok = write_template(dir, key, index, data, count, data_len)
+    if ok then
+        cache_stats.template_writes = cache_stats.template_writes + 1
+    else
+        template_write_failures[dir] = true
+    end
+    return ok
+end
+
 local function build_css_v3(manifest_path, options)
-    local dir = manifest_path:match("^(.*)/manifest%.json$") or manifest_path
+    local dir = normalize_dir(manifest_path:match("^(.*)/manifest%.json$") or manifest_path)
+    manifest_path = dir .. "/manifest.json"
     local manifest = Overlay.loadManifest(dir)
     if not manifest then return "" end
     if options.translation_visible ~= true then return "" end
@@ -753,48 +1144,148 @@ local function build_css_v3(manifest_path, options)
     if fallback == nil then fallback = true end
     fallback = fallback == true
 
+    local selected = selected_providers(dir, manifest, provider, fallback)
     local entries_path = Overlay.entriesPath(dir, provider)
     local emtime = lfs.attributes(entries_path, "modification")
     local esize = lfs.attributes(entries_path, "size")
     local cached = css_cache[manifest_path]
-    local entries_doc, entries_revision
+    local color, size, font_family_css = rule_style(options)
+
     -- The entries file can be megabytes; reuse its last parsed revision once
     -- mtime+size are unchanged AND the file is older than the FAT32 ~2 s
     -- mtime granularity window -- inside that window a same-size rewrite
     -- could hide behind identical stats, so the revision must be re-read.
+    -- Outside the window the first bytes are enough (peek_entries_revision);
+    -- that is what lets a cold start avoid the full decode.
+    local entries_revision
     local stats_trustworthy = emtime ~= nil and (os.time() - emtime) > 3
     if cached and stats_trustworthy and cached.entries_path == entries_path
         and cached.emtime == emtime and cached.esize == esize then
         entries_revision = cached.entries_revision
     else
-        entries_doc = Overlay.loadEntries(dir, provider)
-        entries_revision = entries_doc and tonumber(entries_doc.revision) or 0
+        entries_revision = peek_entries_revision(entries_path)
     end
-    local key = table.concat({
-        manifest_path,
-        tostring(manifest.display_mode or "auto"),
-        tostring(math.max(tonumber(manifest.revision) or 0, entries_revision or 0)),
-        provider,
-        fallback and "1" or "0",
-        tostring(emtime), tostring(esize),
-        "1",
-        tostring(tonumber(options.chapter_index) or 0),
-        tostring(options.translation_color or ""),
-        tostring(options.translation_size or ""),
-        tostring(options.translation_font_family or ""),
-    }, "|")
+    -- The CSS cache must notice a fallback file changing too, not only the
+    -- primary.  One cheap stat + cached revision per provider keeps this
+    -- constant for style-only rebuilds.
+    local selected_info = {}
+    for _, pid in ipairs(selected) do
+        local path = Overlay.entriesPath(dir, pid)
+        local pmtime = pid == provider and emtime or lfs.attributes(path, "modification")
+        local psize = pid == provider and esize or lfs.attributes(path, "size")
+        local revision = pid == provider and entries_revision
+            or peek_entries_revision(path)
+        selected_info[#selected_info + 1] = {
+            pid = pid, emtime = pmtime, esize = psize, revision = revision,
+        }
+    end
+    local function selected_signature()
+        local parts = {}
+        for _, item in ipairs(selected_info) do
+            parts[#parts + 1] = table.concat({
+                item.pid, tostring(item.emtime), tostring(item.esize),
+                tostring(item.revision or "?"),
+            }, ":")
+        end
+        return table.concat(parts, ";")
+    end
+    local function selected_revisions()
+        local map = {}
+        for _, item in ipairs(selected_info) do map[item.pid] = item.revision end
+        return map
+    end
+    local function css_key(revision, signature)
+        return table.concat({
+            manifest_path,
+            tostring(manifest.display_mode or "auto"),
+            tostring(math.max(tonumber(manifest.revision) or 0, revision or 0)),
+            provider,
+            fallback and "1" or "0",
+            tostring(emtime), tostring(esize),
+            "1",
+            signature,
+            tostring(options.translation_color or ""),
+            tostring(options.translation_size or ""),
+            tostring(options.translation_font_family or ""),
+        }, "|")
+    end
+    local key
+    if entries_revision ~= nil then
+        key = css_key(entries_revision, selected_signature())
+        if cached and cached.key == key then
+            cache_stats.css_hits = cache_stats.css_hits + 1
+            cache_touch(manifest_path)
+            return cached.css
+        end
+        local tkey = template_key(dir, manifest, provider, fallback, selected,
+            selected_revisions())
+        if tkey then
+            local template = load_template(dir, tkey)
+            if template then
+                cache_stats.template_hits = cache_stats.template_hits + 1
+                local css = apply_style(template, color, size, font_family_css)
+                cache_store(manifest_path, {
+                    key = key, css = css, size = #css,
+                    entries_path = entries_path, emtime = emtime, esize = esize,
+                    entries_revision = entries_revision,
+                })
+                return css
+            end
+            cache_stats.template_misses = cache_stats.template_misses + 1
+        end
+    end
+
+    -- No usable template: decode the entries (the part the cache exists to
+    -- remove from later style rebuilds) and rebuild both the CSS and the
+    -- template.  Fallback docs are only loaded when the merged sheet needs
+    -- them; the primary doc is already in the parsed-entries cache.
+    local docs, revisions = {}, {}
+    local primary = Overlay.loadEntries(dir, provider)
+    if primary then
+        docs[provider] = primary
+        entries_revision = tonumber(primary.revision) or entries_revision or 0
+    end
+    for _, pid in ipairs(selected) do
+        local doc = docs[pid]
+        if pid ~= provider then
+            doc = Overlay.loadEntries(dir, pid)
+            if doc then docs[pid] = doc end
+        end
+        revisions[pid] = doc and (tonumber(doc.revision) or 0) or nil
+    end
+    revisions[provider] = entries_revision or 0
+    for _, item in ipairs(selected_info) do
+        item.revision = revisions[item.pid]
+    end
+    key = css_key(entries_revision, selected_signature())
     if cached and cached.key == key then
         cache_stats.css_hits = cache_stats.css_hits + 1
         cache_touch(manifest_path)
         return cached.css
     end
-    if not entries_doc then entries_doc = Overlay.loadEntries(dir, provider) end
     cache_stats.css_builds = cache_stats.css_builds + 1
-    local css = render_v3(dir, manifest, provider, entries_doc, fallback, options)
+    local body = render_v3(dir, selected, docs,
+        TEMPLATE_COLOR, TEMPLATE_SIZE, TEMPLATE_FONT_CSS)
+    local index, data, count, data_len = encode_template(body)
+    local tkey = template_key(dir, manifest, provider, fallback, selected, revisions)
+    if tkey then
+        -- Cache the compiled template even if the disk write fails, so later
+        -- style changes in this process still avoid the decode.
+        cache_template(dir, tkey, index, data, count)
+        if not template_write_failures[dir] then
+            if write_template(dir, tkey, index, data, count, data_len) then
+                cache_stats.template_writes = cache_stats.template_writes + 1
+            else
+                template_write_failures[dir] = true
+            end
+        end
+    end
+    local css = apply_style({ index = index, data = data, count = count },
+        color, size, font_family_css)
     cache_store(manifest_path, {
         key = key, css = css, size = #css,
         entries_path = entries_path, emtime = emtime, esize = esize,
-        entries_revision = entries_revision,
+        entries_revision = entries_revision or 0,
     })
     return css
 end
@@ -803,6 +1294,7 @@ function Overlay.buildCss(path, options)
     if not path then return "" end
     options = options or {}
     if lfs.attributes(path, "mode") == "directory" then
+        path = normalize_dir(path)
         if Overlay.exists(path .. "/manifest.json") then
             path = path .. "/manifest.json"
         else

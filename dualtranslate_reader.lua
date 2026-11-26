@@ -846,6 +846,8 @@ function dualtranslate:checkExternalReload(force)
     -- manifest, so it keeps the parsed docs.
     if signal.op ~= "display" then
         Overlay.clearEntriesCache()
+        Overlay.clearTemplateCache()
+        if Overlay.clearRevisionCache then Overlay.clearRevisionCache() end
     end
     self:refreshDocumentStyles()
     return signal
@@ -2278,17 +2280,26 @@ function dualtranslate:refreshDocumentStyles()
             translation_font_family = font_family,
         })
     end
-    local extra_css = tweaks .. "\n" .. overlay_css
-    -- Keep this marker on the document object, which survives the rerender
+    -- Keep these markers on the document object, which survives the rerender
     -- that setStyleSheet itself initiates.  A plugin instance may be rebuilt
     -- during that rerender, so an instance-local flag cannot stop the loop.
-    if document._dualtranslate_extra_css == extra_css then return true end
-    document._dualtranslate_extra_css = extra_css
+    -- Compare the two pieces before concatenating: the overlay sheet is
+    -- megabytes, and holding a second concatenated copy on the document just
+    -- doubles the Lua-side cost for no benefit.  The stored overlay string is
+    -- normally the same object the CSS cache already owns.
+    if document._dualtranslate_overlay_css == overlay_css
+        and document._dualtranslate_tweaks == tweaks then
+        return true
+    end
+    local extra_css = tweaks .. "\n" .. overlay_css
+    document._dualtranslate_overlay_css = overlay_css
+    document._dualtranslate_tweaks = tweaks
     local ok = pcall(function()
         document:setStyleSheet(css, extra_css)
     end)
     if not ok then
-        document._dualtranslate_extra_css = nil
+        document._dualtranslate_overlay_css = nil
+        document._dualtranslate_tweaks = nil
     else
         -- setStyleSheet triggers a full re-render.  The reader's pagination
         -- state (page_states in scroll mode, current_page in paging mode) is

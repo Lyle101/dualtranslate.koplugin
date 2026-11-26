@@ -751,7 +751,8 @@ function dualtranslate:confirmClearCache(menu)
                         self._chapter_index_cache = nil
                         UIManager:close(dialog)
                         if self.ui and self.ui.document then
-                            self.ui.document._dualtranslate_extra_css = nil
+                            self.ui.document._dualtranslate_overlay_css = nil
+                            self.ui.document._dualtranslate_tweaks = nil
                         end
                         self:refreshDocumentStyles()
                         -- Nothing is left to delete: rebuild the page so its

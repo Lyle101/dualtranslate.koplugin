@@ -213,6 +213,25 @@ do
 
     local provider_row = cache:getProvider("mcp:gpt-5")
     check("providers 表写入", provider_row and provider_row.model_name == "gpt-5")
+
+    -- 3.2.2: import prewarms css-template.css.  Simulate the next process:
+    -- clear all in-memory caches and build again; it must use the template
+    -- without decoding entries.
+    local cache_dir = Store.bookDir(BOOK, "zh-Hans")
+    Overlay.clearCssCache()
+    Overlay.clearEntriesCache()
+    Overlay.clearTemplateCache()
+    if Overlay.clearRevisionCache then Overlay.clearRevisionCache() end
+    local before_stats = Overlay.cacheStats()
+    local imported_css = Overlay.buildCss(cache_dir, { translation_visible = true })
+    local after_stats = Overlay.cacheStats()
+    check("导入后冷构建命中模板且不解码",
+        after_stats.entries_loads == before_stats.entries_loads
+        and after_stats.template_hits == before_stats.template_hits + 1,
+        string.format("loads %d→%d hits %d→%d",
+            before_stats.entries_loads, after_stats.entries_loads,
+            before_stats.template_hits, after_stats.template_hits))
+    check("模板含导入译文", imported_css:find("第二章译文", 1, true) ~= nil)
 end
 
 -- ============================================================

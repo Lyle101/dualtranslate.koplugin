@@ -36,6 +36,7 @@ Overlay.loadEntries = function(dir, provider_id)
 end
 local function loads(provider_id) return load_counts[provider_id] or 0 end
 local function resetLoads() load_counts = {} end
+local function stats() return Overlay.cacheStats() end
 
 local case_no = 0
 local function newBook(label, providers, display)
@@ -163,25 +164,38 @@ do
     check("fallback 关闭稳定命中", loads("mcp:gpt-5") == 0)
     check("fallback 关闭不加载其他 entries", loads("system") == 0, tostring(loads("system")))
 
+    -- Re-establish the system template, then style-only changes must not
+    -- decode the entries again: colour/size/font live in the template
+    -- placeholders and are substituted when the file is read.
+    Overlay.buildCss(mpath, VISIBLE)
     resetLoads()
-    Overlay.buildCss(mpath, { translation_visible = true, translation_color = "#333333" })
-    check("颜色变化 → 重建", loads("system") >= 1)
+    local color_css = Overlay.buildCss(mpath,
+        { translation_visible = true, translation_color = "#333333" })
+    check("颜色变化走模板，不重解码", loads("system") == 0
+        and color_css:find("color:#333333!important", 1, true) ~= nil)
     resetLoads()
-    Overlay.buildCss(mpath, { translation_visible = true, translation_size = "0.8em" })
-    check("字号变化 → 重建", loads("system") >= 1)
+    local size_css = Overlay.buildCss(mpath,
+        { translation_visible = true, translation_size = "0.8em" })
+    check("字号变化走模板，不重解码", loads("system") == 0
+        and size_css:find("font-size:0.8em!important", 1, true) ~= nil)
     resetLoads()
-    Overlay.buildCss(mpath, { translation_visible = true, translation_font_family = "serif" })
-    check("字体变化 → 重建", loads("system") >= 1)
+    local font_css = Overlay.buildCss(mpath,
+        { translation_visible = true, translation_font_family = "serif" })
+    check("字体变化走模板，不重解码", loads("system") == 0
+        and font_css:find("font-family:serif!important", 1, true) ~= nil)
 
     Overlay.clearCssCache()
+    check("clearCssCache 后内存为空", stats().css_entries == 0)
     resetLoads()
-    Overlay.buildCss(mpath, VISIBLE)
-    check("clearCssCache 强制重建", loads("system") >= 1)
+    local rebuilt = Overlay.buildCss(mpath, VISIBLE)
+    check("clearCssCache 后由模板重建", loads("system") == 0 and rebuilt == css_sys)
 end
 
 -- ============================================================
 print("== 4. 每书 1 条 + 全局 8MB LRU ==")
 do
+    -- 前面的用例把别的书留在 CSS 缓存里；本节的计数从空缓存开始。
+    Overlay.clearCssCache()
     -- 每书只保留最新一条：旧选项组合不再占用缓存
     local dir, mpath = newBook("per_book", { "system" }, "system")
     Overlay.saveEntries(dir, "system", { entries = { entry("p[1]", "译文") } })
@@ -189,11 +203,16 @@ do
     age(epath)
     Overlay.buildCss(mpath, { translation_visible = true, translation_color = "#111111" })
     Overlay.buildCss(mpath, { translation_visible = true, translation_color = "#222222" })
+    check("每书只留 1 条 CSS", stats().css_entries == 1, tostring(stats().css_entries))
     resetLoads()
-    Overlay.buildCss(mpath, { translation_visible = true, translation_color = "#111111" })
-    check("每书 1 条：回到旧选项需重建", loads("system") >= 1)
+    local again = Overlay.buildCss(mpath,
+        { translation_visible = true, translation_color = "#111111" })
+    check("回到旧选项由模板重建（不重解码）", loads("system") == 0
+        and again:find("color:#111111!important", 1, true) ~= nil)
+    check("回到旧选项后仍只有 1 条", stats().css_entries == 1)
 
-    -- 两本大书超过 8MB → LRU 淘汰先前的书
+    -- 两本大书超过 8MB → LRU 淘汰先前的书。 模板让重建不再解码，
+    -- 所以淘汰的结果用 css_entries/css_bytes 断言，而不是 loadEntries 次数。
     local big = string.rep("字", 1800000) -- ~5.4MB UTF-8
     local dir_a, mpath_a = newBook("big_a", { "system" }, "system")
     Overlay.saveEntries(dir_a, "system", { entries = { entry("p[1]", big) } })
@@ -205,12 +224,116 @@ do
     local css_a = Overlay.buildCss(mpath_a, VISIBLE)
     check("大书 CSS 生成", #css_a > 5 * 1024 * 1024, tostring(#css_a))
     Overlay.buildCss(mpath_b, VISIBLE)
+    check("两本大书只留 1 条 CSS", stats().css_entries == 1, tostring(stats().css_entries))
+    check("CSS 预算不超", stats().css_bytes <= stats().css_budget)
     resetLoads()
-    Overlay.buildCss(mpath_b, VISIBLE)
-    check("最近使用的书仍在缓存", loads("system") == 0)
+    local css_a2 = Overlay.buildCss(mpath_a, VISIBLE)
+    check("最旧的书由模板重建（不重解码）", loads("system") == 0 and css_a2 == css_a)
+    check("重建后仍只留 1 条", stats().css_entries == 1)
+end
+
+-- ============================================================
+print("== 5. 预编译模板：导入后预热 / 命中 / 失效 ==")
+do
+    Overlay.clearCssCache()
+    local dir, mpath = newBook("template", { "system" }, "system")
+    Overlay.saveEntries(dir, "system", { entries = { entry("p[1]", "模板译文") } })
+    local epath = Overlay.entriesPath(dir, "system")
+    age(epath)
+    check("预热模板", Overlay.warmCssTemplate(dir) == true)
+    check("模板文件存在", Overlay.exists(dir .. "/css-template.css"))
+
+    Overlay.clearCssCache()
+    Overlay.clearEntriesCache()
+    Overlay.clearTemplateCache()
     resetLoads()
-    Overlay.buildCss(mpath_a, VISIBLE)
-    check("超 8MB 淘汰最旧的书", loads("system") >= 1)
+    local hits_before = stats().template_hits
+    local hot = Overlay.buildCss(mpath, VISIBLE)
+    check("冷启动命中模板且不解码", loads("system") == 0
+        and hot:find("模板译文", 1, true) ~= nil)
+    check("模板命中计数 +1", stats().template_hits == hits_before + 1)
+
+    resetLoads()
+    local restyled = Overlay.buildCss(mpath,
+        { translation_visible = true, translation_color = "#00ff00" })
+    check("样式替换仍命中模板", loads("system") == 0
+        and restyled:find("color:#00ff00!important", 1, true) ~= nil)
+
+    check("removeCssTemplate", Overlay.removeCssTemplate(dir))
+    Overlay.clearCssCache()
+    Overlay.clearEntriesCache()
+    resetLoads()
+    local cold = Overlay.buildCss(mpath, VISIBLE)
+    check("删掉模板后回到解码路径", loads("system") >= 1
+        and cold:find("模板译文", 1, true) ~= nil)
+    check("重建会写回模板", Overlay.exists(dir .. "/css-template.css"))
+end
+
+-- ============================================================
+print("== 6. 模板健壮性：大 revision / 损坏 / fallback / 删除 ==")
+do
+    local dir, mpath = newBook("peek_late", { "system" }, "system")
+    local big = {}
+    for i = 1, 40 do
+        big[#big + 1] = entry("p[" .. i .. "]", string.rep("长译文", 40))
+    end
+    Overlay.saveEntries(dir, "system", { entries = big })
+    local epath = Overlay.entriesPath(dir, "system")
+    age(epath)
+    check("大 entries 预热模板", Overlay.warmCssTemplate(dir))
+    local file = io.open(epath, "rb")
+    local raw = file:read("*a")
+    file:close()
+    check("entries 超过 256 字节", #raw > 512, tostring(#raw))
+    Overlay.clearCssCache()
+    Overlay.clearEntriesCache()
+    Overlay.clearTemplateCache()
+    resetLoads()
+    local css = Overlay.buildCss(mpath, VISIBLE)
+    check("revision 不在头部也能按模板重建", loads("system") == 0
+        and css:find("长译文", 1, true) ~= nil)
+
+    local tpath = dir .. "/css-template.css"
+    local good = io.open(tpath, "rb")
+    local content = good:read("*a")
+    good:close()
+    local cut = io.open(tpath, "wb")
+    cut:write(content:sub(1, math.floor(#content / 2)))
+    cut:close()
+    Overlay.clearCssCache()
+    Overlay.clearEntriesCache()
+    Overlay.clearTemplateCache()
+    resetLoads()
+    local rebuilt = Overlay.buildCss(mpath, VISIBLE)
+    check("损坏模板回退解码并重建", loads("system") >= 1
+        and rebuilt:find("长译文", 1, true) ~= nil and Overlay.exists(tpath))
+
+    local dir2, mpath2 = newBook("fallback_style", { "system", "mcp:b" }, "system")
+    Overlay.saveEntries(dir2, "system", { entries = { entry("p[1]", "主译文") } })
+    Overlay.saveEntries(dir2, "mcp:b", { entries = { entry("p[2]", "备译文") } })
+    age(Overlay.entriesPath(dir2, "system"))
+    age(Overlay.entriesPath(dir2, "mcp:b"))
+    Overlay.buildCss(mpath2, VISIBLE)
+    resetLoads()
+    local styled = Overlay.buildCss(mpath2,
+        { translation_visible = true, translation_color = "#123456" })
+    check("fallback 样式变化不读任一份 entries", loads("system") == 0
+        and loads("mcp:b") == 0
+        and styled:find("主译文", 1, true) ~= nil
+        and styled:find("备译文", 1, true) ~= nil
+        and styled:find("color:#123456!important", 1, true) ~= nil)
+
+    -- A fallback-only change must invalidate the CSS key/template, not just
+    -- the primary entries file.
+    Overlay.saveEntries(dir2, "mcp:b", { entries = { entry("p[2]", "备译文v2") } })
+    resetLoads()
+    local updated = Overlay.buildCss(mpath2, VISIBLE)
+    check("fallback entries 变化使缓存失效", updated:find("备译文v2", 1, true) ~= nil
+        and loads("mcp:b") >= 1)
+
+    check("删除前模板存在", Overlay.exists(tpath))
+    Overlay.deleteEntries(dir, "system")
+    check("删除 entries 后模板消失", not Overlay.exists(tpath))
 end
 
 print(string.format("\n==== revision 缓存测试：%d 通过，%d 失败 ====", passed, failed))

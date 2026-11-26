@@ -4,17 +4,18 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.12（v3.2.1：移除设备端收件箱、导出收尾、引擎失败降级） |
-| 日期 | 2026-11-18 |
-| 适用代码 | DualTranslate `v3.2.1`（P0–P3 已合入；P4 的 CI 与 orphan 边界已落地） |
-| 目标版本 | `v3.2.1` 已发布：多服务 + 章节选择 + MCP 外部翻译（P3）；设备端收件箱已移除 |
-| 状态 | P0–P3 已实施（SSH 双 key + elicitation + 列表项 + 父项译文对齐 + 引擎失败降级；设备端收件箱已移除）；P4 部分落地：GitHub Actions（Lua 套件 + MCP server 的 pytest）、reconcile 遇读不到 mtime 的 orphan 不再删除；`entries` ndjson 与按章 GC 明确不做 |
-| 代码状态 | 全部有回归测试，CI 自 `4d60e58` 起每次 push 跑全套（28 个 Lua 套件，含可选的 `smoke_live`；外加 MCP server 的 pytest） |
+| 文档版本 | 0.13（v3.2.2：冷启动预编译 CSS 模板、去掉按章 CSS 实验） |
+| 日期 | 2026-11-26 |
+| 适用代码 | DualTranslate `v3.2.2`（P0–P3 已合入；P4 的 CI 与 orphan 边界已落地） |
+| 目标版本 | `v3.2.2` 已发布：多服务 + 章节选择 + MCP 外部翻译（P3）；设备端收件箱已移除 |
+| 状态 | P0–P3 已实施（SSH 双 key + elicitation + 列表项 + 父项译文对齐 + 引擎失败降级；设备端收件箱已移除）；P4 部分落地：GitHub Actions（Lua 套件 + MCP server 的 pytest）、reconcile 遇读不到 mtime 的 orphan 不再删除；`entries` ndjson 与按章 CSS 明确不做 |
+| 代码状态 | 全部有回归测试，CI 自 `4d60e58` 起每次 push 跑全套（29 个功能套件，不含 `fulltest/loadtest` 聚合器与可选的 `smoke_live`；外加 MCP server 的 pytest） |
 
 **修订记录**
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 0.13 | 2026-11-26 | v3.2.2：**冷启动预编译模板**（导入/整书翻译结束时写入 `css-template.css`，样式不参与 key；冷启动 56.2 ms、改字号 32.3 ms，见 PERF §7）；`clearCssCache` 与 entries 缓存、模板缓存三者解耦；`document` 不再常驻第二份拼接 CSS；**删除未接线的按章 CSS 过滤与 11 项测试**（D14）；新增 `tests/bench_test.lua` 覆盖 `--work/--only/.dtbench/--overlay` |
 | 0.12 | 2026-11-18 | v3.2.1：**设备端收件箱导入整体移除**（菜单入口、`Mcp.importFile/importPending`、`dtctl put --inbox`、PC 端 `write_inbox` 降级全部删除，无法执行 dtctl 时返回 `import_unavailable`）；导出结束改为「导出完成 + 任务详情 + 轻触关闭」，写入抛错也会关框；新增引擎连续失败（默认 5 段）中止并提示改用 Edge 重试同一范围 |
 | 0.11 | 2026-11-18 | v3.2.0 收口：条目按「归属元素」去重，三种列表父项选择器形态收敛（§6.3）；导出改为分片会话 + 真实章节进度（§10.2.1）；补记 CREngine 生成盒的实测约束——`margin`/`position:relative`/`text-indent` 全无效，横向偏移只能移动真实元素（§8.6）；表头状态改为「P0–P3 已实施，P4 部分落地」 |
 | 0.1 | 2026-11-13 | 初稿：可行性、数据模型 v3、R1-R4、P0 补丁、MCP 设计、迁移与测试计划 |
@@ -394,6 +395,7 @@ flowchart LR
 | D11 | 删除的崩溃语义 | 以 DB 为准靠 reconcile 猜 / 写意图文件 | 意图文件 `delete.pending.json` | 崩溃后能判断「删除是否已开始」，不需要在 DB 与 entries 之间二选一（9.3/14.3） |
 | D12 | 锁的归属 | Store 内 / 独立模块 | 独立 `dualtranslate_lock.lua` | `Epub.save_checkpoint` 也要持锁，放 Store 会形成 `Epub → Store → Cache/Overlay` 回环（14.1） |
 | D13 | 0 候选章节 | 计入 failed / 计入完成 | 计入 `chapters`（空真） | 封面/版权页永远 0 段；否则 `complete` 永远为假、逐章模式反复重排（6.3/7.3） |
+| D14 | 按章 CSS | 保留过滤等 3.3 实验 / 删除 | 删除 | 全书模板替换 32.3 ms 已优于按章时代的 111.9 ms；按章还要在跨章多付一次换表与内存，收益抵不过复杂度（8.2/PERF §7） |
 
 ---
 
@@ -1147,6 +1149,20 @@ visible | color | size | font_family
 - 选中 entries 文件的 mtime + size 也要进 key：MCP 导入可能先写 entries、后写 manifest；崩溃恢复时 entries 变了而 manifest 未变。
 - mtime 在 FAT32 只有 ~2 秒粒度，同尺寸改写会碰撞。因此 **entries 头部必须写 `revision`**（写入时取 `manifest.revision + 1`），key 用 `max(manifest.revision, entries.revision)`；两者任一落后都能触发重建。
 - 导入/删除/切换显示要在写 manifest 前先落 entries revision；若崩溃导致 manifest 落后，下一次 `reconcile` 用 entries revision 补齐并重写 manifest。
+
+**3.2.2 预编译模板**（冷启动专用，样式无关）：
+
+- `css-template.css` 与 entries 同目录，内容是「静态规则 + 每 token 5 字节索引」；token
+  只有 colour / size / font 三种，读取时用 `string.sub + table.concat` 重建，不做整表
+  正则替换（device 上 gsub 要 ~140 ms，索引重建只要 ~32 ms）。
+- 模板键只含「哪些规则存在」的输入：目录、`display_mode`、`manifest.revision`、
+  provider、fallback 开关、每个选中 entries 的 mtime/size/revision。样式不进键，所以
+  换字号/颜色/字体仍命中同一份模板。
+- `Store.importResult` 与整书翻译完成时调用 `Overlay.warmCssTemplate` 预热；任何一次
+  冷构建也会写回。写入失败只退化为下一次解码，不影响导入成功。
+- `clearCssCache` 只清进程内 CSS；entries 缓存与模板缓存独立失效。模板命中时不再调用
+  `loadEntries`；`--overlay` 的四段数据见 PERF §7。
+- 按章 CSS 过滤已删除（D14）：跨章换表与内存开销不划算，全书模板替换已足够。
 - 用户手动切换 `display_provider` 时，除写 manifest 外还清空进程内 `css_cache`，保证立即生效。
 - `css_cache` 的容量策略同步调整：**每书 1 条 + 全局总大小上限 8 MB**，超出按 LRU 淘汰。当前「16 条 × 每条约 1–3 MB」的写法在 fallback 打开时会到 30–50 MB（见 15.4）。
 

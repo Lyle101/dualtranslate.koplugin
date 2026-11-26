@@ -2,13 +2,13 @@
 -- 性能基准：设计 §15.4 的四项可脚本化指标
 --   outline   章节目录解析（冷，删磁盘缓存）
 --   css       CSS 构建（3,000 段；单 provider / fallback 三服务）
---   import    MCP 导入（3,000 段；锁 + 事务 + entries/manifest/signal）
+--   import    MCP 导入（3,000 段；锁 + 事务 + entries/manifest/signal + 模板预热）
 --   anchor    锚点页表（单章锚点解析，冷；每个 run 解析一个最重的章节）
 --
 -- 口径：outline / css / import 各跑 --runs 次（默认 5）取中位数；anchor 每个 run
 -- 解析一个不同章节（共 --runs 章）后取中位数。不拿单次读数下结论。
 -- 注意：CSS 合成夹具是上界（高度规律的字符串会放大渲染开销，实测约 5 倍）；
--- 真实 overlay 在 entries 解析缓存命中后的重建约 112 ms，用 --overlay 直接测。
+-- 真实 overlay 的冷启动约 62 ms、改字号约 42 ms，用 --overlay 直接测。
 -- 目标是 §15.4 的 Kindle 真机 P50 参考值，本脚本只负责测量与判定。
 --
 -- 真机（KOReader 自带 luajit，必须用 KO_ROOT 下的 libs）：
@@ -32,12 +32,12 @@
 --
 -- 直接测真实缓存目录（生产值，不受合成夹具影响）：
 --   luajit tools/bench.lua --overlay \
---     /mnt/us/koreader/cache/dualtranslate/books/<hash> [--provider ID] [--chapter N]
+--     /mnt/us/koreader/cache/dualtranslate/books/<hash> [--provider ID]
 --
 -- 参数：--book EPUB（可重复）| --runs N | --segments N | --css-segments N
 --       --only outline,css,import,anchor | --work DIR | --md PATH | --json PATH
 --       --device NAME（默认读 DT_DEVICE）| --list [--list-dir DIR]
---       --overlay DIR [--provider ID] [--chapter N] | --keep | --help
+--       --overlay DIR [--provider ID] | --keep | --help
 --
 -- 安全：只写 --work 目录（默认设备 /mnt/us/dtbench，桌面 /tmp/dt_bench），
 -- 目录里有 .dtbench 标记才会清理 data/ 与 css/；--work 与 KO_ROOT 重叠会被拒绝。
@@ -81,7 +81,6 @@ local opts = {
     keep = false,
     overlay = nil,
     provider = nil,
-    chapter = nil,
 }
 do
     local index = 1
@@ -109,14 +108,13 @@ do
         elseif item == "--list-dir" then opts.list_dir = next_value(item)
         elseif item == "--overlay" then opts.overlay = next_value(item)
         elseif item == "--provider" then opts.provider = next_value(item)
-        elseif item == "--chapter" then opts.chapter = tonumber(next_value(item))
         elseif item == "--keep" then opts.keep = true
         elseif item == "--help" or item == "-h" then
             print("用法: luajit tools/bench.lua [--book EPUB]... [--runs N] [--segments N]")
             print("      [--css-segments N] [--only outline,css,import,anchor] [--work DIR]")
             print("      [--md PATH] [--json PATH] [--device NAME] [--keep]")
             print("      luajit tools/bench.lua --list [--list-dir DIR]")
-            print("      luajit tools/bench.lua --overlay DIR [--provider ID] [--chapter N]")
+            print("      luajit tools/bench.lua --overlay DIR [--provider ID]")
             os.exit(0)
         else
             io.stderr:write("忽略未知参数: " .. tostring(item) .. "\n")
@@ -580,11 +578,13 @@ local function bench_css(dir, provider, fallback, backdated)
     end
     local samples, bytes = {}, 0
     for _ = 1, opts.runs do
-        -- Cold means cold: clear the parsed entries too, otherwise these
-        -- samples would silently measure the style rebuild (entries hit) and
-        -- §6's "cold build includes decode" would be wrong.
+        -- Cold means cold: clear the parsed entries and the precompiled rule
+        -- template too, otherwise these samples would silently measure the
+        -- style rebuild (entries hit or template substitution) and §6's
+        -- "cold build includes decode" would be wrong.
         Overlay.clearCssCache()
         Overlay.clearEntriesCache()
+        Overlay.removeCssTemplate(dir)
         collectgarbage("collect")
         local started = clock()
         local css = Overlay.buildCss(dir, options)
@@ -1127,7 +1127,7 @@ local function render_markdown(environment, books, results)
         .. "fallback 三家均分 %d 段 %s（目标 < 500 ms，%s）；三家各持 %d 条"
         .. "（%d 条加载）%s（无目标）。分解：entries 读取（JSON 解码 + 去重）%s，"
         .. "同参数命中 %s——阅读中重绘不贵；解码只在冷构建/导入后付一次，"
-        .. "改字号/切服务命中解析缓存（`--overlay` 约 112 ms）。",
+        .. "改字号/切服务由预编译模板替换（`--overlay` 32.3 ms），冷启动 56.2 ms。",
         fmt_range(css_single_low, css_single_high), css_single_status,
         environment.css_segments,
         fmt_range(css_fallback_low, css_fallback_high), css_fallback_status,
@@ -1185,15 +1185,17 @@ local function render_markdown(environment, books, results)
         .. "三家各翻不同段落会得到 9,000 条规则，那等价于一本 9,000 段的书，不在 3,000 段口径内。"
         .. "「entries 读取」是同一份文件的 JSON 解码 + 去重；「CSS 命中」是 entries 落盘超过 "
         .. "3 秒后同参数再调用（阅读中翻页/重绘的稳态）。注意本表的「冷构建」在清掉解析缓存后"
-        .. "测量，包含解码；生产中改字号/切服务命中解析缓存，约 112 ms（`--overlay`，见 §7）。"
+        .. "测量，包含解码；生产中改字号/切服务由 `css-template.css` 替换样式，"
+        .. "约 32.3 ms（`--overlay`，见 §7）。"
         .. "同一份 entries 拆成三份后 JSON 解析会明显变快（LuaJSON 1.3.5 的大文档开销），"
         .. "因此「三服务均分」行低于单 provider 行是文件布局差异，不代表 fallback 更快。"
         .. "CSS 夹具与书内容无关；同轮不同书之间的差异与夹具无关，判定按整轮最大值。"
-        .. "本表的冷构建包含 entries 解码（真机约 0.5 s），不能直接对照 200 ms；"
-        .. "entries 命中后的样式重建请用 `--overlay` 测（真机约 112 ms）。")
+        .. "本表的冷构建包含 entries 解码（真机约 0.61 s；若顺带编码/写模板约 0.84 s），"
+        .. "不能直接对照 200 ms；导入后已预热模板，冷启动请用 `--overlay` 测"
+        .. "（真机 56.2 ms）。")
     add("- **导入**：`Store.importResult` 全链路（书锁、SQLite 事务、entries/manifest/signal "
-        .. "写入）；每次前清空该书 overlay 目录与 DB 行，但复用同一个基准库（WAL 与页缓存是热的），"
-        .. "不等价于空库首次导入。")
+        .. "写入，3.2.2 起还包含一次 CSS 模板预热）；每次前清空该书 overlay 目录与 DB 行，"
+        .. "但复用同一个基准库（WAL 与页缓存是热的），不等价于空库首次导入。")
     add("- **锚点页表**：`Epub.chapter_anchor_paths` 冷解析目录锚点最多的 " .. environment.runs
         .. " 个章节（各不同，3 槽 LRU 不会命中），中位数为单章成本；这是最坏单章，不是均匀抽样。"
         .. "CREngine 的 `getPageFromXPointer` 探测（每章 N 次）无法在 headless 复现，未计入。")
@@ -1269,10 +1271,16 @@ if opts.list then
 end
 
 -- Real overlay mode: production numbers, free of the synthetic fixture.
--- Cold = both caches cleared; warm = only the style options changed, so the
--- parsed entries doc must come from the new cache.
+-- Four phases:
+--   template  cold start with the precompiled rules (both caches cleared)
+--   cold      no template either, so the entries JSON must be decoded
+--   style     only the colour changes; the template serves the new sheet
+--   hit       same options again, served from the in-process CSS cache
 if opts.overlay then
     local dir = opts.overlay
+    -- A trailing slash would make template_key/buildCss derive a different
+    -- dir string than the production warm path and miss the template.
+    if dir ~= "/" then dir = dir:gsub("/+$", "") end
     local manifest = Overlay.loadManifest(dir)
     if not manifest then
         io.stderr:write("不是 v3 overlay 目录（缺 manifest.json）: " .. dir .. "\n")
@@ -1290,8 +1298,36 @@ if opts.overlay then
         io.stderr:write("overlay 没有可用的 provider\n")
         os.exit(2)
     end
-    local chapter = tonumber(opts.chapter)
-    local fallback = manifest.display_fallback == true
+    local fallback = manifest.display_fallback ~= false
+    -- This mode measures a production cache directory.  The cold phase must
+    -- remove the template to measure the decode path, and every cold build
+    -- writes a new one; snapshot the original so the user's next open is not
+    -- left with a template built for --provider/fallback of this run.
+    local template_path = dir .. "/css-template.css"
+    local original_template
+    do
+        local file = io.open(template_path, "rb")
+        if file then
+            original_template = file:read("*a")
+            file:close()
+        end
+    end
+    local function restore_template()
+        if not original_template then
+            os.remove(template_path)
+            return
+        end
+        local temporary = template_path .. ".restore.tmp"
+        local file = io.open(temporary, "wb")
+        if not file then return end
+        local ok = file:write(original_template)
+        ok = file:close() and ok
+        if ok then
+            if not os.rename(temporary, template_path) then os.remove(temporary) end
+        else
+            os.remove(temporary)
+        end
+    end
     local function options(color)
         return {
             translation_visible = true,
@@ -1299,7 +1335,6 @@ if opts.overlay then
             translation_size = "1em",
             provider = provider,
             fallback = fallback,
-            chapter_index = chapter,
         }
     end
     local function timed(options_table)
@@ -1308,67 +1343,92 @@ if opts.overlay then
         local css = Overlay.buildCss(dir, options_table)
         return (clock() - started) * 1000, css
     end
-    -- Same rule as the rest of the tool: no single reading becomes a
-    -- conclusion.  Cold clears both caches before every run; warm changes the
-    -- colour so the CSS key misses while the parsed entries stay cached; the
-    -- hit phase primes one option table and rebuilds it repeatedly.
     local runs = opts.runs
-    local cold, warm, hit = {}, {}, {}
-    local cold_css, warm_css, hit_css
+    -- Prime: one normal build writes the template and fills the CSS cache.
+    timed(options("#666666"))
     local before = Overlay.cacheStats()
+
+    local template_samples, cold, style, hit = {}, {}, {}, {}
+    local template_css, cold_css, style_css, hit_css
+    for _ = 1, runs do
+        -- Simulate a fresh process: no in-memory CSS, no parsed entries and no
+        -- in-memory template.  Leaving the template cache alive would measure
+        -- only the substitution instead of the real cold start (file read,
+        -- index validation and rebuild).
+        Overlay.clearCssCache()
+        Overlay.clearEntriesCache()
+        Overlay.clearTemplateCache()
+        local ms, css = timed(options("#666666"))
+        template_samples[#template_samples + 1] = ms
+        template_css = css or template_css
+    end
+    local after_template = Overlay.cacheStats()
     for _ = 1, runs do
         Overlay.clearCssCache()
         Overlay.clearEntriesCache()
+        Overlay.removeCssTemplate(dir)
         local ms, css = timed(options("#666666"))
         cold[#cold + 1] = ms
-        cold_css = css
+        cold_css = css or cold_css
     end
     local after_cold = Overlay.cacheStats()
     for index = 1, runs do
         -- Distinct colours keep the stylesheet key cold (17, 34, ... never
-        -- repeat for the default five runs).
+        -- repeat for the default five runs).  The template key ignores style.
         local ms, css = timed(options(string.format("#%02x4d4d", (index * 17) % 256)))
-        warm[#warm + 1] = ms
-        warm_css = css
+        style[#style + 1] = ms
+        style_css = css or style_css
     end
-    local after_warm = Overlay.cacheStats()
+    local after_style = Overlay.cacheStats()
     local hit_options = options("#4d4dff")
     Overlay.buildCss(dir, hit_options)
     for _ = 1, runs do
         local ms, css = timed(hit_options)
         hit[#hit + 1] = ms
-        hit_css = css
+        hit_css = css or hit_css
     end
     local after_hit = Overlay.cacheStats()
     local entries_size = lfs.attributes(Overlay.entriesPath(dir, provider), "size") or 0
     print(string.format("overlay: %s", dir))
-    print(string.format("provider: %s  fallback=%s  chapter=%s  entries=%s",
-        provider, tostring(fallback), chapter and tostring(chapter) or "all",
-        fmt_kb(entries_size)))
+    print(string.format("provider: %s  fallback=%s  entries=%s",
+        provider, tostring(fallback), fmt_kb(entries_size)))
     print("")
     print(string.format("| 场景（%d 次中位数） | 耗时 | 规则 | CSS |", runs))
     print("| --- | --- | --- | --- |")
-    print(string.format("| 冷构建（清 CSS + entries 缓存） | %s | %d | %s |",
+    print(string.format("| 冷启动（模板命中） | %s | %d | %s |",
+        fmt_ms(median(template_samples)), rule_count(template_css), fmt_kb(#template_css)))
+    print(string.format("| 冷构建（无模板，含解码） | %s | %d | %s |",
         fmt_ms(median(cold)), rule_count(cold_css), fmt_kb(#cold_css)))
-    print(string.format("| 样式变化重建（entries 命中） | %s | %d | %s |",
-        fmt_ms(median(warm)), rule_count(warm_css), fmt_kb(#warm_css)))
+    print(string.format("| 样式变化（模板替换） | %s | %d | %s |",
+        fmt_ms(median(style)), rule_count(style_css), fmt_kb(#style_css)))
     print(string.format("| 同参数命中 | %s | %d | %s |",
         fmt_ms(median(hit)), rule_count(hit_css), fmt_kb(#hit_css)))
     print("")
-    print("样本：冷 " .. fmt_samples(cold))
-    print("      暖 " .. fmt_samples(warm))
+    print("样本：模板 " .. fmt_samples(template_samples))
+    print("      冷   " .. fmt_samples(cold))
+    print("      样式 " .. fmt_samples(style))
     print("      命中 " .. fmt_samples(hit))
-    print(string.format("entries：冷 解码 %d / 命中 %d；暖 解码 %d / 命中 %d；命中段 解码 %d / 命中 %d"
-        .. "（命中段的 1 次来自预热；fallback 时每个 provider 各算一次）",
-        after_cold.entries_loads - before.entries_loads,
-        after_cold.entries_hits - before.entries_hits,
-        after_warm.entries_loads - after_cold.entries_loads,
-        after_warm.entries_hits - after_cold.entries_hits,
-        after_hit.entries_loads - after_warm.entries_loads,
-        after_hit.entries_hits - after_warm.entries_hits))
-    print(string.format("CSS：构建 %d、同参数命中 %d",
-        after_hit.css_builds - before.css_builds,
-        after_hit.css_hits - before.css_hits))
+    local function delta(after, from, key)
+        return after[key] - from[key]
+    end
+    print(string.format("entries：模板段 解码 %d / 命中 %d；冷段 解码 %d / 命中 %d；"
+        .. "样式段 解码 %d / 命中 %d；命中段 解码 %d / 命中 %d",
+        delta(after_template, before, "entries_loads"),
+        delta(after_template, before, "entries_hits"),
+        delta(after_cold, after_template, "entries_loads"),
+        delta(after_cold, after_template, "entries_hits"),
+        delta(after_style, after_cold, "entries_loads"),
+        delta(after_style, after_cold, "entries_hits"),
+        delta(after_hit, after_style, "entries_loads"),
+        delta(after_hit, after_style, "entries_hits")))
+    print(string.format("模板：命中 %d、未命中 %d、写入 %d；CSS：构建 %d、命中 %d"
+        .. "（预热 1 次不计入各段）",
+        delta(after_hit, before, "template_hits"),
+        delta(after_hit, before, "template_misses"),
+        delta(after_hit, before, "template_writes"),
+        delta(after_hit, before, "css_builds"),
+        delta(after_hit, before, "css_hits")))
+    restore_template()
     os.exit(0)
 end
 

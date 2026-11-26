@@ -1158,6 +1158,15 @@ function Epub.translate_overlay(opts, ...)
                 return false
             end
             if not Overlay.saveManifest(output_dir, manifest) then return false end
+            -- A whole-book run is the in-process equivalent of an MCP import:
+            -- precompile once at the end (not on every checkpoint) so the next
+            -- cold open does not pay the entries decode.
+            if is_complete and Overlay.warmCssTemplate then
+                -- Best effort: a test stub or an unwritable cache must not turn
+                -- a successful translation into a failed save.  `merged` is the
+                -- exact array just written, so no second decode is needed.
+                pcall(Overlay.warmCssTemplate, output_dir, merged, provider)
+            end
             if legacy_doc then
                 os.rename(legacy_path, output_dir .. "/overlay.v2.bak")
             end

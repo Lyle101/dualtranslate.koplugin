@@ -843,6 +843,14 @@ function Store.importResult(job, result, opts)
             at = now,
         })
 
+        -- Precompile the rules while the entries doc is already in memory.
+        -- The next reader process can then serve the first open (and every
+        -- later cold start) without decoding the entries JSON; failure here
+        -- only costs that decode, so it never fails the import.
+        if Overlay.warmCssTemplate then
+            pcall(Overlay.warmCssTemplate, dir, entries, provider_id)
+        end
+
         return {
             job_id = job.job_id,
             provider_id = provider_id,
