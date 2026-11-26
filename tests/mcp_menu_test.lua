@@ -212,17 +212,33 @@ end
 print("== 2. buildMcpMenu ==")
 do
     local items = dualtranslate:buildMcpMenu()
-    -- 3.2.1: the device-side inbox is gone (the agent always commits through
-    -- dtctl), so only export / task list / refresh are left.
-    check("三个入口", #items == 3)
+    -- 3.2.1 removed the device-side inbox; 17 Q5 added the per-book glossary
+    -- and style guide entries between export and the task list.
+    check("五个入口", #items == 5)
     check("导出所选章节", items[1].text == "导出所选章节…")
-    check("任务列表带计数", items[2].text_func() == "任务列表（0）")
-    check("刷新外部译文", items[3].text == "刷新外部译文")
+    check("术语表入口", items[2].text_func() == "术语表…", items[2].text_func())
+    check("风格指南入口", items[3].text == "风格指南…")
+    check("任务列表带计数", items[4].text_func() == "任务列表（0）")
+    check("刷新外部译文", items[5].text == "刷新外部译文")
     -- 3.2.2: actions keep the menu open, so a finished export returns to this
     -- page instead of dropping the user back into the book.
     check("导出保持菜单", items[1].keep_menu_open == true)
-    check("刷新保持菜单", items[3].keep_menu_open == true)
-    check("MCP 页可自刷新", items.refresh_func ~= nil and #items.refresh_func() == 3)
+    check("刷新保持菜单", items[5].keep_menu_open == true)
+    check("MCP 页可自刷新", items.refresh_func ~= nil and #items.refresh_func() == 5)
+
+    -- 17 Q5: the row counts the book's terms and the file lives outside the
+    -- manifest, so merely saving it changes nothing else.
+    local Glossary = require("dualtranslate_glossary")
+    local book_dir = dualtranslate:getBookCacheDirectory(BOOK)
+    local saved = Glossary.save(book_dir, {
+        terms = { { source = "Darcy", target = "达西" },
+            { source = "Lizzy", target = "莉齐" } },
+    })
+    check("术语表可保存", saved ~= nil)
+    local rebuilt = dualtranslate:buildMcpMenu()
+    check("术语表入口带条数", rebuilt[2].text_func() == "术语表（2 条）…",
+        rebuilt[2].text_func())
+    os.remove(book_dir .. "/glossary.json")
     -- 导出走 MCP 引擎，与菜单里当前选中的翻译引擎无关：选择器的「已翻译」
     -- 标记必须按 MCP 的 provider 判，而不是按 getMode()。
     local picker_opts
@@ -239,10 +255,10 @@ do
         and tostring(last_dialog.title):find("3 章", 1, true) ~= nil
         and tostring(last_dialog.title):find("2 个文件", 1, true) ~= nil,
         last_dialog and tostring(last_dialog.title))
-    local job_items = items[2].sub_item_table_func()
+    local job_items = items[4].sub_item_table_func()
     check("空任务列表有占位行", #job_items == 1 and job_items[1].text == "没有任务")
     -- The menu builder runs twice per open; the second call must hit the cache.
-    check("任务列表同秒复用", items[2].sub_item_table_func() == job_items)
+    check("任务列表同秒复用", items[4].sub_item_table_func() == job_items)
 end
 
 -- ============================================================

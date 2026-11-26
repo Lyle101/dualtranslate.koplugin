@@ -133,6 +133,7 @@ class JobService:
 
     def get_job(self, job_id: str) -> dict:
         status = self.status(job_id)
+        options = status.get("options") or {}
         return {
             "job_id": job_id,
             "book": {
@@ -148,6 +149,14 @@ class JobService:
             "provider_id": status.get("provider_id"),
             "model_name": status.get("model_name"),
             "submitted": len(self._load_partial(job_id)),
+            # 17 Q5: always present (empty for jobs exported before it), so a
+            # tool consumer can read options.glossary without a nil guard.
+            "options": {
+                "glossary": options.get("glossary") or [],
+                "style_guide": options.get("style_guide") or "",
+                "max_chars_per_segment": options.get("max_chars_per_segment"),
+                "split_long_segments": options.get("split_long_segments"),
+            },
         }
 
     def get_segments(

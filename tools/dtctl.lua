@@ -416,10 +416,14 @@ handlers["job-status"] = function(opts)
     local job_id = job_id_or_err
     local state = Mcp.loadState(job_id) or {}
     local meta = Mcp.loadMeta(job_id)
-    local book, total, chapter_count, segment_ids
+    local book, total, chapter_count, segment_ids, options
     if meta then
         -- Index path: no job.json decode at all.
         book = meta.book or {}
+        -- A meta.json written before options existed still has the top-level
+        -- max_chars_per_segment; do not lose it for old jobs.
+        options = meta.options
+            or { max_chars_per_segment = meta.max_chars_per_segment }
         segment_ids = Mcp.listSegmentIds(job_id) or {}
         total = tonumber(meta.total) or #segment_ids
         chapter_count = tonumber(meta.chapter_count) or 0
@@ -435,11 +439,18 @@ handlers["job-status"] = function(opts)
         local job, job_err = Mcp.loadJob(job_id)
         if not job then return nil, job_err or "任务索引不可用" end
         book = job.book or {}
+        -- A truncated index falls back to the whole job; keep the meta-derived
+        -- max_chars if this older job.json has no options object.
+        options = job.options or options
         segment_ids = {}
         for index, segment in ipairs(job.segments) do segment_ids[index] = segment.id end
         total = #job.segments
         chapter_count = #(job.chapters or {})
     end
+    -- Fixed shape for the PC: a job exported before options existed still
+    -- answers with an empty glossary instead of nil, so `options.glossary`
+    -- never needs a nil guard in a tool consumer.
+    options = type(options) == "table" and options or {}
     return {
         ok = true, job_id = job_id,
         book_path = book.device_path,
@@ -452,6 +463,13 @@ handlers["job-status"] = function(opts)
         total = total,
         chapter_count = chapter_count,
         segment_ids = segment_ids,
+        -- 17 Q5: the agent reads its translation instructions from here.
+        options = {
+            max_chars_per_segment = options.max_chars_per_segment,
+            split_long_segments = options.split_long_segments,
+            glossary = as_array(options.glossary or {}),
+            style_guide = options.style_guide or "",
+        },
         status = state.status or "exported",
         provider_id = state.provider_id,
         model_name = state.model_name,

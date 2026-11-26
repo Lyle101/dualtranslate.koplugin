@@ -17,6 +17,7 @@ local Overlay = require("dualtranslate_overlay")
 local Coverage = require("dualtranslate_coverage")
 local Store = require("dualtranslate_store")
 local Tools = require("dualtranslate_tools")
+local Glossary = require("dualtranslate_glossary")
 local TranslationUI = require("dualtranslate_ui")
 
 local Reader = {}
@@ -174,6 +175,21 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
         local legacy = Overlay.load(dir .. "/overlay.json")
         return legacy ~= nil and legacy.book_path == book_path
     end
+    -- 17 Q5: glossary.json is user-authored editorial data, not translation
+    -- output.  The cache directory is swept as a whole, so stash the file next
+    -- to it and put it back: "delete every translation" must not throw away
+    -- the terms.  If it cannot even be read, the directory is left alone.
+    local function take_glossary(dir)
+        return Glossary.stash(dir)
+    end
+    local function put_glossary(dir, stashed)
+        if stashed == nil then return true end
+        if not Glossary.unstash(dir, stashed) then
+            logger.warn("dualtranslate: glossary could not be restored:", dir)
+            return false
+        end
+        return true
+    end
     -- 1) Fast path: the directory for the *current* target language.  This
     -- also catches legacy overlays that carry no book metadata.
     local current_dir = self:getBookCacheDirectory(book_path)
@@ -182,7 +198,17 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
     end
     if current_dir:sub(1, #books_root) == books_root
         and #current_dir > #books_root then
-        Tools.rmtree(current_dir)
+        local glossary, unreadable = take_glossary(current_dir)
+        if unreadable then
+            -- Keep the whole directory: deleting it would destroy the only
+            -- copy of the user's terms.
+            removed = math.max(0, removed - 1)
+            logger.warn("dualtranslate: glossary unreadable, keep cache dir:",
+                current_dir)
+        else
+            Tools.rmtree(current_dir)
+            put_glossary(current_dir, glossary)
+        end
     end
     -- 2) Sweep every other language directory whose overlay belongs to this
     -- same book (metadata written since v1.2.11).  Otherwise, if the target
@@ -195,8 +221,15 @@ function dualtranslate:removeTranslationFilesForBook(book_path)
             if name ~= "." and name ~= ".." then
                 local dir = books_root .. name
                 if dir ~= current_dir and belongs_to_book(dir) then
-                    removed = removed + 1
-                    Tools.rmtree(dir)
+                    local glossary, unreadable = take_glossary(dir)
+                    if unreadable then
+                        logger.warn(
+                            "dualtranslate: glossary unreadable, keep cache dir:", dir)
+                    else
+                        removed = removed + 1
+                        Tools.rmtree(dir)
+                        put_glossary(dir, glossary)
+                    end
                 end
             end
         end
@@ -789,12 +822,21 @@ function dualtranslate:exportMcpJob(ranges, menu)
         if UIManager.forceRePaint then UIManager:forceRePaint() end
         -- pcall: a raise inside the writer used to leave the dialog sitting at
         -- 100% forever, with nothing to tell the user it had failed.
-        local ok_export, result, err = pcall(Mcp.exportJob, {
-            book_path = book_path,
-            collected = collected,
-            source_lang = self:getSourceLang(),
-            target_lang = self:getTargetLang(),
-        })
+        -- 17 Q5: the per-book glossary/style guide travels with the job so the
+        -- PC-side agent can honour the user's terms.  The read is inside the
+        -- pcall too: a filesystem error must close the progress dialog instead
+        -- of leaving it at 100%.
+        local ok_export, result, err = pcall(function()
+            local book_glossary = Glossary.load(self:getBookCacheDirectory(book_path))
+            return Mcp.exportJob{
+                book_path = book_path,
+                collected = collected,
+                source_lang = self:getSourceLang(),
+                target_lang = self:getTargetLang(),
+                glossary = book_glossary.terms,
+                style_guide = book_glossary.style_guide,
+            }
+        end)
         if not ok_export then result, err = nil, tostring(result) end
         UIManager:close(progress_dialog, "ui")
         if not result then
@@ -824,6 +866,139 @@ function dualtranslate:exportMcpJob(ranges, menu)
         TranslationUI.showPersistent(message)
     end
     UIManager:scheduleIn(0.1, step)
+end
+
+------------------------------------------------------------------------
+-- Glossary / style guide (17 Q5)
+--
+-- Stored per book + target language in the book cache directory, but in its
+-- own glossary.json: editing a term must not bump the overlay revision,
+-- rebuild css-template.css or trigger a reader reload.  Only the MCP exporter
+-- reads it, when it fills the job's options.glossary / options.style_guide.
+------------------------------------------------------------------------
+
+function dualtranslate:loadBookGlossary()
+    local book_path = self:currentBookPath()
+    if not book_path then return nil end
+    return Glossary.load(self:getBookCacheDirectory(book_path))
+end
+
+-- One line per issue, so the confirmation after Save explains every row that
+-- did not make it into the file instead of silently dropping it.
+local function glossary_dropped_note(stats)
+    local notes = {}
+    local skipped = (stats.invalid or 0) + (stats.too_long or 0)
+    if skipped > 0 then
+        notes[#notes + 1] = string.format(_("忽略 %d 行无效或过长内容"), skipped)
+    end
+    if (stats.duplicate or 0) > 0 then
+        notes[#notes + 1] = string.format(_("合并 %d 条重复原文"), stats.duplicate)
+    end
+    if (stats.overflow or 0) > 0 then
+        notes[#notes + 1] = string.format(_("超出上限 %d 条未保存"), stats.overflow)
+    end
+    return table.concat(notes, "\n")
+end
+
+function dualtranslate:showGlossaryDialog(menu)
+    local book_path = self:currentBookPath()
+    if not book_path then return end
+    local dir = self:getBookCacheDirectory(book_path)
+    local current = Glossary.load(dir)
+    local dialog
+    dialog = InputDialog:new{
+        title = string.format(_("术语表（每行一条：原文=译文，最多 %d 条）"),
+            Glossary.MAX_TERMS),
+        description = _("只影响 MCP 导出；删除译文不会删除这里的内容"),
+        input = Glossary.format(current.terms),
+        input_hint = _("例如：\nDarcy=达西\nNetherfield=内瑟菲尔德"),
+        -- Full-screen text editor: the on-screen keyboard would otherwise
+        -- leave three visible lines for a whole glossary.
+        fullscreen = true,
+        condensed = true,
+        allow_newline = true,
+        add_nav_bar = true,
+        buttons = {{
+            {
+                text = _("取消"),
+                id = "close",
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("保存"),
+                callback = function()
+                    local terms, stats = Glossary.parse(dialog:getInputText())
+                    local saved, err = Glossary.save(dir, {
+                        terms = terms,
+                        style_guide = current.style_guide,
+                    })
+                    if not saved then
+                        -- Keep the editor open: closing it would throw away
+                        -- everything the user just typed.
+                        TranslationUI.showInfo(_("保存失败：") .. tostring(err))
+                        return
+                    end
+                    UIManager:close(dialog)
+                    if menu then self:refreshMenuPage(menu) end
+                    local message = string.format(_("已保存 %d 条术语"),
+                        #saved.terms)
+                    local note = glossary_dropped_note(stats)
+                    if note ~= "" then message = message .. "\n" .. note end
+                    TranslationUI.showInfo(message)
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function dualtranslate:showStyleGuideDialog(menu)
+    local book_path = self:currentBookPath()
+    if not book_path then return end
+    local dir = self:getBookCacheDirectory(book_path)
+    local current = Glossary.load(dir)
+    local dialog
+    dialog = InputDialog:new{
+        title = _("风格指南（发送给翻译模型的统一要求）"),
+        description = _("留空保存会使用默认要求；超长会截断"),
+        input = current.style_guide,
+        input_hint = _("留空则使用默认要求：") .. Glossary.DEFAULT_STYLE_GUIDE,
+        fullscreen = true,
+        condensed = true,
+        allow_newline = true,
+        add_nav_bar = true,
+        buttons = {{
+            {
+                text = _("取消"),
+                id = "close",
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("保存"),
+                callback = function()
+                    local saved, err = Glossary.save(dir, {
+                        terms = current.terms,
+                        style_guide = dialog:getInputText(),
+                    })
+                    if not saved then
+                        -- Keep the editor open so a failed write does not cost
+                        -- the user the whole text.
+                        TranslationUI.showInfo(_("保存失败：") .. tostring(err))
+                        return
+                    end
+                    UIManager:close(dialog)
+                    if menu then self:refreshMenuPage(menu) end
+                    local truncated = saved.stats and saved.stats.style_truncated
+                    TranslationUI.showInfo(truncated
+                        and _("已保存风格指南（超长部分已截断；留空则使用默认要求）")
+                        or _("已保存风格指南（留空则使用默认要求）"))
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 -- Poll the reload signal on page turns (10.7).  The comparison uses the
@@ -1353,6 +1528,31 @@ function dualtranslate:buildMcpMenu()
                     end,
                 })
             end,
+        },
+        {
+            -- 17 Q5: per-book terminology for the agent.  It lives under MCP
+            -- because only the exported job consumes it; adding it does not
+            -- touch the manifest or the CSS template.
+            text_func = function()
+                local data = self:loadBookGlossary()
+                if data and data.corrupt then
+                    return _("术语表（文件损坏）…")
+                end
+                local count = data and #data.terms or 0
+                if count > 0 then
+                    return string.format(_("术语表（%d 条）…"), count)
+                end
+                return _("术语表…")
+            end,
+            enabled_func = function() return self:isEpub() end,
+            keep_menu_open = true,
+            callback = function(menu) self:showGlossaryDialog(menu) end,
+        },
+        {
+            text = _("风格指南…"),
+            enabled_func = function() return self:isEpub() end,
+            keep_menu_open = true,
+            callback = function(menu) self:showStyleGuideDialog(menu) end,
         },
         {
             text_func = function()

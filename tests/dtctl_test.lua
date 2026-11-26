@@ -277,6 +277,13 @@ do
     local status = decode_single_line(status_out)
     check("rpc job-status", status and status.total == 1
         and status.segment_ids and status.segment_ids[1] == "s000001", status_out)
+    -- 17 Q5: a job exported before options.glossary existed still answers
+    -- with the fixed shape (empty glossary, empty style guide).
+    check("job-status options 形状", status and status.options
+        and #status.options.glossary == 0 and status.options.style_guide == ""
+        and status.options.max_chars_per_segment == 4500, status_out)
+    check("空术语表输出为数组", tostring(status_out):find('"glossary":[]', 1, true) ~= nil,
+        status_out)
 
     local seg_out = rpc({ argv = { "get-segments", "--job", JOB_PATH,
         "--offset", "0", "--limit", "5", "--context" } })
@@ -337,6 +344,12 @@ do
             target_lang = "zh-Hans", spine_count = 1,
             file_size = BOOK_SIZE, file_mtime = BOOK_MTIME },
         chapter_count = 1, total = 3,
+        options = {
+            max_chars_per_segment = 4500,
+            split_long_segments = true,
+            glossary = { { source = "Darcy", target = "达西" } },
+            style_guide = "保留段落结构",
+        },
     }))
     local lines = {}
     for index = 1, 3 do
@@ -364,6 +377,28 @@ do
     local status = decode_single_line(status_out)
     check("索引 job-status", status and status.total == 3
         and #status.segment_ids == 3 and status.title == "Index", status_out)
+    check("索引 job-status options", status and status.options
+        and #status.options.glossary == 1
+        and status.options.glossary[1].source == "Darcy"
+        and status.options.glossary[1].target == "达西"
+        and status.options.style_guide == "保留段落结构", status_out)
+
+    -- A meta.json written before options existed keeps max_chars as a
+    -- top-level field; the old job must still answer, with an empty glossary.
+    write_file(index_dir .. "/meta.json", JSON.encode({
+        schema = "dualtranslate.job.meta.v1", job_id = index_job,
+        created_at = os.time(),
+        book = { device_path = BOOK, title = "Index", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 1,
+            file_size = BOOK_SIZE, file_mtime = BOOK_MTIME },
+        chapter_count = 1, total = 3, max_chars_per_segment = 4500,
+    }))
+    status_out = rpc2({ argv = { "job-status", "--job", index_job_path } })
+    status = decode_single_line(status_out)
+    check("旧 meta 兼容 max_chars", status and status.options
+        and status.options.max_chars_per_segment == 4500
+        and #status.options.glossary == 0
+        and tostring(status_out):find('"glossary":[]', 1, true) ~= nil, status_out)
 
     local seg_out = rpc2({ argv = { "get-segments", "--job", index_job_path,
         "--offset", "1", "--limit", "1", "--context" } })

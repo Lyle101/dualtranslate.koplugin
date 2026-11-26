@@ -159,6 +159,27 @@ class LocalTransport:
     def _job_status(self, job_path: str) -> dict:
         job, state = self._job_bundle(job_path)
         book = job.get("book", {})
+        # Mirror dtctl: the device serves job-status from meta.json, and that
+        # is where options live.  A meta written before options existed only
+        # has the top-level max_chars_per_segment.
+        options = None
+        meta_path = self._path(job_path).parent / "meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                meta = {}
+            if isinstance(meta.get("options"), dict):
+                options = meta["options"]
+            else:
+                # Old meta: only the top-level max_chars survived.  Do not fall
+                # back to job.options here -- dtctl answers from meta, and both
+                # transports must return the same thing for the same job.
+                options = {"max_chars_per_segment": meta.get("max_chars_per_segment")}
+        if options is None:
+            options = job.get("options")
+        if not isinstance(options, dict):
+            options = {}
         return {
             "ok": True,
             "job_id": job["job_id"],
@@ -172,6 +193,13 @@ class LocalTransport:
             "total": len(job["segments"]),
             "chapter_count": len(job.get("chapters", [])),
             "segment_ids": [segment["id"] for segment in job["segments"]],
+            # Same shape dtctl job-status serves over SSH (17 Q5).
+            "options": {
+                "glossary": options.get("glossary") or [],
+                "style_guide": options.get("style_guide") or "",
+                "max_chars_per_segment": options.get("max_chars_per_segment"),
+                "split_long_segments": options.get("split_long_segments"),
+            },
             "status": state.get("status", "exported"),
             "provider_id": state.get("provider_id"),
             "model_name": state.get("model_name"),

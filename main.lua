@@ -702,7 +702,7 @@ function dualtranslate:confirmClearCache(menu)
     dialog = ButtonDialog:new{
         -- ButtonDialog has no separate info field; the body text lives in
         -- the title (TextBoxWidget, wraps).
-        title = "清除本书译文\n彻底删除当前书的全部译文数据？原 EPUB 不会被修改。",
+        title = "清除本书译文\n彻底删除当前书的全部译文数据？\n（术语表与风格指南会保留）原 EPUB 不会被修改。",
         buttons = {
             {
                 {

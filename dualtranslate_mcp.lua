@@ -13,6 +13,7 @@ local lfs = require("libs/libkoreader-lfs")
 local JSON = require("json")
 local logger = require("logger")
 local Tools = require("dualtranslate_tools")
+local Glossary = require("dualtranslate_glossary")
 
 local Mcp = {}
 
@@ -24,8 +25,6 @@ Mcp.STATE_SCHEMA = "dualtranslate.state.v1"
 -- (book + chapters + options) can be read and decoded without touching the
 -- megabytes that follow it.
 local SEGMENTS_MARKER = '"segments":[\n'
-
-local DEFAULT_STYLE_GUIDE = "保留段落结构，不添加解释，不合并段落。"
 
 function Mcp.rootDir()
     return DataStorage:getDataDir() .. "/cache/dualtranslate/mcp"
@@ -234,6 +233,17 @@ function Mcp.slurp(path)
     return data
 end
 
+-- LuaJSON encodes an empty table as {}; a list must still be [] so the PC
+-- side can iterate options.glossary without a type check (same helper as
+-- dtctl's as_array).
+local function json_array(list)
+    list = list or {}
+    if #list == 0 and JSON.util and type(JSON.util.InitArray) == "function" then
+        return JSON.util.InitArray(list)
+    end
+    return list
+end
+
 local function segments_start(blob)
     if not blob then return nil end
     local pos = blob:find(SEGMENTS_MARKER, 1, true)
@@ -370,6 +380,10 @@ function Mcp.writeJobFiles(dir, job)
         chapter_count = #(job.chapters or {}),
         total = #job.segments,
         max_chars_per_segment = job.options and job.options.max_chars_per_segment,
+        -- dtctl job-status serves the PC from meta.json alone: without a copy
+        -- of options here the agent could never read the glossary without
+        -- downloading (and decoding) the whole job.json.
+        options = job.options,
         anchors = anchors,
     }
     if not Tools.mkdir_p(dir) then return false end
@@ -541,8 +555,13 @@ function Mcp.exportJob(opts)
         options = {
             max_chars_per_segment = extracted.max_chars_per_segment,
             split_long_segments = true,
-            glossary = type(opts.glossary) == "table" and opts.glossary or {},
-            style_guide = opts.style_guide or DEFAULT_STYLE_GUIDE,
+            -- 17 Q5: the reader passes the per-book glossary; normalizing here
+            -- keeps job.json schema-valid even for a caller that built the
+            -- table itself (dtctl, tests).
+            glossary = json_array(Glossary.normalizeTerms(
+                type(opts.glossary) == "table" and opts.glossary or {})),
+            style_guide = opts.style_guide ~= nil
+                and tostring(opts.style_guide) or Glossary.DEFAULT_STYLE_GUIDE,
         },
     }
     -- One encode per segment, shared by job.json and the index (10.3).

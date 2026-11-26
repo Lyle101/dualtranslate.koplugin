@@ -17,6 +17,7 @@
     lua tests/overlay_entries_cache_test.lua # entries 解析缓存：命中 / save/delete/mtime 失效 / 预算淘汰
     lua tests/overlay_revision_test.lua # revision 缓存键 / 模板替换 / 命中与失效 / 8MB LRU
     lua tests/template_gc_test.lua # 模板磁盘回收：过期 / 50MB 上限 / 跳过当前书 / 节流
+    lua tests/glossary_test.lua # 术语表/风格指南：解析（空行/重复/全角等号/上限）/ 原子写 / 与 manifest 解耦
     lua tests/store_delete_test.lua # P1-b：真实 SQLite 的按 provider 删除 / intent 收尾 / reconcile
     lua tests/p1c_switch_test.lua # P1-c：按服务切换主链（State/PageTrans/Reader v3/Epub checkpoint/菜单）
     lua tests/context_test.lua    # P1-c：context 透传契约（Epub → translate(_batch) / 缓存 meta / 只切分一次）

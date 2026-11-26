@@ -74,6 +74,11 @@ def test_local_rpc_mirrors_device_commands(tmp_path: Path) -> None:
     status = transport.rpc(["job-status", "--job", remote_job])
     assert status["total"] == 1 and status["segment_ids"] == ["s000001"]
     assert status["target_lang"] == "zh-Hans"
+    # Same options shape as the device dtctl (17 Q5).
+    assert status["options"] == {
+        "glossary": [], "style_guide": "",
+        "max_chars_per_segment": 4500, "split_long_segments": None,
+    }
 
     segments = transport.rpc(
         ["get-segments", "--job", remote_job, "--offset", "0", "--limit", "5"]
@@ -85,6 +90,34 @@ def test_local_rpc_mirrors_device_commands(tmp_path: Path) -> None:
     assert cat["exists"] is True and "exported" in cat["content"]
     missing = transport.rpc(["cat", "--job", remote_job, "--name", "result.json"])
     assert missing["exists"] is False
+
+
+def test_local_job_status_prefers_meta_options(tmp_path: Path) -> None:
+    """Mirror dtctl: meta.json is the index the device answers from."""
+    device = tmp_path / "device"
+    remote_job = _write_job(device)
+    meta = device / "cache/dualtranslate/mcp/jobs/2026_2/meta.json"
+    meta.write_text(
+        json.dumps({"schema": "dualtranslate.job.meta.v1", "job_id": "2026_2",
+                    "total": 1,
+                    "options": {"glossary": [{"source": "a", "target": "b"}],
+                                "style_guide": "x", "max_chars_per_segment": 10}}),
+        encoding="utf-8",
+    )
+    status = LocalTransport(KO_ROOT, str(device)).rpc(["job-status", "--job", remote_job])
+    assert status["options"]["glossary"] == [{"source": "a", "target": "b"}]
+    assert status["options"]["style_guide"] == "x"
+    assert status["options"]["max_chars_per_segment"] == 10
+
+    # A meta from before options existed keeps its top-level max_chars.
+    meta.write_text(
+        json.dumps({"schema": "dualtranslate.job.meta.v1", "job_id": "2026_2",
+                    "total": 1, "max_chars_per_segment": 4500}),
+        encoding="utf-8",
+    )
+    status = LocalTransport(KO_ROOT, str(device)).rpc(["job-status", "--job", remote_job])
+    assert status["options"]["glossary"] == []
+    assert status["options"]["max_chars_per_segment"] == 4500
 
 
 def test_local_rpc_refuses_write_and_escape(tmp_path: Path) -> None:

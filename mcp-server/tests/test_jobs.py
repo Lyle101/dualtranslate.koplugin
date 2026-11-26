@@ -102,6 +102,49 @@ def test_list_jobs(service: JobService) -> None:
     assert job["status"] == "exported"
 
 
+def test_get_job_carries_options(service: JobService, tmp_path: Path) -> None:
+    """17 Q5: the agent reads the user's glossary from dt_get_job."""
+    path = tmp_path / "device/cache/dualtranslate/mcp/jobs" / JOB_ID / "job.json"
+    job = make_job()
+    job["options"].update(
+        {
+            "glossary": [
+                {"source": "Darcy", "target": "达西"},
+                {"source": "Netherfield", "target": "内瑟菲尔德"},
+            ],
+            "style_guide": "保留段落结构",
+        }
+    )
+    path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+    reply = service.get_job(JOB_ID)
+    assert [term["target"] for term in reply["options"]["glossary"]] == ["达西", "内瑟菲尔德"]
+    assert reply["options"]["style_guide"] == "保留段落结构"
+    assert reply["options"]["max_chars_per_segment"] == 4500
+
+
+def test_get_job_options_default_shape(service: JobService) -> None:
+    """A job exported before options.glossary existed still answers in shape."""
+    reply = service.get_job(JOB_ID)
+    assert reply["options"]["glossary"] == []
+    assert reply["options"]["style_guide"] == ""
+    assert reply["options"]["max_chars_per_segment"] == 4500
+
+
+def test_get_job_without_options(service: JobService, tmp_path: Path) -> None:
+    """A truly old job.json has no options object at all."""
+    path = tmp_path / "device/cache/dualtranslate/mcp/jobs" / JOB_ID / "job.json"
+    job = make_job()
+    job.pop("options")
+    path.write_text(json.dumps(job), encoding="utf-8")
+    reply = service.get_job(JOB_ID)
+    assert reply["options"] == {
+        "glossary": [],
+        "style_guide": "",
+        "max_chars_per_segment": None,
+        "split_long_segments": None,
+    }
+
+
 def test_get_segments_pagination_and_context(service: JobService) -> None:
     page = service.get_segments(JOB_ID, offset=0, limit=2, include_context=True)
     assert page["total"] == 3

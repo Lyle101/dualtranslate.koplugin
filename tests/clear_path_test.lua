@@ -19,7 +19,15 @@ local stubs = {
     ["ffi/archiver"] = {},
     ["device"] = { screen = { getWidth = function() return 600 end, getHeight = function() return 800 end } },
     ["libs/libkoreader-lfs"] = {
-        attributes = function() return nil end,
+        -- Only "mode" is used by the glossary stash; answer it from the real
+        -- filesystem so the preserve-on-clear path is exercised end to end.
+        attributes = function(path, field)
+            if field == "mode" then
+                local file = io.open(path, "rb")
+                if file then file:close(); return "file" end
+            end
+            return nil
+        end,
         dir = function() return function() return nil end end,
         rmdir = function() return true end,
         remove = function() return true end,
@@ -100,6 +108,19 @@ assert(cleared_books[1] ~= cache_dir, "clearForBook must not receive the cache d
 local removed_again, second_again = plugin:removeTranslationFilesForBook(book)
 assert(removed_again == 0, "second clear should find no overlay")
 assert(second_again == nil, "removeTranslationFilesForBook must not return a path")
+
+-- 17 Q5: glossary.json is user-authored, not translation output.  A
+-- "delete every translation" must leave it in place, even when the directory
+-- holds nothing else (the unconditional rmtree of the current book).
+os.execute('mkdir -p "' .. cache_dir .. '"')
+local terms = assert(io.open(cache_dir .. "/glossary.json", "wb"))
+terms:write('{"schema":"dualtranslate.glossary.v1","terms":[]}')
+terms:close()
+local removed_third = plugin:removeTranslationFilesForBook(book)
+assert(removed_third == 0, "glossary-only dir has no overlay to remove")
+local kept = io.open(cache_dir .. "/glossary.json", "rb")
+assert(kept ~= nil, "glossary must survive a translation wipe")
+kept:close()
 
 os.execute("rm -rf " .. DATA_DIR)
 print("PASS: clear book path")

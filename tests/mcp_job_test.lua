@@ -495,6 +495,13 @@ do
     check("exportJob 接受已抽取结果", job ~= nil, tostring(job_err))
     check("段数来自 collected", job and job.segments == #one_shot.segments,
         job and tostring(job.segments))
+    check("默认 options 空术语表", job and #job.job.options.glossary == 0
+        and job.job.options.style_guide == "保留段落结构，不添加解释，不合并段落。",
+        job and job.job.options.style_guide)
+    -- Empty tables encode as {} in LuaJSON unless forced: the schema says the
+    -- field is an array, so check the bytes on disk.
+    check("空术语表编码为数组", job
+        and (Mcp.slurp(job.dir .. "/job.json") or ""):find('"glossary":[]', 1, true) ~= nil)
     -- 这个任务只为本节而建：后面 listJobs 断言「恰好 N 个任务」，留着会干扰
     if job and job.dir then os.execute('rm -rf "' .. job.dir .. '"') end
 end
@@ -505,6 +512,15 @@ do
     local result, err = Mcp.exportJob{
         book_path = BOOK, chapter_indexes = { 1, 2 }, source_lang = "en",
         target_lang = "zh-Hans", titles = { [1] = "第一章", [2] = "第二章" },
+        -- 17 Q5: the reader hands in the per-book glossary; export must
+        -- normalize it (trim, drop empty, later duplicate wins) and carry it.
+        glossary = {
+            { source = "Darcy", target = "达西" },
+            { source = " Darcy ", target = "达西先生" },
+            { source = "Netherfield", target = "内瑟菲尔德" },
+            { source = "", target = "空原文" },
+        },
+        style_guide = "用民国白话，保留段落结构",
     }
     check("export 成功", result ~= nil, tostring(err))
     check("job_id 格式", result and result.job_id:match("^%d%d%d%d%d%d%d%d_%d%d%d%d%d%d_%d%d%d%d$") ~= nil)
@@ -520,6 +536,13 @@ do
     check("book 文件指纹", job.book.file_size > 0 and job.book.file_mtime > 0)
     check("options 上限", job.options.max_chars_per_segment == 4500
         and job.options.split_long_segments == true)
+    check("options 术语表归一化", #job.options.glossary == 2
+        and job.options.glossary[1].source == "Darcy"
+        and job.options.glossary[1].target == "达西先生"
+        and job.options.glossary[2].source == "Netherfield",
+        job.options.glossary and #job.options.glossary or "nil")
+    check("options 风格指南", job.options.style_guide == "用民国白话，保留段落结构",
+        job.options.style_guide)
     check("章节列表", #job.chapters == 2 and job.chapters[2].title == "第二章")
 
     local list = Mcp.listJobs()
@@ -533,6 +556,8 @@ do
         and shell.chapters[1].title == "第一章", shell and tostring(#shell.chapters))
     check("shell 不含段落", shell and shell.segments == nil)
     check("shell 带书信息", shell and shell.book.device_path == BOOK)
+    check("shell 带 options", shell and shell.options
+        and #shell.options.glossary == 2, shell and "nil options" or "nil shell")
     local detail = Mcp.jobDetail(result.job_id)
     check("detail 书与进度", detail and detail.total == 8 and detail.chapter_count == 2
         and detail.status == "exported" and detail.title == "job")
@@ -576,6 +601,11 @@ do
     check("job.json 仍是合法 JSON", Mcp.readJson(result.dir .. "/job.json") ~= nil)
     local meta = Mcp.loadMeta(result.job_id)
     check("meta.total", meta and meta.total == 8 and meta.chapter_count == 2)
+    -- job-status serves the PC from meta.json alone, so options must be here.
+    check("meta 带 options", meta and meta.options
+        and #meta.options.glossary == 2
+        and meta.options.style_guide == "用民国白话，保留段落结构",
+        meta and meta.options and tostring(meta.options.style_guide))
     local seg_ids = Mcp.listSegmentIds(result.job_id)
     check("索引 id 数", seg_ids and #seg_ids == 8 and seg_ids[1] == "s000001")
     local page = Mcp.readSegmentPage(result.job_id, 0, 2, true)
