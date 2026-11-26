@@ -4,17 +4,18 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.13（v3.2.2：冷启动预编译 CSS 模板、去掉按章 CSS 实验） |
+| 文档版本 | 0.14（未发布：模板磁盘回收；v3.2.2 基线） |
 | 日期 | 2026-11-26 |
-| 适用代码 | DualTranslate `v3.2.2`（P0–P3 已合入；P4 的 CI 与 orphan 边界已落地） |
+| 适用代码 | DualTranslate `v3.2.2` + 未发布的模板回收（P0–P3 已合入；P4 的 CI、orphan 边界、性能基准与模板回收已落地） |
 | 目标版本 | `v3.2.2` 已发布：多服务 + 章节选择 + MCP 外部翻译（P3）；设备端收件箱已移除 |
-| 状态 | P0–P3 已实施（SSH 双 key + elicitation + 列表项 + 父项译文对齐 + 引擎失败降级；设备端收件箱已移除）；P4 部分落地：GitHub Actions（Lua 套件 + MCP server 的 pytest）、reconcile 遇读不到 mtime 的 orphan 不再删除；`entries` ndjson 与按章 CSS 明确不做 |
+| 状态 | P0–P3 已实施（SSH 双 key + elicitation + 列表项 + 父项译文对齐 + 引擎失败降级；设备端收件箱已移除）；P4 已落地：GitHub Actions（Lua 套件 + MCP server 的 pytest）、reconcile 遇读不到 mtime 的 orphan 不再删除、`tools/bench.lua` 与 `docs/PERF.md`、CSS 模板磁盘回收（未发版）；512 MB 设备的关书 RSS 回落仍待 A/B；`entries` ndjson 与按章 CSS 明确不做 |
 | 代码状态 | 全部有回归测试，CI 自 `4d60e58` 起每次 push 跑全套（29 个功能套件，不含 `fulltest/loadtest` 聚合器与可选的 `smoke_live`；外加 MCP server 的 pytest） |
 
 **修订记录**
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 0.14 | 2026-11-26 | 模板磁盘回收（未发版）：读取模板/打开书时 touch mtime 作为「最近使用」，开书 10 s 后删除 30 天未使用的 `css-template.css`，再按 50 MB 总量上限从最旧开始删；跳过当前书，只删模板文件，每轮最多 20 份、每进程 6 h 最多扫描一次；新增 `tests/template_gc_test.lua`（30 项）。同步 P4 状态与 §15.4 的 CSS 验收口径（模板命中 56.2 ms） |
 | 0.13 | 2026-11-26 | v3.2.2：**冷启动预编译模板**（导入/整书翻译结束时写入 `css-template.css`，样式不参与 key；冷启动 56.2 ms、改字号 32.3 ms，见 PERF §7）；`clearCssCache` 与 entries 缓存、模板缓存三者解耦；`document` 不再常驻第二份拼接 CSS；**删除未接线的按章 CSS 过滤与 11 项测试**（D14）；新增 `tests/bench_test.lua` 覆盖 `--work/--only/.dtbench/--overlay` |
 | 0.12 | 2026-11-18 | v3.2.1：**设备端收件箱导入整体移除**（菜单入口、`Mcp.importFile/importPending`、`dtctl put --inbox`、PC 端 `write_inbox` 降级全部删除，无法执行 dtctl 时返回 `import_unavailable`）；导出结束改为「导出完成 + 任务详情 + 轻触关闭」，写入抛错也会关框；新增引擎连续失败（默认 5 段）中止并提示改用 Edge 重试同一范围 |
 | 0.11 | 2026-11-18 | v3.2.0 收口：条目按「归属元素」去重，三种列表父项选择器形态收敛（§6.3）；导出改为分片会话 + 真实章节进度（§10.2.1）；补记 CREngine 生成盒的实测约束——`margin`/`position:relative`/`text-indent` 全无效，横向偏移只能移动真实元素（§8.6）；表头状态改为「P0–P3 已实施，P4 部分落地」 |
@@ -2313,15 +2314,15 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 | --- | --- |
 | 章节目录解析（100 章） | < 500 ms |
 | 章节选择器打开 | < 1 s |
-| CSS 构建（3,000 段，单 provider） | < 200 ms（与现状同量级） |
-| CSS 构建（3,000 段，fallback 三服务） | < 500 ms（entries 全加载 + 合并） |
+| CSS 构建（3,000 段，单 provider，模板命中） | < 200 ms（3.2.2 实测 56.2 ms；无模板冷构建 839 ms） |
+| CSS 构建（3,000 段，fallback 三服务，模板命中） | < 500 ms（entries 全加载 + 合并后写入模板；样式替换不再解码） |
 | MCP 导入 3,000 段 | < 5 s（Kindle） |
 | DB v3 迁移 100k 行 | < 10 s |
 | 内存增量（单 provider） | < 20 MB（相对现状） |
 | 内存增量（fallback 三服务） | < 40 MB；`css_cache` 改「每书 1 条 + 总大小上限 8 MB」，否则 16 条 × 1–3 MB 会到 30–50 MB |
 | overlay 单 provider 文件 | 3,000 段约 0.8-1.5 MB |
 
-> 表中为 Kindle 真机 P50 参考值。IO 波动会让单次测量偏差很大，验收口径统一为「同一设备 5 次取中位数，P50 相对现状不劣化超过 20%」；测量脚本随 P4 交付，避免用一次冷启动读数作为结论。
+> 表中为 Kindle 真机 P50 参考值。IO 波动会让单次测量偏差很大，验收口径统一为「同一设备 5 次取中位数，P50 相对现状不劣化超过 20%」；`tools/bench.lua` 已交付（`--overlay` 为 5 次中位数口径），结果见 `docs/PERF.md`，避免用一次冷启动读数作为结论。
 
 ### 15.5 验收矩阵
 
@@ -2378,7 +2379,7 @@ P0 --> P1 --> P2 --> P3 --> P4
 | `dualtranslate_lock.lua`（新） | P1 | `withBookLock`：mkdir 原子锁、stale 超时、解锁兜底；只依赖 lfs |
 | `dualtranslate_epub.lua` | P0[已完成]/P1/P2 | provider 参数/checkpoint（已完成）；锁；options 表；章节集合；chapters 语义；outline；job |
 | `dualtranslate_reader.lua` | P0[已完成]/P1/P2 | `clearBookTranslationData`、provider 缓存（已完成）；context 透传；CSS；显示/删除菜单；MCP 导出/刷新 |
-| `dualtranslate_chapterpicker.lua`（新） | P2 | 章节复选、分页、全选/反选 |
+| `dualtranslate_picker.lua`（新） | P2 | 章节复选、分页、全选/反选 |
 | `dualtranslate_tools.lua` | P2 | `extract_entries`：按需抽 container/OPF/NCX，不整本解包 |
 | `dualtranslate_state.lua` | P1/P2 | `hasActiveJob(book_path, provider)`；队列字段、标签、旧队列兼容 |
 | `dualtranslate_pagetrans.lua` | P1 | 按 provider 判断 complete/chapters |
@@ -2436,6 +2437,13 @@ SSH 直连、MCP elicitation、自动刷新作为第二阶段增强。这样即�
 ## 17. 开放问题
 
 > 设计层面的选择已上移到 5.4（D1…D13），这里只列需要外部条件或产品确认的问题；与 3.5 非目标重复的选项不再重复列出。
+>
+> **3.2.2 状态**：Q1/Q2 已解决（SSH 双 key 与 elicitation 已在真机联调）；Q4 采用默认口径
+> （当前书 + 当前目标语言）；Q6 不做（整书流程不用旧表）；Q7 关闭（按章 CSS 已按 D14 删除，
+> ndjson 实测比整份解码更慢）。**Q5 仍未做**：`Mcp.exportJob` 会写
+> `options.glossary` / `style_guide`，但导出入口没有传入，`meta.json`、`dtctl job-status`
+> 与 PC 的 `dt_get_job` 也都没有返回 options，Agent 读不到；要做成「按书编辑 → 导出注入 →
+> PC 可读」三件事，缺一不可。Q3 仍不做。
 
 1. 用户的 Kindle 是否已具备 SSH/USBNetwork？若没有，R2 先按「USB 收件箱 + 插件导入」交付。
 2. MCP 客户端是哪一个（Claude Desktop / Cursor / 其他）？需要确认是否支持 elicitation；不支持则走「工具返回提示，Agent 问用户」路径。
