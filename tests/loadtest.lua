@@ -50,6 +50,7 @@ local stubs = {
         end,
         nextTick = function() end },
     ["ui/widget/notification"] = { Notification = {} },
+    ["ui/widget/infomessage"] = { new = function(_, o) return o end },
     ["ui/widget/textviewer"] = {}, ["ui/widget/buttondialog"] = {}, ["ui/widget/menu"] = {},
     ["ui/widget/progressbardialog"] = {}, ["ui/widget/inputdialog"] = {}, ["ui/widget/spinwidget"] = {},
     ["ui/widget/container/widgetcontainer"] = { extend = function(self, o) o = o or {}; o.__index = o; setmetatable(o, { __index = self }) return o end },
@@ -263,3 +264,54 @@ dualtranslate.saveTranslationQueue = real_save
 ProgressbarDialog.new = real_new
 scheduled_calls = {}
 print("hidden poller stays alive: true")
+
+-- v2 migration notice: the notice must be painted before the blocking
+-- initSchema runs, and closed afterwards.  Ordering is the whole point --
+-- showing it after the migration would leave the user with a frozen screen
+-- and no explanation.
+do
+    local events = {}
+    local fake_cache = {
+        peekSchema = function() events[#events + 1] = "peek"; return "v2" end,
+        initSchema = function() events[#events + 1] = "migrate"; return true end,
+        close = function() end,
+        getDbPath = function() return "/tmp/dt_data/fake.sqlite3" end,
+    }
+    local real_cache = dualtranslate.cache
+    local Cache = require("dualtranslate_cache")
+    local real_new = Cache.new
+    Cache.new = function() return fake_cache end
+    local real_show, real_close, real_repaint =
+        UIManager.show, UIManager.close, UIManager.forceRePaint
+    UIManager.show = function(_, widget)
+        events[#events + 1] = "show:" .. tostring(widget and widget.text)
+    end
+    UIManager.close = function(_, widget)
+        events[#events + 1] = "close:" .. tostring(widget and widget.text)
+    end
+    UIManager.forceRePaint = function() events[#events + 1] = "repaint" end
+    local ok_init, init_err = pcall(function() dualtranslate:init() end)
+    Cache.new = real_new
+    UIManager.show, UIManager.close, UIManager.forceRePaint =
+        real_show, real_close, real_repaint
+    dualtranslate.cache = real_cache
+    local Store = require("dualtranslate_store")
+    Store.setCache(real_cache)
+    assert(ok_init, "v2 init failed: " .. tostring(init_err))
+
+    local function position(prefix)
+        for index, event in ipairs(events) do
+            if event:sub(1, #prefix) == prefix then return index end
+        end
+    end
+    local peek = position("peek")
+    local shown = position("show:正在升级译文缓存")
+    local repaint = position("repaint")
+    local migrated = position("migrate")
+    local closed = position("close:正在升级译文缓存")
+    assert(peek and shown and repaint and migrated and closed,
+        "migration notice events missing: " .. table.concat(events, " | "))
+    assert(peek < shown and shown < repaint and repaint < migrated and migrated < closed,
+        "migration notice order wrong: " .. table.concat(events, " | "))
+    print("migration notice order: true")
+end

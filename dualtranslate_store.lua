@@ -534,6 +534,12 @@ function Store.importResult(job, result, opts)
         parent.parts[tonumber(segment.part) or 1] = segment
     end
     local complete, incomplete = {}, 0
+    -- Segment ids that actually reach the database this run.  A part whose
+    -- parent stayed incomplete (another part missing) is accepted by the
+    -- result but not written; the ledger must not remember it, or a later
+    -- batch could combine the ledger with the remaining part while never
+    -- assembling the paragraph (see the coverage note below).
+    local written_parts = {}
     for _, parent_id in ipairs(order) do
         local parent = parents[parent_id]
         local sources, translations = {}, {}
@@ -561,13 +567,50 @@ function Store.importResult(job, result, opts)
                 source = table.concat(sources, " "),
                 translation = table.concat(translations, " "),
             }
+            for part = 1, parent.total do
+                written_parts[parent.parts[part].id] = true
+            end
         else
             incomplete = incomplete + 1
         end
     end
+
+    -- Coverage across runs (manual multi-run imports): each hand-run result
+    -- carries only its own segments, so "missing" must count the segment ids
+    -- earlier runs of *this job* already imported.  dtctl owns that ledger
+    -- (imported.txt) and passes it in as opts.previously_accepted.  Looking at
+    -- the book's whole row set instead would let another job's import mark
+    -- this one complete -- and then the 7-day retention would delete a job
+    -- whose own result was never fully submitted.
+    local previously = type(opts.previously_accepted) == "table"
+        and opts.previously_accepted or {}
+    local parent_covered = {}
+    for _, parent_id in ipairs(order) do
+        local parent = parents[parent_id]
+        local covered = true
+        for part = 1, parent.total do
+            local segment = parent.parts[part]
+            if not segment or (not accepted[segment.id] and not previously[segment.id]) then
+                covered = false
+                break
+            end
+        end
+        parent_covered[parent_id] = covered
+    end
+    local covered_parts = 0
+    for _, segment in ipairs(job.segments or {}) do
+        local parent_id = segment.parent_id or segment.id
+        if parent_covered[parent_id] then
+            covered_parts = covered_parts + 1
+        end
+    end
+    local accepted_ids = {}
+    for _, segment in ipairs(job.segments or {}) do
+        if written_parts[segment.id] then accepted_ids[#accepted_ids + 1] = segment.id end
+    end
     local submitted = 0
     for _ in pairs(accepted) do submitted = submitted + 1 end
-    local missing = #(job.segments or {}) - submitted
+    local missing = #(job.segments or {}) - covered_parts
     if missing > 0 and opts.allow_partial ~= true then
         return nil, string.format("任务尚未翻译完成（还有 %d 段缺失）", missing)
     end
@@ -682,14 +725,18 @@ function Store.importResult(job, result, opts)
         seed(previous.chapters, "done")
         seed(previous.partial_chapters, "partial")
         seed(previous.failed_chapters, "failed")
+        -- Per-chapter counts use the covered parents (this run plus every
+        -- earlier import of the same job): a chapter whose paragraphs all
+        -- have rows is done, even when this run contributed none of them.
         local parent_counts, done_counts = {}, {}
-        for _, parent in ipairs(complete) do
-            local index = tonumber(parent.chapter_index)
-            if index then done_counts[index] = (done_counts[index] or 0) + 1 end
-        end
         for _, parent_id in ipairs(order) do
             local index = tonumber(parents[parent_id].chapter_index)
-            if index then parent_counts[index] = (parent_counts[index] or 0) + 1 end
+            if index then
+                parent_counts[index] = (parent_counts[index] or 0) + 1
+                if parent_covered[parent_id] then
+                    done_counts[index] = (done_counts[index] or 0) + 1
+                end
+            end
         end
         for _, chapter in ipairs(job.chapters or {}) do
             local index = tonumber(chapter.index)
@@ -856,6 +903,14 @@ function Store.importResult(job, result, opts)
             provider_id = provider_id,
             model_name = model_name,
             submitted = submitted,
+            -- Every segment this job now answers for (all of its own runs
+            -- combined).  dtctl writes this into state.json so the retention
+            -- cleanup can see a hand-completed job as finished;
+            -- summary.submitted stays "accepted by this run" for the PC-side
+            -- progress display.  accepted_ids lets dtctl extend the per-job
+            -- ledger without re-parsing the result.
+            covered = covered_parts,
+            accepted_ids = accepted_ids,
             accepted = #complete,
             incomplete = incomplete,
             rejected = rejected,

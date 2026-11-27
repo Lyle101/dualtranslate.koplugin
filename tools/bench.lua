@@ -39,6 +39,7 @@
 --       --device NAME（默认读 DT_DEVICE）| --list [--list-dir DIR]
 --       --overlay DIR [--provider ID] | --keep | --help
 --       --migrate [--rows N] | --memory
+--       --baseline 旧的 bench.json（生成「相对基线」段，按 20% 判据）
 --
 -- 验收补齐（§15.4 剩余项，不进 PERF 的每本书表格）：
 --   --migrate  建 100k 行 v2 库并计时 v3 迁移（含 .bak 备份）
@@ -92,6 +93,7 @@ local opts = {
     migrate = false,
     memory = false,
     rows = 100000,
+    baseline = nil,
 }
 do
     local index = 1
@@ -121,12 +123,14 @@ do
         elseif item == "--provider" then opts.provider = next_value(item)
         elseif item == "--migrate" then opts.migrate = true
         elseif item == "--memory" then opts.memory = true
+        elseif item == "--baseline" then opts.baseline = next_value(item)
         elseif item == "--rows" then opts.rows = tonumber(next_value(item)) or opts.rows
         elseif item == "--keep" then opts.keep = true
         elseif item == "--help" or item == "-h" then
             print("用法: luajit tools/bench.lua [--book EPUB]... [--runs N] [--segments N]")
             print("      [--css-segments N] [--only outline,css,import,anchor] [--work DIR]")
             print("      [--md PATH] [--json PATH] [--device NAME] [--keep]")
+            print("      [--baseline OLD_BENCH_JSON]")
             print("      luajit tools/bench.lua --list [--list-dir DIR]")
             print("      luajit tools/bench.lua --overlay DIR [--provider ID]")
             print("      luajit tools/bench.lua --migrate [--rows N] | --memory")
@@ -205,6 +209,7 @@ package.path = PLUGIN .. "/?.lua;" .. package.path
 opts.md = absolute(opts.md)
 opts.json = absolute(opts.json)
 opts.overlay = absolute(opts.overlay)
+opts.baseline = absolute(opts.baseline)
 if opts.md == "" then opts.md = nil end
 if opts.json == "" then opts.json = nil end
 for position, book in ipairs(opts.books) do opts.books[position] = absolute(book) end
@@ -349,6 +354,23 @@ local function write_atomic(path, data)
         return false
     end
     return true
+end
+
+-- --baseline: another run's bench.json.  Compare the same per-book metrics and
+-- apply §15.4's 20% rule, instead of hand-copying numbers into PERF.md.
+local baseline
+if opts.baseline then
+    local raw = read_file(opts.baseline)
+    if not raw then
+        io.stderr:write("找不到基线 JSON: " .. opts.baseline .. "\n")
+        os.exit(2)
+    end
+    local decoded_ok, decoded = pcall(JSON.decode, raw)
+    if not decoded_ok or type(decoded) ~= "table" or type(decoded.results) ~= "table" then
+        io.stderr:write("基线 JSON 不是 bench.lua 的输出: " .. opts.baseline .. "\n")
+        os.exit(2)
+    end
+    baseline = decoded
 end
 
 local function mkdir_p(path)
@@ -982,7 +1004,22 @@ local function status_of(books, results, getter, target)
     return (over == 0 and "达标" or "未达标"), over
 end
 
-local function render_markdown(environment, books, results)
+-- Metrics compared against --baseline; only a pair of numbers on both sides
+-- produces a row (an older baseline may predate a metric).
+local BASELINE_METRICS = {
+    { label = "目录解析（100 章折算）", get = function(result)
+        return result.outline and result.outline.normalized_100_ms end },
+    { label = "CSS 单 provider", get = function(result)
+        return result.css and result.css.single and result.css.single.median_ms end },
+    { label = "CSS fallback 三服务", get = function(result)
+        return result.css and result.css.fallback and result.css.fallback.median_ms end },
+    { label = "MCP 导入", get = function(result)
+        return result.import and result.import.median_ms end },
+    { label = "锚点页表", get = function(result)
+        return result.anchor and result.anchor.median_ms end },
+}
+
+local function render_markdown(environment, books, results, baseline)
     local lines = {}
     local function add(text) lines[#lines + 1] = text end
 
@@ -1125,7 +1162,46 @@ local function render_markdown(environment, books, results)
             book.label, outline, css_single, css_fallback, imported, anchor))
     end
     add("")
-    add("## 5. 结论")
+    if baseline then
+        add("## 5. 相对基线（不劣化 20%）")
+        add("")
+        local baseline_environment = baseline.environment or {}
+        add(string.format("> 基线：`%s`（%s，%s）。同一设备、同一本书才有可比性。",
+            tostring(opts.baseline),
+            tostring(baseline_environment.device or "未标注"),
+            tostring(baseline_environment.generated_at or "时间未知")))
+        add("")
+        add("| 书 | 指标 | 基线 | 当前 | 变化 | 判定 |")
+        add("| --- | --- | --- | --- | --- | --- |")
+        local compared, degraded = 0, 0
+        for _, book in ipairs(books) do
+            local current = results[book.label] or {}
+            local previous = baseline.results[book.label] or {}
+            for _, metric in ipairs(BASELINE_METRICS) do
+                local now, before = metric.get(current), metric.get(previous)
+                if now and before and before > 0 then
+                    local delta = (now - before) / before * 100
+                    compared = compared + 1
+                    local over = delta > 20
+                    if over then degraded = degraded + 1 end
+                    add(string.format("| %s | %s | %s | %s | %+.1f%% | %s |",
+                        book.label, metric.label, fmt_ms(before), fmt_ms(now),
+                        delta, over and "**未达标**" or "达标"))
+                end
+            end
+        end
+        if compared == 0 then
+            add("| — | 没有可比指标（书标签或指标不同） | — | — | — | — |")
+        end
+        add("")
+        add(string.format("共比较 %d 项，超过 20%% 的 %d 项。%s", compared, degraded,
+            degraded == 0 and "全部达标。" or "需复查。"))
+        add("")
+    end
+    -- Keep section numbers contiguous when --baseline is absent.
+    local conclusion_section = baseline and 6 or 5
+    local scope_section = conclusion_section + 1
+    add(string.format("## %d. 结论", conclusion_section))
     add("")
     local outline_low, outline_high = range_of(books, results, function(result)
         return result.outline and result.outline.normalized_100_ms
@@ -1211,7 +1287,7 @@ local function render_markdown(environment, books, results)
         overlay_low and (overlay_low == overlay_high and fmt_kb(overlay_low)
             or (fmt_kb(overlay_low) .. " – " .. fmt_kb(overlay_high))) or "—"))
     add("")
-    add("## 6. 口径与限制")
+    add(string.format("## %d. 口径与限制", scope_section))
     add("")
     add("- **outline**：每次删除 `data/cache/dualtranslate/outline/<hash>.json` 后冷解析；"
         .. "「100 章 ≈」= 中位数 × 100 / 目录章节数（线性折算）。解包、OPF 解析和 spine "
@@ -1244,9 +1320,10 @@ local function render_markdown(environment, books, results)
         .. " 个章节（各不同，3 槽 LRU 不会命中），中位数为单章成本；这是最坏单章，不是均匀抽样。"
         .. "CREngine 的 `getPageFromXPointer` 探测（每章 N 次）无法在 headless 复现，未计入。")
     add("- **本表口径**：只记录本机绝对值；章节选择器打开（< 1 s）、DB v3 迁移"
-        .. "（100k 行 < 10 s）与内存增量（< 20 / 40 MB）由 `--migrate` / `--memory`"
-        .. " 与 `tools/probe_picker.lua` 单独测量，「相对旧版不劣化 20%」用 v3.2.2 的同一"
-        .. "脚本在同一台设备复跑；结果见 `docs/PERF.md` §8。")
+        .. "（100k 行 < 2 min）与内存增量（< 20 / 40 MB）由 `--migrate` / `--memory`"
+        .. " 与 `tools/probe_picker.lua` 单独测量；「相对旧版不劣化 20%」用同一脚本在"
+        .. "同一台设备复跑，并把旧版的 bench.json 传给 `--baseline` 生成第 5 节"
+        .. "（旧版脚本没有该参数时，可直接复制新版脚本使用）。结果见 `docs/PERF.md` §8。")
     add("")
     return table.concat(lines, "\n")
 end
@@ -1784,7 +1861,7 @@ for position, path in ipairs(opts.books) do
 end
 
 local environment = collect_environment()
-local markdown = render_markdown(environment, books, results)
+local markdown = render_markdown(environment, books, results, baseline)
 local md_path = opts.md or (opts.work .. "/PERF.md")
 local md_parent = md_path:match("^(.*)/[^/]+$")
 if md_parent then mkdir_p(md_parent) end

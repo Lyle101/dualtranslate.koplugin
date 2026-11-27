@@ -32,10 +32,33 @@ function dualtranslate:init()
     self:loadConfig()
     self.cache = Cache:new()
     Store.setCache(self.cache)
+    -- 15.4 / PERF 8.2: a v2 library rewrites every row on the UI thread --
+    -- ~1.5 min at 100k rows on the Voyage's eMMC.  Paint a notice *before*
+    -- that blocking call, or the frozen reader reads as "hung" and gets killed
+    -- mid-migration.  peekSchema is read-only; a missing db is "fresh".
+    local schema_state
+    if self.cache.peekSchema then
+        local ok_peek, state = pcall(self.cache.peekSchema, self.cache)
+        if ok_peek then schema_state = state end
+    end
+    local upgrade_notice
+    if schema_state == "v2" then
+        local InfoMessage = require("ui/widget/infomessage")
+        upgrade_notice = InfoMessage:new{
+            text = _("正在升级译文缓存…\n\n首次升级需要约 1–2 分钟，请不要退出 KOReader。\n旧数据已备份；升级完成后此提示会自动关闭。"),
+            timeout = nil,
+        }
+        UIManager:show(upgrade_notice)
+        if UIManager.forceRePaint then UIManager.forceRePaint() end
+    end
     -- 13.1: the schema migration must finish before any queue worker can
     -- start.  On failure keep the backup and disable the translation
     -- entries instead of running workers on the old schema.
     local migrated, migrate_err = Store.migrateIfNeeded(self.cache)
+    if upgrade_notice then
+        pcall(function() UIManager:close(upgrade_notice, "ui") end)
+        upgrade_notice = nil
+    end
     if not migrated then
         self._translation_migration_failed = true
         logger.err("dualtranslate: cache migration failed:", tostring(migrate_err))
@@ -812,21 +835,41 @@ function dualtranslate:onReaderReady()
     if not path then return end
     local current_dir = self:getBookCacheDirectory(path)
     if Overlay.touchCssTemplate then Overlay.touchCssTemplate(current_dir) end
-    UIManager:scheduleIn(10, function()
-        local ok, err = pcall(function()
-            local root = require("datastorage"):getDataDir()
-                .. "/cache/dualtranslate/books"
-            local report = Overlay.reclaimCssTemplates(root, current_dir)
+    local books_root = require("datastorage"):getDataDir()
+        .. "/cache/dualtranslate/books"
+    -- Re-resolve the open book when the timer fires instead of capturing it:
+    -- the callback can run after another book was opened, and a stale
+    -- directory would leave the new book unprotected.
+    local function reclaim(force)
+        local open = self:currentBookPath()
+        local protected = open and self:getBookCacheDirectory(open) or nil
+        return Overlay.reclaimCssTemplates(books_root, protected,
+            force and { force = true } or nil)
+    end
+    -- One round stops at 20 deletions to keep the UI responsive.  When it
+    -- reports deferred, finish the rest 60 s later while the reader is idle
+    -- instead of pinning the disk until the next book open (>= 6 h).  Only
+    -- reschedule while a round made progress: a read-only cache would
+    -- otherwise retry forever.
+    local function scan(force)
+        UIManager:scheduleIn(force and 60 or 10, function()
+            local ok, report = pcall(reclaim, force)
+            if not ok then
+                logger.warn("dualtranslate: CSS template reclaim failed:",
+                    tostring(report))
+                return
+            end
             if report and (report.removed or 0) > 0 then
                 logger.info(string.format(
                     "dualtranslate: reclaimed %d CSS template(s), %d KB",
                     report.removed, math.floor((report.freed_bytes or 0) / 1024)))
             end
+            if report and report.deferred and (report.removed or 0) > 0 then
+                scan(true)
+            end
         end)
-        if not ok then
-            logger.warn("dualtranslate: CSS template reclaim failed:", tostring(err))
-        end
-    end)
+    end
+    scan(false)
 end
 
 -- Restore the saved translation layer while CREngine is still loading its

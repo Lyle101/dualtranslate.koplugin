@@ -519,5 +519,263 @@ do
         .. exported .. '" "' .. partial .. '"')
 end
 
+-- ============================================================
+print("== 10. 手工分批导入：state.submitted 记累计覆盖 ==")
+do
+    local multi_book = ROOT .. "/multi.epub"
+    write_file(multi_book, string.rep("q", 2048))
+    local id = "20261115_120000_0010"
+    local dir = DATA .. "/cache/dualtranslate/mcp/jobs/" .. id
+    os.execute('mkdir -p "' .. dir .. '"')
+    local multi_job = {
+        schema = "dualtranslate.job.v1", job_id = id, created_at = os.time(),
+        book = { device_path = multi_book, title = "Multi", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 1,
+            file_size = lfs.attributes(multi_book, "size"),
+            file_mtime = lfs.attributes(multi_book, "modification") or 0 },
+        chapters = { { index = 1, title = "One" } },
+        segments = {
+            { id = "s000001", parent_id = "s000001", part = 1, parent_total = 1,
+              chapter_index = 1, chapter_title = "One", selector = "sel-d1",
+              xpointer = "/body/DocFragment/body/p[1]", source = "A" },
+            { id = "s000002", parent_id = "s000002", part = 1, parent_total = 1,
+              chapter_index = 1, chapter_title = "One", selector = "sel-d2",
+              xpointer = "/body/DocFragment/body/p[2]", source = "B" },
+        },
+        options = { max_chars_per_segment = 4500, split_long_segments = true },
+    }
+    write_file(dir .. "/job.json", JSON.encode(multi_job))
+    write_file(dir .. "/state.json", JSON.encode({
+        schema = "dualtranslate.state.v1", status = "exported",
+        submitted = 0, total = 2 }))
+    local provider = { provider_id = "mcp:gpt-5", kind = "mcp",
+        model_name = "gpt-5", display_name = "MCP · GPT-5", confirmed = true }
+    local function write_result(name, translations, provider_override)
+        write_file(dir .. "/" .. name, JSON.encode({
+            schema = "dualtranslate.result.v1", job_id = id,
+            provider = provider_override or provider, translations = translations }))
+    end
+    local function read_state()
+        local file = io.open(dir .. "/state.json", "rb")
+        if not file then return nil end
+        local raw = file:read("*a")
+        file:close()
+        return JSON.decode(raw)
+    end
+
+    write_result("result.partial.json", { { id = "s000001", text = "甲" } })
+    local out, code = run("import --job " .. dir .. "/job.json --result "
+        .. dir .. "/result.partial.json --allow-partial")
+    local data = decode_single_line(out)
+    check("第一批部分导入成功", code == 0 and data and data.ok == true, out)
+    check("第一批 submitted=1", read_state().submitted == 1,
+        tostring(read_state().submitted))
+
+    write_result("result.json", { { id = "s000002", text = "乙" } })
+    out, code = run("import --job " .. dir .. "/job.json --result "
+        .. dir .. "/result.json")
+    data = decode_single_line(out)
+    check("第二批不带 allow-partial 成功", code == 0 and data and data.ok == true, out)
+    check("第二批 submitted 累计为 2", read_state().submitted == 2,
+        tostring(read_state().submitted))
+
+    -- Switching model mid-job must not inherit the previous provider's
+    -- ledger: only one of the two segments is in this provider's result, so
+    -- the import has to stay partial.
+    write_result("result.partial.json", { { id = "s000001", text = "甲" } }, {
+        provider_id = "mcp:other", kind = "mcp", model_name = "other",
+        display_name = "MCP · Other", confirmed = true })
+    out, code = run("import --job " .. dir .. "/job.json --result "
+        .. dir .. "/result.partial.json")
+    data = decode_single_line(out)
+    check("换 provider 不继承旧账本", code ~= 0 and data and data.ok == false
+        and tostring(data.message):find("还有 1 段缺失") ~= nil, out)
+    os.execute('rm -rf "' .. dir .. '"')
+end
+
+-- ============================================================
+print("== 11. jobs 路径符号链接 ==")
+do
+    if not lfs.symlinkattributes then
+        print("  SKIP: 平台没有 symlinkattributes")
+    else
+        local jobs_root = DATA .. "/cache/dualtranslate/mcp/jobs"
+        local outside = ROOT .. "/outside_job"
+        write_file(outside .. "/job.json", JSON.encode(job))
+        write_file(outside .. "/state.json", JSON.encode({
+            schema = "dualtranslate.state.v1", status = "exported" }))
+        local body = ROOT .. "/body.json"
+        write_file(body, '{"schema":"dualtranslate.state.v1"}')
+
+        local link_id = "20261115_120000_0011"
+        local link_dir = jobs_root .. "/" .. link_id
+        os.execute('ln -s "' .. outside .. '" "' .. link_dir .. '"')
+        if lfs.symlinkattributes(link_dir, "mode") == "link" then
+            local out, code = run("cat --job " .. link_dir .. "/job.json --name job.json")
+            local data = decode_single_line(out)
+            check("任务目录链接：cat 拒绝", code ~= 0 and data and data.ok == false
+                and tostring(data.message):find("symlink") ~= nil, out)
+            out, code = run("job-status --job " .. link_dir .. "/job.json")
+            data = decode_single_line(out)
+            check("任务目录链接：job-status 拒绝", code ~= 0 and data and data.ok == false
+                and tostring(data.message):find("symlink") ~= nil, out)
+            out, code = run("put --job " .. link_dir .. "/job.json --name state.json",
+                nil, body)
+            data = decode_single_line(out)
+            check("任务目录链接：put 拒绝", code ~= 0 and data and data.ok == false
+                and tostring(data.message):find("symlink") ~= nil, out)
+            out, code = run("import --job " .. link_dir .. "/job.json")
+            data = decode_single_line(out)
+            check("任务目录链接：import 拒绝", code ~= 0 and data and data.ok == false
+                and tostring(data.message):find("symlink") ~= nil, out)
+            os.remove(link_dir)
+        else
+            print("  SKIP: 符号链接创建失败")
+        end
+
+        local real_id = "20261115_120000_0012"
+        local real_dir = jobs_root .. "/" .. real_id
+        os.execute('mkdir -p "' .. real_dir .. '"')
+        write_file(real_dir .. "/job.json", JSON.encode(job))
+        os.execute('ln -s "' .. outside .. '/job.json" "' .. real_dir .. '/job.json"')
+        if lfs.symlinkattributes(real_dir .. "/job.json", "mode") == "link" then
+            local out = run("cat --job " .. real_dir .. "/job.json --name job.json")
+            local data = decode_single_line(out)
+            check("job.json 链接：cat 拒绝", data and data.ok == false
+                and data.message == "job.json is a symlink", out)
+            out = run("job-status --job " .. real_dir .. "/job.json")
+            data = decode_single_line(out)
+            check("job.json 链接：job-status 拒绝", data and data.ok == false
+                and data.message == "job.json is a symlink", out)
+            os.remove(real_dir .. "/job.json")
+        end
+        write_file(real_dir .. "/job.json", JSON.encode(job))
+        os.execute('ln -s "' .. outside .. '/state.json" "' .. real_dir .. '/state.json"')
+        if lfs.symlinkattributes(real_dir .. "/state.json", "mode") == "link" then
+            local out = run("job-status --job " .. real_dir .. "/job.json")
+            local data = decode_single_line(out)
+            check("state.json 链接：job-status 拒绝", data and data.ok == false
+                and data.message == "state.json is a symlink", out)
+            out = run("cat --job " .. real_dir .. "/job.json --name state.json")
+            data = decode_single_line(out)
+            check("state.json 链接：cat 拒绝", data and data.ok == false
+                and data.message == "state.json is a symlink", out)
+            os.remove(real_dir .. "/state.json")
+        end
+        os.execute('rm -rf "' .. real_dir .. '"')
+
+        -- The root itself: listing must not enumerate the target, and every
+        -- job command must refuse before touching it.
+        local real_root = jobs_root .. ".real"
+        assert(os.rename(jobs_root, real_root))
+        os.execute('ln -s "' .. real_root .. '" "' .. jobs_root .. '"')
+        if lfs.symlinkattributes(jobs_root, "mode") == "link" then
+            local out, code = run("list-jobs")
+            local data = decode_single_line(out)
+            check("根链接：list-jobs 返回空", code == 0 and data and data.ok == true
+                and type(data.jobs) == "table" and #data.jobs == 0, out)
+            out, code = run("cat --job " .. JOB_PATH .. " --name job.json")
+            data = decode_single_line(out)
+            check("根链接：cat 拒绝", code ~= 0 and data and data.ok == false
+                and data.message == "jobs root is a symlink", out)
+            out, code = run("import --job " .. JOB_PATH)
+            data = decode_single_line(out)
+            check("根链接：import 拒绝", code ~= 0 and data and data.ok == false
+                and data.message == "jobs root is a symlink", out)
+        else
+            print("  SKIP: 根目录符号链接创建失败")
+        end
+        os.remove(jobs_root)
+        assert(os.rename(real_root, jobs_root))
+    end
+end
+
+-- ============================================================
+print("== 12. 原子写 .tmp / sidecar / cat 缺失任务 ==")
+do
+    local function read(path)
+        local file = io.open(path, "rb")
+        if not file then return nil end
+        local raw = file:read("*a")
+        file:close()
+        return raw
+    end
+    if not lfs.symlinkattributes then
+        print("  SKIP: 平台没有 symlinkattributes")
+    else
+        local outside = ROOT .. "/outside_tmp.txt"
+        write_file(outside, "original")
+        local body = ROOT .. "/body12.json"
+        write_file(body, '{"schema":"dualtranslate.state.v1"}')
+        local id = "20261115_120000_0013"
+        local dir = DATA .. "/cache/dualtranslate/mcp/jobs/" .. id
+        os.execute('mkdir -p "' .. dir .. '"')
+        local tmp_job = {}
+        for key, value in pairs(job) do tmp_job[key] = value end
+        tmp_job.job_id = id
+        write_file(dir .. "/job.json", JSON.encode(tmp_job))
+        write_file(dir .. "/state.json", JSON.encode({
+            schema = "dualtranslate.state.v1", status = "exported",
+            submitted = 0, total = 1 }))
+        os.execute('ln -s "' .. outside .. '" "' .. dir .. '/state.json.tmp"')
+        if lfs.symlinkattributes(dir .. "/state.json.tmp", "mode") == "link" then
+            local out, code = run("put --job " .. dir .. "/job.json --name state.json",
+                nil, body)
+            local data = decode_single_line(out)
+            check("put 不跟随 .tmp 链接", code == 0 and data and data.ok == true
+                and read(outside) == "original", out .. " / " .. tostring(read(outside)))
+        else
+            print("  SKIP: 符号链接创建失败")
+        end
+
+        -- import writes state.json through Mcp.writeJson, which shares the
+        -- same scratch-path rule.
+        write_file(dir .. "/result.json", JSON.encode({
+            schema = "dualtranslate.result.v1", job_id = id,
+            provider = { provider_id = "mcp:gpt-5", kind = "mcp",
+                model_name = "gpt-5", display_name = "MCP · GPT-5", confirmed = true },
+            translations = { { id = "s000001", text = "最终" } },
+        }))
+        os.remove(dir .. "/state.json.tmp")
+        os.execute('ln -s "' .. outside .. '" "' .. dir .. '/state.json.tmp"')
+        local out, code = run("import --job " .. dir .. "/job.json")
+        local data = decode_single_line(out)
+        check("import 不跟随 .tmp 链接", code == 0 and data and data.ok == true
+            and read(outside) == "original", out .. " / " .. tostring(read(outside)))
+
+        -- result.json / meta.json / options.json links are all refused.
+        os.remove(dir .. "/result.json")
+        os.execute('ln -s "' .. outside .. '" "' .. dir .. '/result.json"')
+        out, code = run("cat --job " .. dir .. "/job.json --name result.json")
+        data = decode_single_line(out)
+        check("result.json 链接：cat 拒绝", code ~= 0 and data and data.ok == false
+            and data.message == "result.json is a symlink", out)
+
+        write_file(dir .. "/meta.json", '{"schema":"dualtranslate.job.meta.v1"}')
+        os.remove(dir .. "/meta.json")
+        os.execute('ln -s "' .. outside .. '" "' .. dir .. '/meta.json"')
+        out, code = run("job-status --job " .. dir .. "/job.json")
+        data = decode_single_line(out)
+        check("meta.json 链接：job-status 拒绝", code ~= 0 and data and data.ok == false
+            and data.message == "meta.json is a symlink", out)
+
+        os.remove(dir .. "/meta.json")
+        os.execute('ln -s "' .. outside .. '" "' .. dir .. '/options.json"')
+        out, code = run("job-status --job " .. dir .. "/job.json")
+        data = decode_single_line(out)
+        check("options.json 链接：job-status 拒绝", code ~= 0 and data and data.ok == false
+            and data.message == "options.json is a symlink", out)
+        os.execute('rm -rf "' .. dir .. '"')
+
+        -- A deleted job: cat keeps answering "exists=false" instead of a
+        -- path error, which the PC's load_state relies on.
+        local missing = DATA .. "/cache/dualtranslate/mcp/jobs/20261115_120000_9999"
+        out, code = run("cat --job " .. missing .. "/job.json --name job.json")
+        data = decode_single_line(out)
+        check("cat 已删除任务返回 exists=false", code == 0 and data and data.ok == true
+            and data.exists == false, out)
+    end
+end
+
 print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))
 os.exit(failed == 0 and 0 or 1)

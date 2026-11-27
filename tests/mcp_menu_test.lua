@@ -80,9 +80,15 @@ package.preload["socket.url"] = function()
     return { escape = function(s) return tostring(s) end,
         unescape = function(s) return tostring(s) end }
 end
+local scheduled_calls, ui_closes = {}, {}
 package.preload["ui/uimanager"] = function()
-    return { show = function() end, close = function() end, setDirty = function() end,
-        scheduleIn = function() end, nextTick = function(fn) end }
+    return { show = function() end,
+        close = function(_, widget) ui_closes[#ui_closes + 1] = widget end,
+        setDirty = function() end,
+        scheduleIn = function(_, delay, fn)
+            scheduled_calls[#scheduled_calls + 1] = { delay = delay, fn = fn }
+        end,
+        nextTick = function(fn) end, forceRePaint = function() end }
 end
 package.preload["ui/widget/notification"] = function()
     return { new = function(_, o) notifications[#notifications + 1] = o.text return o end }
@@ -214,17 +220,19 @@ do
     local items = dualtranslate:buildMcpMenu()
     -- 3.2.1 removed the device-side inbox; 17 Q5 added the per-book glossary
     -- and style guide entries between export and the task list.
-    check("五个入口", #items == 5)
+    check("六个入口", #items == 6)
     check("导出所选章节", items[1].text == "导出所选章节…")
     check("术语表入口", items[2].text_func() == "术语表…", items[2].text_func())
     check("风格指南入口", items[3].text == "风格指南…")
-    check("任务列表带计数", items[4].text_func() == "任务列表（0）")
-    check("刷新外部译文", items[5].text == "刷新外部译文")
+    check("术语表工具入口", items[4].text == "术语表工具…")
+    check("任务列表带计数", items[5].text_func() == "任务列表（0）")
+    check("刷新外部译文", items[6].text == "刷新外部译文")
     -- 3.2.2: actions keep the menu open, so a finished export returns to this
     -- page instead of dropping the user back into the book.
     check("导出保持菜单", items[1].keep_menu_open == true)
-    check("刷新保持菜单", items[5].keep_menu_open == true)
-    check("MCP 页可自刷新", items.refresh_func ~= nil and #items.refresh_func() == 5)
+    check("术语表工具保持菜单", items[4].keep_menu_open == true)
+    check("刷新保持菜单", items[6].keep_menu_open == true)
+    check("MCP 页可自刷新", items.refresh_func ~= nil and #items.refresh_func() == 6)
 
     -- 17 Q5: the row counts the book's terms and the file lives outside the
     -- manifest, so merely saving it changes nothing else.
@@ -255,10 +263,10 @@ do
         and tostring(last_dialog.title):find("3 章", 1, true) ~= nil
         and tostring(last_dialog.title):find("2 个文件", 1, true) ~= nil,
         last_dialog and tostring(last_dialog.title))
-    local job_items = items[4].sub_item_table_func()
+    local job_items = items[5].sub_item_table_func()
     check("空任务列表有占位行", #job_items == 1 and job_items[1].text == "没有任务")
     -- The menu builder runs twice per open; the second call must hit the cache.
-    check("任务列表同秒复用", items[4].sub_item_table_func() == job_items)
+    check("任务列表同秒复用", items[5].sub_item_table_func() == job_items)
 end
 
 -- ============================================================
@@ -636,6 +644,83 @@ do
     dualtranslate.getBookOutline, dualtranslate.epub = real_outline, real_epub
     UIManager.scheduleIn, ProgressbarDialog.new = real_schedule, real_new
     os.remove(cache_dir .. "/glossary.json")
+end
+
+-- ============================================================
+print("== 3. 模板回收 deferred 60 秒补扫 ==")
+do
+    local books_root = data_dir .. "/cache/dualtranslate/books"
+    local current_dir = dualtranslate:getBookCacheDirectory(BOOK)
+    os.execute('mkdir -p "' .. current_dir .. '"')
+    local old = os.time() - 40 * 86400
+    for index = 1, 23 do
+        local dir = books_root .. "/expired" .. index
+        os.execute('mkdir -p "' .. dir .. '"')
+        local file = assert(io.open(dir .. "/css-template.css", "wb"))
+        file:write("x")
+        file:close()
+        assert(lfs.touch(dir .. "/css-template.css", old, old))
+    end
+    local before = #scheduled_calls
+    dualtranslate:onReaderReady()
+    check("开书安排 10 秒扫描", #scheduled_calls == before + 1
+        and scheduled_calls[#scheduled_calls].delay == 10,
+        tostring(#scheduled_calls - before))
+    scheduled_calls[#scheduled_calls].fn()
+    local remaining = 0
+    for index = 1, 23 do
+        if lfs.attributes(books_root .. "/expired" .. index .. "/css-template.css") then
+            remaining = remaining + 1
+        end
+    end
+    check("首轮最多删 20 份", remaining == 3, tostring(remaining))
+    check("剩余时安排 60 秒补扫", #scheduled_calls == before + 2
+        and scheduled_calls[#scheduled_calls].delay == 60,
+        tostring(#scheduled_calls - before))
+    scheduled_calls[#scheduled_calls].fn()
+    local left = 0
+    for index = 1, 23 do
+        if lfs.attributes(books_root .. "/expired" .. index .. "/css-template.css") then
+            left = left + 1
+        end
+    end
+    check("补扫删完剩余", left == 0, tostring(left))
+    check("没有进展后不再安排", #scheduled_calls == before + 2,
+        tostring(#scheduled_calls - before))
+end
+
+-- ============================================================
+print("== 4. 术语表工具：跨书选择框可关闭 ==")
+do
+    local Glossary = require("dualtranslate_glossary")
+    local other = data_dir .. "/cache/dualtranslate/books/other"
+    Glossary.save(other, { terms = { { source = "X", target = "甲" } } })
+    local manifest = assert(io.open(other .. "/manifest.json", "wb"))
+    manifest:write('{"book_path":"/books/Other.epub"}')
+    manifest:close()
+    ui_closes = {}
+    dualtranslate:showGlossaryToolsDialog()
+    local tools = last_dialog
+    check("打开术语表工具", tools
+        and tostring(tools.title):find("术语表工具", 1, true) ~= nil)
+    -- Row 2 / column 1 is 从其他书复制…
+    tools.buttons[2][1].callback()
+    local picker = last_dialog
+    check("跨书选择框已打开", picker
+        and tostring(picker.title):find("从哪本书复制", 1, true) ~= nil,
+        picker and tostring(picker.title))
+    local cancel
+    for _, row in ipairs(picker and picker.buttons or {}) do
+        if row[1] and row[1].text == "取消" then cancel = row[1] end
+    end
+    check("选择框有取消", cancel ~= nil)
+    if cancel then
+        cancel.callback()
+        check("取消关闭的是选择框", ui_closes[#ui_closes] == picker,
+            tostring(ui_closes[#ui_closes]))
+    end
+    os.remove(other .. "/glossary.json")
+    os.remove(other .. "/manifest.json")
 end
 
 print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))

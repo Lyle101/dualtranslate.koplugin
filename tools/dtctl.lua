@@ -246,7 +246,22 @@ end
 
 -- --job must be exactly mcp/jobs/<id>/job.json, so a caller can never point
 -- the importer at another book's job or escape the directory (10.5).
-local function validate_job_path(path)
+--
+-- 3.3.1: the design also demands a realpath check ("防 .. 与符号链接逃逸").
+-- The jobs root, the job directory and (once they exist) the files inside it
+-- must be real, or a link planted in the world-writable jobs tree turns cat
+-- into an arbitrary-file read and put/import into writes at the link target.
+-- Builds without symlinkattributes degrade to the string checks only, same
+-- as the plugin's own guards.
+local function path_is_link(path)
+    if not lfs.symlinkattributes then return false end
+    return lfs.symlinkattributes(path, "mode") == "link"
+end
+
+-- require_dir: put/import must not create or write into a directory that is
+-- not there; readers (cat/job-status/get-segments) keep their old behavior
+-- (a deleted job answers "not found" instead of a path error).
+local function validate_job_path(path, require_dir)
     local normalized = normalize_path(path)
     if not normalized then return nil, "invalid job path" end
     local job_id = normalized:match("/mcp/jobs/([^/]+)/job%.json$")
@@ -254,6 +269,24 @@ local function validate_job_path(path)
     if not Mcp.validJobId(job_id) then return nil, "invalid job id" end
     local expected = normalize_path(Mcp.jobDir(job_id) .. "/job.json")
     if normalized ~= expected then return nil, "job path outside the jobs directory" end
+    if Mcp.jobsRootIsLink and Mcp.jobsRootIsLink() then
+        return nil, "jobs root is a symlink"
+    end
+    local dir = Mcp.jobDir(job_id)
+    if path_is_link(dir) then return nil, "job directory is a symlink" end
+    if lfs.attributes(dir, "mode") then
+        if path_is_link(expected) then return nil, "job.json is a symlink" end
+        -- job-status reads these directly; a link in a real job directory
+        -- would hand the PC an arbitrary file from the device.  The optional
+        -- result files are checked where they are read (cat / import).
+        for _, name in ipairs({ "state.json", "meta.json", "options.json" }) do
+            if path_is_link(dir .. "/" .. name) then
+                return nil, name .. " is a symlink"
+            end
+        end
+    elseif require_dir then
+        return nil, "job directory missing"
+    end
     return normalized, job_id
 end
 
@@ -312,8 +345,7 @@ end
 local function write_atomic(path, data)
     local parent = path:match("^(.*)/[^/]+$")
     if parent and not Tools.mkdir_p(parent) then return false end
-    local temporary = path .. ".tmp"
-    local file = io.open(temporary, "wb")
+    local file, temporary = Tools.open_temp(path, "wb")
     if not file then return false end
     local written = file:write(data)
     local closed = file:close()
@@ -402,6 +434,9 @@ handlers.cat = function(opts)
             .. "result.json or result.partial.json"
     end
     local path = Mcp.jobDir(job_id_or_err) .. "/" .. name
+    -- cat follows a link: a planted state.json symlink would hand the PC an
+    -- arbitrary file from the device (16 MB cap does not change that).
+    if path_is_link(path) then return nil, name .. " is a symlink" end
     local size = lfs.attributes(path, "size")
     if not size then return { ok = true, name = name, exists = false } end
     if size > 16 * 1024 * 1024 then return nil, "file too large to read" end
@@ -581,7 +616,7 @@ function handlers.extract(opts)
 end
 
 function handlers.put(opts)
-    local job_path, job_id_or_err = validate_job_path(opts.job)
+    local job_path, job_id_or_err = validate_job_path(opts.job, true)
     if not job_path then return nil, job_id_or_err end
     local job_id = job_id_or_err
     local dir = Mcp.jobDir(job_id)
@@ -607,8 +642,39 @@ function handlers.put(opts)
     end)
 end
 
+-- Per-job ledger of segment ids earlier imports of *this* job already
+-- committed.  Coverage used to be inferred from the whole book's rows, which
+-- lets a different job's import mark this one complete (and then retention
+-- would delete a job whose own result was never fully submitted).
+local function load_imported_ids(dir)
+    local path = dir .. "/imported.txt"
+    if path_is_link(path) then return nil, "imported.txt is a symlink" end
+    -- 10k segments is ~90 KB; a 2 MB cap keeps a corrupted/hostile file from
+    -- ballooning the importer's memory (the directory is world-writable).
+    local size = lfs.attributes(path, "size")
+    if size and size > 2 * 1024 * 1024 then
+        return nil, "imported.txt is too large"
+    end
+    local file = io.open(path, "rb")
+    if not file then return {} end
+    local ids = {}
+    for line in file:lines() do
+        line = line:gsub("%s+$", "")
+        if line ~= "" then ids[line] = true end
+    end
+    file:close()
+    return ids
+end
+
+local function save_imported_ids(dir, ids)
+    local list = {}
+    for id in pairs(ids) do list[#list + 1] = id end
+    table.sort(list)
+    return write_atomic(dir .. "/imported.txt", table.concat(list, "\n") .. "\n")
+end
+
 function handlers.import(opts)
-    local job_path, job_id_or_err = validate_job_path(opts.job)
+    local job_path, job_id_or_err = validate_job_path(opts.job, true)
     if not job_path then return nil, job_id_or_err end
     local job_id = job_id_or_err
     local result_path = opts.result
@@ -623,19 +689,48 @@ function handlers.import(opts)
     else
         result_path = Mcp.jobDir(job_id) .. "/result.json"
     end
+    -- The default path (no --result) must get the same check: reading a
+    -- planted link would import bytes from anywhere on the device.
+    if path_is_link(result_path) then
+        return nil, "--result file is a symlink"
+    end
     local job, job_err = Mcp.loadJob(job_id)
     if not job then return nil, job_err end
     local result = Mcp.readJson(result_path)
     if not result then return nil, "cannot read result file" end
+    local state = Mcp.loadState(job_id) or { schema = Mcp.STATE_SCHEMA }
+    local result_provider = result.provider and result.provider.provider_id
+    local previously, ledger_err = load_imported_ids(Mcp.jobDir(job_id))
+    if not previously then return nil, ledger_err end
+    -- The ledger is per job *and* per provider: parts committed by another
+    -- provider must not make this one look complete.  A switch starts from an
+    -- empty view but leaves the old ledger on disk, so a failed switch does
+    -- not destroy the coverage of the provider that still owns the job.
+    local ledger_matches = state.provider_id == nil or result_provider == nil
+        or state.provider_id == result_provider
+    local previous = ledger_matches and previously or {}
     local summary, import_err = Store.importResult(job, result, {
         allow_partial = opts["allow-partial"] == true,
+        previously_accepted = previous,
     })
     if not summary then return nil, import_err end
-    local state = Mcp.loadState(job_id) or { schema = Mcp.STATE_SCHEMA }
+    -- The ledger is written before state.json: a crash in between leaves the
+    -- next run with coverage but an "unfinished" state (retryable), never the
+    -- reverse (finished state with lost coverage).
+    for _, id in ipairs(summary.accepted_ids or {}) do previous[id] = true end
+    if not save_imported_ids(Mcp.jobDir(job_id), previous) then
+        -- DB/entries are already committed; a missing ledger only makes the
+        -- next manual batch conservative, so this must not fail the import.
+        io.stderr:write("dualtranslate: cannot write imported.txt\n")
+    end
     state.status = "committed"
-    state.provider_id = result.provider and result.provider.provider_id
+    state.provider_id = result_provider
     state.model_name = result.provider and result.provider.model_name
-    state.submitted = summary.submitted
+    -- covered counts every segment the database now answers for -- all
+    -- hand-run imports combined.  Writing the per-run count here would leave
+    -- a manually completed job reading as "partially imported" forever, and
+    -- the 7-day retention would never collect it (10.2).
+    state.submitted = summary.covered or summary.submitted
     state.total = summary.total
     Mcp.saveState(job_id, state)
     -- Design 10.2: the import just succeeded, so this is the moment to drop

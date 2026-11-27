@@ -1051,7 +1051,264 @@ function dualtranslate:showStyleGuideDialog(menu)
     dialog:onShowKeyboard()
 end
 
--- Poll the reload signal on page turns (10.7).  The comparison uses the
+------------------------------------------------------------------------
+-- Glossary tools (17 Q5 follow-up): series books reuse one translator's
+-- terminology, so the per-book glossary can be parked as a global default,
+-- copied from another book, or moved through a JSON file next to the book
+-- (which is also the cross-device path).  Every replacing action confirms:
+-- the target file is user-authored content, not a translation artifact.
+------------------------------------------------------------------------
+
+local GLOSSARY_EXPORT_SUFFIX = ".dualtranslate-glossary.json"
+
+local function glossary_export_target(book_path)
+    local folder = book_path:match("^(.*)/[^/]+$") or "."
+    local name = book_path:match("([^/]+)$") or "book"
+    name = name:gsub("%.[Ee][Pp][Uu][Bb]$", "")
+    return folder .. "/" .. name .. GLOSSARY_EXPORT_SUFFIX
+end
+
+-- One button per entry, newest first, capped: a dialog with eighty rows
+-- would scroll off the Voyage screen.  The note says so instead of hiding.
+-- close_picker is a closure over the caller's dialog variable: the dialog
+-- does not exist yet while these rows are built, so passing the widget value
+-- would hand every callback nil and leave the picker unclosable.
+local function glossary_pick_row(entries, label_of, on_pick, close_picker)
+    local rows = {}
+    local capped = 0
+    for index, entry in ipairs(entries) do
+        if index > 12 then
+            capped = capped + 1
+        else
+            rows[#rows + 1] = {{
+                text = label_of(entry),
+                callback = function()
+                    close_picker()
+                    on_pick(entry)
+                end,
+            }}
+        end
+    end
+    if capped > 0 then
+        rows[#rows + 1] = {{
+            text = string.format(_("（其余 %d 个条目未列出）"), capped),
+            enabled = false,
+        }}
+    end
+    rows[#rows + 1] = {{
+        text = _("取消"),
+        id = "close",
+        callback = function() close_picker() end,
+    }}
+    return rows
+end
+
+function dualtranslate:showGlossaryToolsDialog(menu)
+    local book_path = self:currentBookPath()
+    if not book_path then return end
+    local dir = self:getBookCacheDirectory(book_path)
+    local dialog
+    local function close() UIManager:close(dialog) end
+    local function note(message)
+        TranslationUI.showInfo(message)
+    end
+    -- Save + repaint the menu so the 术语表（N 条） line follows the change.
+    local function applied(message)
+        if menu then self:refreshMenuPage(menu) end
+        note(message)
+    end
+
+    local function save_as_default()
+        local current = Glossary.load(dir)
+        if #current.terms == 0 then
+            note(_("本书还没有术语，先在「术语表…」里填写"))
+            return
+        end
+        local saved, err = Glossary.saveDefault(current)
+        if not saved then
+            note(_("保存默认术语表失败：") .. tostring(err))
+            return
+        end
+        applied(string.format(_("已把本书术语表存为默认（%d 条，含风格指南）"),
+            #saved.terms))
+    end
+
+    local function load_default()
+        local payload, err = Glossary.loadDefault()
+        if not payload then
+            if tostring(err):find("找不到文件") then
+                note(_("还没有默认术语表：先在某本书里「存为默认术语表」。"))
+            else
+                note(_("默认术语表不可读：") .. tostring(err))
+            end
+            return
+        end
+        local current = Glossary.load(dir)
+        local confirm
+        confirm = ButtonDialog:new{
+            title = string.format(
+                _("用默认术语表覆盖本书？\n默认：%d 条术语 + 风格指南\n本书现有：%d 条术语"),
+                #payload.terms, #current.terms),
+            buttons = {{
+                {
+                    text = _("取消"),
+                    callback = function() UIManager:close(confirm) end,
+                },
+                {
+                    text = _("覆盖"),
+                    callback = function()
+                        UIManager:close(confirm)
+                        local saved, save_err = Glossary.save(dir, payload)
+                        if not saved then
+                            note(_("载入默认术语表失败：") .. tostring(save_err))
+                            return
+                        end
+                        applied(string.format(_("已载入默认术语表（%d 条，含风格指南）"),
+                            #saved.terms))
+                    end,
+                },
+            }},
+        }
+        UIManager:show(confirm)
+    end
+
+    local function copy_from_book()
+        local sources = Glossary.listGlossaryBooks(dir)
+        if #sources == 0 then
+            note(_("其他书还没有术语表"))
+            return
+        end
+        close()
+        local picker
+        local function close_picker() UIManager:close(picker) end
+        picker = ButtonDialog:new{
+            title = _("从哪本书复制术语表？（会覆盖本书的术语与风格指南）"),
+            buttons = glossary_pick_row(sources,
+                function(entry)
+                    return string.format("%s（%d 条）", tostring(entry.title),
+                        entry.terms)
+                end,
+                function(entry)
+                    local payload, err = Glossary.loadFile(entry.dir .. "/" .. Glossary.FILE)
+                    if not payload then
+                        note(_("读取该书术语表失败：") .. tostring(err))
+                        return
+                    end
+                    local saved, save_err = Glossary.save(dir, payload)
+                    if not saved then
+                        note(_("复制失败：") .. tostring(save_err))
+                        return
+                    end
+                    applied(string.format(_("已从《%s》复制 %d 条术语（含风格指南）"),
+                        tostring(entry.title), #saved.terms))
+                end, close_picker),
+        }
+        UIManager:show(picker)
+    end
+
+    local function export_file()
+        local target = glossary_export_target(book_path)
+        local current = Glossary.load(dir)
+        if #current.terms == 0 then
+            note(_("本书还没有术语，先在「术语表…」里填写"))
+            return
+        end
+        local exported, err = Glossary.exportFile(dir, target)
+        if not exported then
+            note(_("导出失败：") .. tostring(err))
+            return
+        end
+        applied(string.format(_("已导出 %d 条术语到：\n%s"), #current.terms, target))
+    end
+
+    local function import_file()
+        local folder = book_path:match("^(.*)/[^/]+$") or "."
+        local lfs = require("libs/libkoreader-lfs")
+        local files = {}
+        local ok, iterator, state = pcall(lfs.dir, folder)
+        if ok and iterator then
+            for name in iterator, state do
+                if name:match("%.dualtranslate%-glossary%.json$") then
+                    local path = folder .. "/" .. name
+                    local mode
+                    if lfs.symlinkattributes then
+                        mode = lfs.symlinkattributes(path, "mode")
+                    else
+                        mode = lfs.attributes(path, "mode")
+                    end
+                    if mode == "file" then files[#files + 1] = path end
+                end
+            end
+        end
+        if #files == 0 then
+            note(_("书旁没有术语表文件：先在来源设备上「导出术语表」，"
+                .. "把 *.dualtranslate-glossary.json 放到这本书所在的文件夹"))
+            return
+        end
+        table.sort(files)
+        close()
+        local picker
+        local function close_picker() UIManager:close(picker) end
+        picker = ButtonDialog:new{
+            title = _("导入哪个术语表文件？（会覆盖本书的术语与风格指南）"),
+            buttons = glossary_pick_row(files,
+                function(path)
+                    return tostring(path):match("([^/]+)$") or tostring(path)
+                end,
+                function(path)
+                    local saved, err = Glossary.importFile(path, dir)
+                    if not saved then
+                        note(_("导入失败：") .. tostring(err))
+                        return
+                    end
+                    applied(string.format(_("已导入 %d 条术语（含风格指南）"),
+                        #saved.terms))
+                end, close_picker),
+        }
+        UIManager:show(picker)
+    end
+
+    dialog = ButtonDialog:new{
+        title = _("术语表工具\n在书之间复用术语：默认术语表、跨书复制、随书文件导出/导入。"
+            .. "复制、导入与载入默认会先确认；导出会覆盖书旁同名文件。"),
+        buttons = {
+            {
+                {
+                    text = _("存为默认术语表"),
+                    callback = function() close() save_as_default() end,
+                },
+                {
+                    text = _("载入默认术语表…"),
+                    callback = function() close() load_default() end,
+                },
+            },
+            {
+                {
+                    text = _("从其他书复制…"),
+                    callback = function() copy_from_book() end,
+                },
+                {
+                    text = _("导出术语表"),
+                    callback = function() close() export_file() end,
+                },
+            },
+            {
+                {
+                    text = _("从书旁文件导入…"),
+                    callback = function() import_file() end,
+                },
+            },
+            {
+                {
+                    text = _("关闭"),
+                    id = "close",
+                    callback = function() close() end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+end
 -- monotonic seq, never the mtime: FAT32 timestamps are ~2 s coarse.
 function dualtranslate:checkExternalReload(force)
     local book_path = self:currentBookPath()
@@ -1611,6 +1868,15 @@ function dualtranslate:buildMcpMenu()
             enabled_func = function() return self:isEpub() end,
             keep_menu_open = true,
             callback = function(menu) self:showStyleGuideDialog(menu) end,
+        },
+        {
+            -- 17 Q5 follow-up: reuse the per-book glossary across a series or
+            -- move it between devices.  Writes stay in the MCP layer (the
+            -- editor's per-book file); nothing here touches the manifest.
+            text = _("术语表工具…"),
+            enabled_func = function() return self:isEpub() end,
+            keep_menu_open = true,
+            callback = function(menu) self:showGlossaryToolsDialog(menu) end,
         },
         {
             text_func = function()

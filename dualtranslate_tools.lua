@@ -46,6 +46,19 @@ function Tools.mkdir_p(path)
     return util.makePath(path) == true
 end
 
+-- Scratch handle for an atomic rewrite through "<path>.tmp".  On Kindle
+-- /mnt/us is a world-writable FUSE mount, so a link pre-planted at the
+-- scratch path would make io.open(..., "wb") truncate its target.  Remove a
+-- link first (a regular stale tmp is simply overwritten), then open.
+-- Returns the handle and the temporary path; callers rename it into place.
+function Tools.open_temp(path, mode)
+    local temporary = path .. ".tmp"
+    if lfs.symlinkattributes and lfs.symlinkattributes(temporary, "mode") == "link" then
+        os.remove(temporary)
+    end
+    return io.open(temporary, mode or "wb"), temporary
+end
+
 -- lfs.attributes follows symlinks; a recursive delete must not.  /mnt/us is
 -- world-writable on Kindle, so a link planted in a cache/job directory could
 -- otherwise make the plugin erase the link target (which may be the user's

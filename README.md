@@ -108,6 +108,7 @@ PC（只读 key）                 PC（写 key）
 ```
 
 1. **导出**：「MCP 外部翻译 → 导出所选章节…」，确认隐私提示后任务写入 `cache/dualtranslate/mcp/jobs/<job_id>/job.json`（含原文，供电脑端读取）。导出前可在同一子菜单里维护**术语表**（每行 `原文=译文`）和**风格指南**，两者会随任务写进 `options`；电脑端 `dt_get_job` 能读到，工具说明要求 Agent 逐条使用给定译法并遵守风格要求。「删除本书全部译文」不会删除这两项（它们保存在 `glossary.json`，不属于译文产物）。
+   - **术语表工具…**：系列书复用同一份译者术语表。「存为默认术语表」存到 `cache/dualtranslate/glossary.default.json`（在 `books/` 之外，删除任何书的译文都不影响）；「载入默认术语表…」覆盖当前书；「从其他书复制…」列出已有术语表的书；「导出术语表」把原文件写到书旁的 `<书名>.dualtranslate-glossary.json`，「从书旁文件导入…」从这本书所在文件夹选择并导入（跨设备也走这条）。复制、导入与载入默认都会先确认；导出会覆盖书旁同名文件。
 2. **电脑端**：安装 `mcp-server/`（`pip install -e mcp-server`），按 `mcp-server/config.example.toml` 配置 SSH 双 key，在 MCP 客户端里使用 `dt_list_jobs` / `dt_get_job` / `dt_get_segments` / `dt_confirm_model` / `dt_submit_translations` / `dt_commit_job`。模型名称必须由用户确认。
 3. **回传**：`dt_commit_job` 经 `tools/dtctl.sh rpc` 直接写入设备（SQLite + entries + manifest），设备端不再有「导入结果」这一步；写不进去时工具会明确报错，而不是把结果丢在一个没人读的目录里。
 4. **显示**：翻页会自动读取 `reload.signal` 刷新；想换看另一个服务的译文，用「管理译文 → 显示译文」。
@@ -128,9 +129,10 @@ command=".../tools/dtctl.sh rpc",no-pty,...            ssh-ed25519 AAAA... dualt
 
 ## 数据位置
 
-- 译文数据：KOReader 数据目录 `cache/dualtranslate/books/<hash>/` 下的 `manifest.json`（服务列表、完成度、显示选择）、`entries/<provider>.json`（各服务的译文条目）、`glossary.json`（术语表 + 风格指南，只供 MCP 导出；与 manifest 分开，编辑它不会重建样式或触发重载）与 `css-template.css`（预编译的样式规则，约 1.2 MB/书，可安全删除，下次打开/导入会自动重建；打开书后会自动回收 30 天未使用或总量超过 50 MB 的旧模板，跳过当前书，每轮最多删 20 份，未删完的下次开书且距上次 ≥6h 继续；活跃大书超过约 41 本时可能周期性重建）；旧版 `overlay.json` 迁移后保留为 `overlay.v2.bak`
-- 译文数据库：KOReader 数据目录 `dualtranslate_cache.sqlite3`（WAL 模式）
-- MCP 任务：`cache/dualtranslate/mcp/jobs/<job_id>/`（`job.json` 含原文、`meta.json` 索引、`options.json` 术语表/风格指南、`state.json`、`result.json`）；**已全部导入**（`committed` 且 `submitted ≥ total`）超过 7 天的任务会在下次导入成功时自动删除，部分导入、导出中、待提交的任务不动；导出中途被杀、没有 `state.json` 的旧目录也会按目录时间清掉
+- 译文数据：KOReader 数据目录 `cache/dualtranslate/books/<hash>/` 下的 `manifest.json`（服务列表、完成度、显示选择）、`entries/<provider>.json`（各服务的译文条目）、`glossary.json`（术语表 + 风格指南，只供 MCP 导出；与 manifest 分开，编辑它不会重建样式或触发重载）、`glossary.json.corrupt`（损坏文件的备份）与 `css-template.css`（预编译的样式规则，约 1.2 MB/书，可安全删除，下次打开/导入会自动重建；打开书后会自动回收 30 天未使用或总量超过 50 MB 的旧模板，跳过当前书，每轮最多删 20 份；还有剩余时开书 60 秒后继续，每 60 秒一轮直到没有进展（首轮仍受每进程 6h 节流）；活跃大书超过约 41 本时可能周期性重建）；旧版 `overlay.json` 迁移后保留为 `overlay.v2.bak`
+- 译文数据库：KOReader 数据目录 `dualtranslate_cache.sqlite3`（WAL 模式）。从旧版升级时会在启动阶段一次性迁移（100k 行约 1–2 分钟，屏幕会显示「正在升级译文缓存…」，旧库备份为 `.bak`）。
+- 默认术语表：`cache/dualtranslate/glossary.default.json`（不随任何书的删除而消失）；导出的书名旁术语表是 `<书名>.dualtranslate-glossary.json`
+- MCP 任务：`cache/dualtranslate/mcp/jobs/<job_id>/`（`job.json` 含原文、`meta.json` 索引、`options.json` 术语表/风格指南、`state.json`、`result.json`、`imported.txt` 分批导入账本）；**已全部导入**（`committed` 且 `submitted ≥ total`）超过 7 天的任务会在下次导入成功时自动删除，部分导入、导出中、待提交的任务不动；导出中途被杀、没有 `state.json` 的旧目录也会按目录时间清掉
 - 进度文件：`cache/dualtranslate/progress_*.txt`
 - 配置：KOReader 原生 `settings/dualtranslate.lua`（`dualtranslate_` 前缀键），旧版 `dualtranslate_configuration.lua` 自动迁移
 
@@ -161,7 +163,7 @@ lua tests/mcp_import_test.lua   # MCP 结果导入（需真实 SQLite）
 lua tests/mcp_menu_test.lua     # MCP 菜单与 reload seq
 lua tests/dtctl_test.lua        # headless CLI（真实子进程）
 lua tests/template_gc_test.lua  # CSS 模板磁盘回收（过期/50MB 上限/当前书/节流）
-lua tests/glossary_test.lua     # 术语表/风格指南：解析、原子写、与 manifest 解耦
+lua tests/glossary_test.lua     # 术语表/风格指南：解析、原子写、跨书复用、与 manifest 解耦
 
 # PC 端 MCP Server 测试
 cd mcp-server && pip install -e ".[dev]" && pytest

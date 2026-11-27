@@ -58,6 +58,18 @@ local function job_dir_is_real(job_id)
     return mode == "directory"
 end
 
+-- The jobs root itself gets the same treatment: a link planted over it
+-- redirects every job read -- and the 7-day retention deletes -- at the link
+-- target.  Missing is fine (the first export creates it); a link is refused.
+-- Exported for dtctl, which must apply the same rule before put/import.
+function Mcp.jobsRootIsLink()
+    local root = Mcp.jobsDir()
+    if lfs.symlinkattributes then
+        return lfs.symlinkattributes(root, "mode") == "link"
+    end
+    return false
+end
+
 function Mcp.jobPath(job_id)
     local dir = Mcp.jobDir(job_id)
     return dir and (dir .. "/job.json") or nil
@@ -74,8 +86,9 @@ end
 -- Atomic replacement (tmp + rename): a crash mid-write can never leave a
 -- truncated job or state file behind.
 local function write_file(path, data)
-    local temporary = path .. ".tmp"
-    local file = io.open(temporary, "wb")
+    -- open_temp removes a planted link at the scratch path first; the rename
+    -- below replaces the destination link itself, never its target.
+    local file, temporary = Tools.open_temp(path, "wb")
     if not file then return false end
     local written = file:write(data)
     local closed = file:close()
@@ -87,6 +100,12 @@ local function write_file(path, data)
 end
 
 function Mcp.readJson(path)
+    -- A link planted in the world-writable jobs tree would otherwise make
+    -- every reader (state/meta/options/job) follow it.  Lists already drop
+    -- linked job directories; this covers links at the file itself.
+    if lfs.symlinkattributes and lfs.symlinkattributes(path, "mode") == "link" then
+        return nil
+    end
     local raw = read_file(path)
     if not raw or raw == "" then return nil end
     local ok, data = pcall(JSON.decode, raw)
@@ -150,6 +169,7 @@ end
 -- 646-chapter book.  Directories without a usable meta.json (jobs exported
 -- before the index layout) still take the whole-file path.
 function Mcp.listJobs()
+    if Mcp.jobsRootIsLink() then return {} end
     local jobs = {}
     local ok, iterator, state = pcall(lfs.dir, Mcp.jobsDir())
     if not ok or not iterator then return jobs end
@@ -207,11 +227,14 @@ end
 -- Counting only needs valid directory names; the menu renders on every open
 -- and must not parse every job.json just to show "(N)".
 function Mcp.countJobs()
+    if Mcp.jobsRootIsLink() then return 0 end
     local count = 0
     local ok, iterator, state = pcall(lfs.dir, Mcp.jobsDir())
     if not ok or not iterator then return 0 end
     for name in iterator, state do
-        if Mcp.validJobId(name) then count = count + 1 end
+        -- Same rule as listJobs: a link is not a job, so the menu count and
+        -- the list it opens must agree.
+        if Mcp.validJobId(name) and job_dir_is_real(name) then count = count + 1 end
     end
     return count
 end
@@ -243,6 +266,9 @@ Mcp.META_SCHEMA = "dualtranslate.job.meta.v1"
 Mcp.OPTIONS_SCHEMA = "dualtranslate.job.options.v1"
 
 function Mcp.slurp(path)
+    if lfs.symlinkattributes and lfs.symlinkattributes(path, "mode") == "link" then
+        return nil
+    end
     local file = io.open(path, "rb")
     if not file then return nil end
     local data = file:read("*a")
@@ -561,6 +587,11 @@ function Mcp.exportJob(opts)
     opts = opts or {}
     local book_path = opts.book_path
     if not book_path then return nil, "缺少书路径" end
+    -- Writing a job under a symlinked root would scatter job.json (the book's
+    -- source text) inside whatever the link points at.
+    if Mcp.jobsRootIsLink() then
+        return nil, "任务目录 cache/dualtranslate/mcp/jobs 是符号链接，已拒绝导出"
+    end
     -- Required lazily: Epub is also required by the reader, and the MCP
     -- module must stay loadable from dtctl without UI modules.  The reader
     -- passes its own instance so the plugin never ends up with two engines.
@@ -678,6 +709,7 @@ local function job_is_finished(job_state)
 end
 
 function Mcp.cleanupExpiredJobs(opts)
+    if Mcp.jobsRootIsLink() then return 0 end
     opts = opts or {}
     local days = tonumber(opts.days) or Mcp.JOB_RETENTION_DAYS
     local cutoff = (tonumber(opts.now) or os.time()) - days * 86400

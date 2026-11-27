@@ -24,6 +24,13 @@ local ROOT = "/tmp/dt_glossary_test"
 os.execute('rm -rf "' .. ROOT .. '"')
 os.execute('mkdir -p "' .. ROOT .. '"')
 
+-- defaultPath / listGlossaryBooks resolve through DataStorage; point it at
+-- this test's tree so the default glossary stays outside the book caches.
+local data_root = ROOT .. "/data"
+package.preload["datastorage"] = function()
+    return { getDataDir = function() return data_root end }
+end
+
 local warn_count = 0
 package.preload["logger"] = function()
     return { warn = function() warn_count = warn_count + 1 end,
@@ -210,6 +217,20 @@ do
     check("损坏文件只告警一次", warn_count == before and warn_count > 0,
         tostring(warn_count))
 
+    -- A planted link at the .corrupt backup path must not be followed.
+    local linked_dir = ROOT .. "/book_corrupt_link"
+    Tools.mkdir_p(linked_dir)
+    write(linked_dir .. "/glossary.json", "{bad again")
+    local outside = ROOT .. "/outside_corrupt.txt"
+    write(outside, "original")
+    os.execute('ln -s "' .. outside .. '" "'
+        .. linked_dir .. '/glossary.json.corrupt"')
+    local linked_loaded = Glossary.load(linked_dir)
+    check("损坏备份不跟随链接", linked_loaded.corrupt == true
+        and read(outside) == "original", tostring(read(outside)))
+    check("损坏备份写成普通文件",
+        lfs.attributes(linked_dir .. "/glossary.json.corrupt", "mode") == "file")
+
     local long_style = string.rep("风", 1000) -- 3000 bytes > 2000
     local saved = Glossary.save(dir, { terms = {}, style_guide = long_style })
     check("超长风格指南截断", saved ~= nil
@@ -368,6 +389,175 @@ do
     os.execute('rm -rf "' .. shadow .. '" "' .. Glossary.keepPath(shadow) .. '"')
     os.execute('rm -rf "' .. dir .. '" "' .. keepdir .. '"')
     os.execute('rm -rf "' .. occupied .. '" "' .. Glossary.keepPath(occupied) .. '"')
+end
+
+-- ============================================================
+print("== 10. 跨书复用：默认 / 复制列表 / 导出导入 ==")
+do
+    local books_root = data_root .. "/cache/dualtranslate/books"
+    Tools.mkdir_p(books_root)
+    check("默认术语表在 books/ 之外",
+        Glossary.defaultPath() == data_root .. "/cache/dualtranslate/glossary.default.json")
+
+    local default_saved, default_err = Glossary.saveDefault({
+        terms = { { source = "Darcy", target = "达西" },
+            { source = "Lizzy", target = "莉齐" } },
+        style_guide = "默认风格",
+    })
+    check("保存默认术语表", default_saved ~= nil, tostring(default_err))
+    check("默认文件落盘", exists(Glossary.defaultPath()))
+    local default_payload = Glossary.loadDefault()
+    check("读回默认术语表", default_payload and #default_payload.terms == 2
+        and default_payload.terms[2].source == "Lizzy"
+        and default_payload.style_guide == "默认风格",
+        default_payload and default_payload.style_guide)
+    check("默认保存无 tmp 残留", not exists(Glossary.defaultPath() .. ".tmp"))
+
+    local missing, missing_err = Glossary.loadFile(ROOT .. "/nope.json")
+    check("缺文件给出原因", missing == nil and tostring(missing_err):find("找不到") ~= nil)
+    write(ROOT .. "/empty.json", "")
+    check("空文件拒绝", Glossary.loadFile(ROOT .. "/empty.json") == nil)
+    write(ROOT .. "/bad.json", "{oops")
+    check("非 JSON 拒绝", Glossary.loadFile(ROOT .. "/bad.json") == nil)
+    write(ROOT .. "/nothing.json", '{"schema":"x","terms":[]}')
+    local nothing, nothing_err = Glossary.loadFile(ROOT .. "/nothing.json")
+    check("没有术语的文件拒绝", nothing == nil
+        and tostring(nothing_err):find("没有术语") ~= nil, tostring(nothing_err))
+    write(ROOT .. "/style_only.json", '{"terms":[],"style_guide":"只用风格"}')
+    local only_style = Glossary.loadFile(ROOT .. "/style_only.json")
+    check("只有风格指南也可载入", only_style and #only_style.terms == 0
+        and only_style.style_guide == "只用风格")
+    write(ROOT .. "/terms_only.json", '{"terms":[{"source":"A","target":"甲"}]}')
+    local terms_only = Glossary.loadFile(ROOT .. "/terms_only.json")
+    check("缺风格指南回落默认", terms_only and terms_only.style_guide
+        == Glossary.DEFAULT_STYLE_GUIDE)
+
+    -- The export is a byte copy: what the user saved is what travels.
+    local source_dir = books_root .. "/b1"
+    Glossary.save(source_dir, {
+        terms = { { source = "Darcy", target = "达西" } }, style_guide = "本书风格" })
+    local target = ROOT .. "/export/Book One.dualtranslate-glossary.json"
+    local exported, export_err = Glossary.exportFile(source_dir, target)
+    check("导出成功", exported ~= nil, tostring(export_err))
+    check("导出目录自动创建", exists(target))
+    check("导出是原字节", read(target) == read(source_dir .. "/glossary.json"))
+    local imported_dir = books_root .. "/b2"
+    local imported, import_err = Glossary.importFile(target, imported_dir)
+    check("导入成功", imported ~= nil, tostring(import_err))
+    local imported_payload = Glossary.load(imported_dir)
+    check("导入内容一致", #imported_payload.terms == 1
+        and imported_payload.terms[1].source == "Darcy"
+        and imported_payload.style_guide == "本书风格")
+    write(ROOT .. "/bad_import.json", "{broken")
+    local bad_imported, bad_err = Glossary.importFile(ROOT .. "/bad_import.json",
+        books_root .. "/b3")
+    check("损坏文件不会覆盖本书", bad_imported == nil
+        and tostring(bad_err):find("JSON") ~= nil
+        and not exists(books_root .. "/b3/glossary.json"), tostring(bad_err))
+    check("没有术语表的书不能导出",
+        Glossary.exportFile(books_root .. "/b3", ROOT .. "/export/x.json") == nil)
+
+    -- listGlossaryBooks: newest first, skips links and directories named
+    -- glossary.json, and reads the title from manifest.json when present.
+    local b3 = books_root .. "/b3"
+    Glossary.save(b3, { terms = { { source = "B", target = "乙" },
+        { source = "C", target = "丙" }, { source = "D", target = "丁" } } })
+    local manifest_file = assert(io.open(imported_dir .. "/manifest.json", "wb"))
+    manifest_file:write('{"book_path":"/mnt/us/documents/Book Two.epub"}')
+    manifest_file:close()
+    local now = os.time()
+    assert(lfs.touch(imported_dir .. "/glossary.json", now, now))
+    assert(lfs.touch(b3 .. "/glossary.json", now - 10, now - 10))
+    local dir_as_file = books_root .. "/b4"
+    Tools.mkdir_p(dir_as_file .. "/glossary.json")
+    local listed = Glossary.listGlossaryBooks(source_dir)
+    check("列表排除当前书", #listed == 2, tostring(#listed))
+    check("最新在前", listed[1] and listed[1].dir == imported_dir,
+        listed[1] and listed[1].dir)
+    check("标题取 manifest 文件名", listed[1] and listed[1].title == "Book Two.epub",
+        listed[1] and listed[1].title)
+    check("条数用于确认覆盖", listed[1] and listed[1].terms == 1,
+        listed[1] and tostring(listed[1].terms))
+    check("无 manifest 用目录名", listed[2] and listed[2].title == "b3",
+        listed[2] and listed[2].title)
+    local seen_b4 = false
+    for _, item in ipairs(listed) do
+        if item.dir == dir_as_file then seen_b4 = true end
+    end
+    check("目录冒充 glossary.json 不进列表", not seen_b4)
+    if lfs.symlinkattributes then
+        local link = books_root .. "/linked"
+        os.execute('ln -s "' .. b3 .. '" "' .. link .. '"')
+        if lfs.symlinkattributes(link, "mode") == "link" then
+            local seen_link, seen_b3 = false, false
+            for _, item in ipairs(Glossary.listGlossaryBooks(nil)) do
+                if item.dir == link then seen_link = true end
+                if item.dir == b3 then seen_b3 = true end
+            end
+            check("符号链接书目录不进列表", not seen_link and seen_b3)
+        else
+            print("  SKIP: 符号链接创建失败")
+        end
+    end
+end
+
+-- ============================================================
+print("== 11. 两副本都损坏时按 mtime 选较新 ==")
+do
+    local dir = ROOT .. "/book_both_corrupt"
+    Tools.mkdir_p(dir)
+    local keep = Glossary.keepPath(dir)
+    write(keep, "{old and broken")
+    write(keep .. ".1", "{new and broken")
+    local now = os.time()
+    assert(lfs.touch(keep, now - 100, now - 100))
+    assert(lfs.touch(keep .. ".1", now - 10, now - 10))
+    local loaded = Glossary.load(dir)
+    check("恢复较新的 keep.1", read(dir .. "/glossary.json") == "{new and broken",
+        read(dir .. "/glossary.json"))
+    check("较旧的 keep 被清掉", not exists(keep))
+    check("恢复后不留 keep.1", not exists(keep .. ".1"))
+    check("损坏内容仍标记并备份", loaded.corrupt == true
+        and read(dir .. "/glossary.json.corrupt") == "{new and broken")
+end
+
+-- ============================================================
+print("== 12. 原子写不跟随 .tmp 链接 ==")
+do
+    local outside = ROOT .. "/outside_target.txt"
+    write(outside, "original")
+    local dir = ROOT .. "/book_tmp_link"
+    Tools.mkdir_p(dir)
+    local tmp_link = dir .. "/glossary.json.tmp"
+    os.execute('ln -s "' .. outside .. '" "' .. tmp_link .. '"')
+    if lfs.symlinkattributes and lfs.symlinkattributes(tmp_link, "mode") == "link" then
+        local saved = Glossary.save(dir, { terms = { { source = "D", target = "丁" } } })
+        check("保存不跟随 .tmp 链接", saved ~= nil and read(outside) == "original",
+            tostring(read(outside)))
+        check("术语表正常写入", #Glossary.load(dir).terms == 1)
+    else
+        print("  SKIP: 符号链接创建失败")
+    end
+
+    local target = ROOT .. "/export_link/book.dualtranslate-glossary.json"
+    Tools.mkdir_p(ROOT .. "/export_link")
+    os.execute('ln -s "' .. outside .. '" "' .. target .. '.tmp"')
+    if lfs.symlinkattributes(target .. ".tmp", "mode") == "link" then
+        write(outside, "original")
+        local exported = Glossary.exportFile(dir, target)
+        check("导出不跟随 .tmp 链接", exported ~= nil and read(outside) == "original")
+        check("导出文件已生成", exists(target))
+    end
+
+    local default_tmp = Glossary.defaultPath() .. ".tmp"
+    Tools.mkdir_p(Glossary.defaultPath():match("^(.*)/[^/]+$"))
+    os.execute('ln -s "' .. outside .. '" "' .. default_tmp .. '"')
+    if lfs.symlinkattributes(default_tmp, "mode") == "link" then
+        write(outside, "original")
+        local saved = Glossary.saveDefault({ terms = { { source = "E", target = "戊" } } })
+        check("默认术语表不跟随 .tmp 链接", saved ~= nil and read(outside) == "original")
+        check("默认术语表正常写入", #Glossary.loadDefault().terms == 1)
+    end
 end
 
 print(string.format("\n==== 术语表测试：%d 通过，%d 失败 ====", passed, failed))

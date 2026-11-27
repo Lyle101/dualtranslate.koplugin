@@ -1772,8 +1772,7 @@ local function save_outline_cache(book_path, size, mtime, outline)
         logger.warn("dualtranslate: outline cache dir unavailable:", path)
         return false
     end
-    local temporary = path .. ".tmp"
-    local file = io.open(temporary, "wb")
+    local file, temporary = Tools.open_temp(path, "wb")
     if not file then
         logger.warn("dualtranslate: outline cache write failed:", path)
         return false

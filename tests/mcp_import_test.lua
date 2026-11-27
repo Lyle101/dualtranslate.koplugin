@@ -429,6 +429,167 @@ do
 end
 
 -- ============================================================
+print("== 3c. 手工分批导入：第二次不带 allow-partial 也能收口 ==")
+do
+    -- A hand-run agent may import one page of its own result at a time.  The
+    -- second run carries only its own segments, so "missing" must count rows
+    -- the first run already committed -- otherwise the job could never finish
+    -- without --allow-partial and its state would read as partial forever.
+    local multi_book = ROOT .. "/books/multi.epub"
+    local handle = io.open(multi_book, "wb")
+    handle:write(string.rep("m", 3072))
+    handle:close()
+    local multi_job = {
+        schema = "dualtranslate.job.v1",
+        job_id = "20261115_120000_0007",
+        created_at = os.time(),
+        book = {
+            device_path = multi_book, title = "Multi", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 2,
+            file_size = lfs.attributes(multi_book, "size"),
+            file_mtime = lfs.attributes(multi_book, "modification") or 0,
+        },
+        chapters = { { index = 1, title = "One" }, { index = 2, title = "Two" } },
+        segments = {
+            { id = "s000001", parent_id = "s000001", part = 1, parent_total = 1,
+              chapter_index = 1, chapter_title = "One", selector = "sel-m1",
+              xpointer = "/body/DocFragment/body/p[1]", source = "M one" },
+            { id = "s000002", parent_id = "s000002", part = 1, parent_total = 1,
+              chapter_index = 1, chapter_title = "One", selector = "sel-m2",
+              xpointer = "/body/DocFragment/body/p[2]", source = "M two" },
+            { id = "s000003", parent_id = "s000003", part = 1, parent_total = 1,
+              chapter_index = 2, chapter_title = "Two", selector = "sel-m3",
+              xpointer = "/body/DocFragment[2]/body/p[1]", source = "M three" },
+        },
+        options = { max_chars_per_segment = 4500, split_long_segments = true },
+    }
+    local first = make_result({
+        { id = "s000001", text = "一" },
+        { id = "s000002", text = "二" },
+    })
+    first.job_id = multi_job.job_id
+    local first_summary, first_err = Store.importResult(multi_job, first,
+        { allow_partial = true })
+    check("第一批允许部分导入", first_summary ~= nil, tostring(first_err))
+    check("第一批 covered=2", first_summary and first_summary.covered == 2
+        and first_summary.submitted == 2,
+        first_summary and (tostring(first_summary.covered) .. "/"
+            .. tostring(first_summary.submitted)))
+    local previous = {}
+    for _, id in ipairs(first_summary and first_summary.accepted_ids or {}) do
+        previous[id] = true
+    end
+    check("第一批给出 id 账本", previous["s000001"] == true and previous["s000002"] == true)
+
+    local repeated, repeated_err = Store.importResult(multi_job, first,
+        { previously_accepted = previous })
+    check("重复第一批仍报缺 1 段", repeated == nil
+        and tostring(repeated_err):find("还有 1 段缺失") ~= nil, tostring(repeated_err))
+
+    -- Another job of the same book may already have rows for these selectors
+    -- (job A above imported them).  That must not make job B look complete:
+    -- its own result still lacks two segments.
+    local other_job = {
+        schema = "dualtranslate.job.v1",
+        job_id = "20261115_120000_0008",
+        created_at = os.time(),
+        book = multi_job.book,
+        chapters = multi_job.chapters,
+        segments = multi_job.segments,
+        options = multi_job.options,
+    }
+    local other_first = make_result({ { id = "s000001", text = "别的任务" } })
+    other_first.job_id = other_job.job_id
+    local other_summary, other_err = Store.importResult(other_job, other_first)
+    check("同一本书的其他任务不冒充本任务覆盖", other_summary == nil
+        and tostring(other_err):find("还有 2 段缺失") ~= nil, tostring(other_err))
+
+    local second = make_result({ { id = "s000003", text = "三" } })
+    second.job_id = multi_job.job_id
+    local second_summary, second_err = Store.importResult(multi_job, second,
+        { previously_accepted = previous })
+    check("第二批无需 allow-partial", second_summary ~= nil, tostring(second_err))
+    check("covered 累计为 3", second_summary and second_summary.covered == 3,
+        second_summary and tostring(second_summary.covered))
+    check("submitted 只记本批", second_summary and second_summary.submitted == 1,
+        second_summary and tostring(second_summary.submitted))
+    local manifest = Overlay.loadManifest(Store.bookDir(multi_book, "zh-Hans"))
+    local provider = manifest and manifest.providers["mcp:gpt-5"]
+    check("跨批补齐后两章都算完成", provider
+        and #(provider.chapters or {}) == 2
+        and #(provider.failed_chapters or {}) == 0,
+        provider and ("done=" .. #(provider.chapters or {})
+            .. " failed=" .. #(provider.failed_chapters or {})))
+end
+
+-- ============================================================
+print("== 3d. 同一父段拆到两批：账本不能记未落库的 part ==")
+do
+    local split_book = ROOT .. "/books/split.epub"
+    local handle = io.open(split_book, "wb")
+    handle:write(string.rep("s", 2560))
+    handle:close()
+    local split_job = {
+        schema = "dualtranslate.job.v1",
+        job_id = "20261115_120000_0009",
+        created_at = os.time(),
+        book = {
+            device_path = split_book, title = "Split", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 1,
+            file_size = lfs.attributes(split_book, "size"),
+            file_mtime = lfs.attributes(split_book, "modification") or 0,
+        },
+        chapters = { { index = 1, title = "One" } },
+        segments = {
+            { id = "s000001", parent_id = "s000001", part = 1, parent_total = 2,
+              chapter_index = 1, chapter_title = "One", selector = "sel-split",
+              xpointer = "/body/DocFragment/body/p[1]", source = "Long part one" },
+            { id = "s000002", parent_id = "s000001", part = 2, parent_total = 2,
+              chapter_index = 1, chapter_title = "One", selector = "sel-split",
+              xpointer = "/body/DocFragment/body/p[1]", source = "Long part two" },
+            { id = "s000003", parent_id = "s000003", part = 1, parent_total = 1,
+              chapter_index = 1, chapter_title = "One", selector = "sel-whole",
+              xpointer = "/body/DocFragment/body/p[2]", source = "Whole paragraph" },
+        },
+        options = { max_chars_per_segment = 4500, split_long_segments = true },
+    }
+    local first = make_result({
+        { id = "s000001", text = "上半" },
+        { id = "s000003", text = "完整段" },
+    })
+    first.job_id = split_job.job_id
+    local first_summary, first_err = Store.importResult(split_job, first,
+        { allow_partial = true })
+    check("拆段第一批允许部分导入", first_summary ~= nil, tostring(first_err))
+    check("账本只记已落库的 part", first_summary
+        and #(first_summary.accepted_ids or {}) == 1
+        and first_summary.accepted_ids[1] == "s000003",
+        first_summary and table.concat(first_summary.accepted_ids or {}, ","))
+    local previous = {}
+    for _, id in ipairs(first_summary and first_summary.accepted_ids or {}) do
+        previous[id] = true
+    end
+
+    local second = make_result({ { id = "s000002", text = "下半" } })
+    second.job_id = split_job.job_id
+    local second_summary, second_err = Store.importResult(split_job, second,
+        { previously_accepted = previous })
+    check("只补下半不能拼成父段", second_summary == nil
+        and tostring(second_err):find("还有 2 段缺失") ~= nil, tostring(second_err))
+
+    local third = make_result({
+        { id = "s000001", text = "上半" },
+        { id = "s000002", text = "下半" },
+    })
+    third.job_id = split_job.job_id
+    local third_summary, third_err = Store.importResult(split_job, third,
+        { previously_accepted = previous })
+    check("两半一起提交才完成", third_summary ~= nil, tostring(third_err))
+    check("完成时覆盖 3 段", third_summary and third_summary.covered == 3,
+        third_summary and tostring(third_summary.covered))
+end
+
+-- ============================================================
 print("== 4. 非法输入 ==")
 do
     local result = make_result({

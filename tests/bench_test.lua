@@ -195,6 +195,71 @@ do
     check("--memory 清掉夹具", not exists(memory_work .. "/mem"))
 end
 
+-- ============================================================
+print("== 6. --baseline ==")
+do
+    local code, out = run("--baseline " .. quote(ROOT .. "/missing.json")
+        .. " --list --list-dir " .. quote(ROOT .. "/empty"))
+    check("缺基线文件退出 2", code == 2
+        and out:find("找不到基线", 1, true) ~= nil, "code=" .. tostring(code) .. " " .. out:sub(1, 120))
+
+    local bad = ROOT .. "/bad_baseline.json"
+    write_file(bad, "{not json")
+    code, out = run("--baseline " .. quote(bad) .. " --list --list-dir "
+        .. quote(ROOT .. "/empty"))
+    check("坏基线退出 2", code == 2
+        and out:find("不是 bench.lua 的输出", 1, true) ~= nil, out:sub(1, 120))
+
+    local archiver_ok, Archiver = pcall(require, "ffi/archiver")
+    if archiver_ok and type(Archiver) == "table" and Archiver.Writer then
+        local tree = ROOT .. "/tiny_tree"
+        os.execute('mkdir -p "' .. tree .. '/META-INF" "' .. tree .. '/OEBPS"')
+        write_file(tree .. "/mimetype", "application/epub+zip")
+        write_file(tree .. "/META-INF/container.xml", [[<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf"
+    media-type="application/oebps-package+xml"/></rootfiles>
+</container>]])
+        write_file(tree .. "/OEBPS/content.opf", [[<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <manifest><item id="c1" href="ch1.xhtml"
+    media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>]])
+        write_file(tree .. "/OEBPS/ch1.xhtml", [[<html xmlns="http://www.w3.org/1999/xhtml">
+<body><h1>Only</h1><p>one paragraph</p></body></html>]])
+        local book = ROOT .. "/tiny.epub"
+        -- The device's bundled libarchive is read-only (archive_write_new is
+        -- missing), so building the fixture must be allowed to skip there.
+        local writer_ok, built = pcall(function()
+            local writer = Archiver.Writer:new()
+            if not writer:open(book, "epub") then return false end
+            writer:addPath(".", tree, true)
+            writer:close()
+            return exists(book)
+        end)
+        if not writer_ok or not built then
+            print("  SKIP: 运行时不能写 EPUB（设备 libarchive 只读）")
+        else
+            local work = ROOT .. "/baseline_work"
+            local first_code, first_out = run("--book " .. quote(book)
+                .. " --only outline --runs 1 --work " .. quote(work))
+            check("基线首跑成功", first_code == 0, first_out:sub(1, 200))
+            check("生成 bench.json", exists(work .. "/bench.json"))
+            local second_code, second_out = run("--book " .. quote(book)
+                .. " --only outline --runs 1 --work " .. quote(work)
+                .. " --baseline " .. quote(work .. "/bench.json"))
+            check("--baseline 复跑成功", second_code == 0, second_out:sub(1, 300))
+            local report = read_file(work .. "/PERF.md") or ""
+            check("报告含相对基线段", report:find("相对基线", 1, true) ~= nil)
+            check("报告比较了 1 项", report:find("共比较 1 项", 1, true) ~= nil,
+                report:sub(1, 300))
+        end
+    else
+        print("  SKIP: ffi/archiver 不可用")
+    end
+end
+
 print(string.format("\n==== bench CLI 测试：%d 通过，%d 失败 ====", passed, failed))
 if failed == 0 then
     os.execute('rm -rf "' .. ROOT .. '"')

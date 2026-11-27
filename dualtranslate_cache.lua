@@ -204,6 +204,11 @@ end
 local function copyFile(source_path, target_path)
     local input = io.open(source_path, "rb")
     if not input then return nil, "cannot read " .. source_path end
+    -- The backup lives next to a world-writable data file; a planted link at
+    -- its path would make the copy truncate whatever it points at.  Removing
+    -- the old target first also drops a symlink (remove never follows it),
+    -- and avoids an lfs dependency in this otherwise pure-SQLite module.
+    os.remove(target_path)
     local output, open_err = io.open(target_path, "wb")
     if not output then
         input:close()
@@ -325,6 +330,40 @@ function Cache:open()
     end
     -- Migration reconnects after the backup, so the handle may have changed.
     return self.db
+end
+
+-- Schema-state look without running any DDL (opening may still create the
+-- empty db/WAL, and a corrupt file takes the same recover-on-open path as
+-- every other reader):
+--   "v3"    user_version is current;
+--   "fresh" no book_translations table (initSchema would create v3 directly);
+--   "v2"    a legacy table exists below user_version 3 -- initSchema would run
+--           the real migration, which is a one-time blocking step on a large
+--           library (PERF §8.2).  The startup path uses this to show the
+--           upgrade notice before that step instead of a silent freeze.
+-- nil means the database could not be opened; callers fall back to migrating
+-- unconditionally.
+function Cache:peekSchema()
+    -- Reuse an existing connection, but never *keep* one opened here: open()
+    -- short-circuits on self.db, so retaining a peeked handle would skip
+    -- initSchema (fresh databases would stay at version 0).
+    local owned = self.db == nil
+    local db = self.db or self:_connect()
+    if not db then return nil end
+    local version = dbScalar(db, "PRAGMA user_version")
+    local state
+    if version then
+        if version >= SCHEMA_VERSION then
+            state = "v3"
+        else
+            local has_book_table = dbScalar(db,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+                "book_translations") == 1
+            state = has_book_table and "v2" or "fresh"
+        end
+    end
+    if owned then pcall(function() db:close() end) end
+    return state
 end
 
 -- Single DDL entry point: open() only connects, so a fresh install can never

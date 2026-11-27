@@ -191,7 +191,16 @@ function Glossary.load(dir)
         -- Keep one copy of the unreadable bytes: the editor shows an empty
         -- list, and saving would otherwise replace the user's only copy.
         local backup = dir .. "/" .. Glossary.FILE .. ".corrupt"
-        if not lfs.attributes(backup, "mode") then
+        local backup_mode
+        if lfs.symlinkattributes then backup_mode = lfs.symlinkattributes(backup, "mode")
+        else backup_mode = lfs.attributes(backup, "mode") end
+        -- A link would redirect the backup write; drop it and write a real
+        -- file instead of truncating its target.
+        if backup_mode == "link" then
+            os.remove(backup)
+            backup_mode = nil
+        end
+        if not backup_mode then
             local out = io.open(backup, "wb")
             if out then out:write(raw); out:close() end
         end
@@ -229,8 +238,7 @@ function Glossary.saveRaw(dir, raw)
     end
     if not Tools.mkdir_p(dir) then return false end
     local path = dir .. "/" .. Glossary.FILE
-    local temporary = path .. ".tmp"
-    local file = io.open(temporary, "wb")
+    local file, temporary = Tools.open_temp(path, "wb")
     if not file then return false end
     local written = file:write(raw)
     local closed = file:close()
@@ -241,8 +249,10 @@ function Glossary.saveRaw(dir, raw)
     return true
 end
 
-function Glossary.save(dir, data)
-    if type(dir) ~= "string" or dir == "" then return nil, "缺少书目录" end
+-- Shared body of save(): normalize + encode + atomic write at an explicit
+-- path.  save() keeps the per-book contract; the default glossary and the
+-- document-folder export reuse this with their own paths.
+local function saveEncoded(path, data)
     local terms, stats = normalize_terms(type(data) == "table" and data.terms or {})
     local style = type(data) == "table" and trim(data.style_guide) or ""
     if #style > Glossary.MAX_STYLE_GUIDE_BYTES then
@@ -257,8 +267,22 @@ function Glossary.save(dir, data)
     }
     local ok, encoded = pcall(JSON.encode, payload)
     if not ok or not encoded then return nil, "术语表编码失败" end
-    if not Glossary.saveRaw(dir, encoded) then return nil, "无法写入术语表" end
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and not Tools.mkdir_p(parent) then return nil, "无法创建目录" end
+    local file, temporary = Tools.open_temp(path, "wb")
+    if not file then return nil, "无法写入术语表" end
+    local written = file:write(encoded)
+    local closed = file:close()
+    if not written or not closed or not os.rename(temporary, path) then
+        os.remove(temporary)
+        return nil, "无法写入术语表"
+    end
     return { terms = terms, style_guide = style, stats = stats }
+end
+
+function Glossary.save(dir, data)
+    if type(dir) ~= "string" or dir == "" then return nil, "缺少书目录" end
+    return saveEncoded(dir .. "/" .. Glossary.FILE, data)
 end
 
 -- The stash lives next to the book directory, not inside it: "delete every
@@ -297,8 +321,7 @@ local function park_keep(dir, data)
     local keep = Glossary.keepPath(dir)
     for _, suffix in ipairs(KEEP_SUFFIXES) do
         local target = keep .. suffix
-        local temporary = target .. ".tmp"
-        local out = io.open(temporary, "wb")
+        local out, temporary = Tools.open_temp(target, "wb")
         if out then
             local written = out:write(data)
             local closed = out:close()
@@ -334,6 +357,143 @@ end
 
 Glossary.normalizeTerms = function(list)
     return normalize_terms(list)
+end
+
+-- ---------------------------------------------------------------------------
+-- Cross-book reuse (17 Q5 follow-up): series books share one translator's
+-- terminology.  Three mechanisms, all built on the same payload shape:
+--   * a global default glossary (save the current book's as default, load it
+--     into another book);
+--   * copying from another book that already has a glossary;
+--   * a JSON file next to the book (export/import, also the cross-device path).
+-- The default lives outside the books/ trees so "delete every translation"
+-- never touches it.
+-- ---------------------------------------------------------------------------
+
+function Glossary.defaultPath()
+    local DataStorage = require("datastorage")
+    return DataStorage:getDataDir() .. "/cache/dualtranslate/glossary.default.json"
+end
+
+-- Read and normalize a glossary payload from an explicit file.  Returns
+-- nil + a readable reason, so a damaged export cannot silently import as
+-- "no terms".
+function Glossary.loadFile(path)
+    if type(path) ~= "string" or path == "" then return nil, "缺少文件路径" end
+    local file = io.open(path, "rb")
+    if not file then return nil, "找不到文件：" .. path end
+    local raw = file:read("*a")
+    file:close()
+    if not raw or raw == "" then return nil, "文件是空的" end
+    local ok, data = pcall(JSON.decode, raw)
+    if not ok or type(data) ~= "table" then return nil, "文件不是有效的术语表 JSON" end
+    local terms = normalize_terms(data.terms)
+    local style = type(data.style_guide) == "string" and trim(data.style_guide) or ""
+    if #style > Glossary.MAX_STYLE_GUIDE_BYTES then
+        style = Tools.utf8_head(style, Glossary.MAX_STYLE_GUIDE_BYTES)
+    end
+    if #terms == 0 and style == "" then return nil, "文件里没有术语" end
+    if style == "" then style = Glossary.DEFAULT_STYLE_GUIDE end
+    return { terms = terms, style_guide = style }
+end
+
+function Glossary.loadDefault()
+    return Glossary.loadFile(Glossary.defaultPath())
+end
+
+function Glossary.saveDefault(data)
+    return saveEncoded(Glossary.defaultPath(), data)
+end
+
+-- Books that carry a glossary, newest first, excluding exclude_dir (the book
+-- being edited).  Only regular files count -- the same no-symlink rule the
+-- MCP job listing applies.  Terms are counted so the picker can say what it
+-- would overwrite.
+function Glossary.listGlossaryBooks(exclude_dir)
+    local DataStorage = require("datastorage")
+    local books_root = DataStorage:getDataDir() .. "/cache/dualtranslate/books"
+    local out = {}
+    local ok, iterator, state = pcall(lfs.dir, books_root)
+    if not ok or not iterator then return out end
+    local function mode_of(path)
+        if lfs.symlinkattributes then
+            return lfs.symlinkattributes(path, "mode")
+        end
+        return lfs.attributes(path, "mode")
+    end
+    for name in iterator, state do
+        if name ~= "." and name ~= ".." then
+            local dir = books_root .. "/" .. name
+            local file = dir .. "/" .. Glossary.FILE
+            if dir ~= exclude_dir and mode_of(dir) == "directory"
+                and mode_of(file) == "file" then
+                local payload = Glossary.loadFile(file)
+                if payload then
+                    local title
+                    local manifest = io.open(dir .. "/manifest.json", "rb")
+                    if manifest then
+                        local raw = manifest:read("*a")
+                        manifest:close()
+                        local ok_json, data = pcall(JSON.decode, raw)
+                        if ok_json and type(data) == "table" then
+                            local book_path = tostring(data.book_path or "")
+                            title = book_path:match("([^/]+)$")
+                        end
+                    end
+                    out[#out + 1] = {
+                        dir = dir,
+                        title = title or name,
+                        terms = #payload.terms,
+                        updated_at = lfs.attributes(file, "modification") or 0,
+                    }
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.updated_at ~= b.updated_at then return a.updated_at > b.updated_at end
+        return a.title < b.title
+    end)
+    return out
+end
+
+-- Copy the current book's glossary bytes to an explicit file (atomic), e.g.
+-- "<book folder>/<book name>.dualtranslate-glossary.json".  The bytes, not a
+-- re-encoding, travel: what the user saved is what lands in the export.
+function Glossary.exportFile(dir, target_path)
+    if type(dir) ~= "string" or dir == "" then return nil, "缺少书目录" end
+    if type(target_path) ~= "string" or target_path == "" then
+        return nil, "缺少导出路径"
+    end
+    local source = dir .. "/" .. Glossary.FILE
+    if lfs.attributes(source, "mode") ~= "file" then return nil, "本书还没有术语表" end
+    local file = io.open(source, "rb")
+    if not file then return nil, "术语表不可读" end
+    local raw = file:read("*a")
+    file:close()
+    if not raw then return nil, "术语表不可读" end
+    local parent = target_path:match("^(.*)/[^/]+$")
+    if parent and not Tools.mkdir_p(parent) then return nil, "无法创建导出目录" end
+    local out, temporary = Tools.open_temp(target_path, "wb")
+    if not out then return nil, "无法写导出文件" end
+    local written = out:write(raw)
+    local closed = out:close()
+    if not written or not closed or not os.rename(temporary, target_path) then
+        os.remove(temporary)
+        return nil, "无法写导出文件"
+    end
+    return { bytes = #raw }
+end
+
+-- Import an exported glossary file into a book directory: normalized on the
+-- way in (same limits as the editor), saved atomically.  Returns the saved
+-- payload, or nil + reason.
+function Glossary.importFile(path, dir)
+    local payload, err = Glossary.loadFile(path)
+    if not payload then return nil, err end
+    local saved, save_err = Glossary.save(dir, payload)
+    if not saved then return nil, save_err end
+    return saved
 end
 
 return Glossary

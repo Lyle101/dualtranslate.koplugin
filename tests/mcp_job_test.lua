@@ -790,15 +790,18 @@ do
             job_id = "20260101_000000_0020", book = {}, chapters = {},
             segments = {} })
         local link = Mcp.jobDir("20260101_000000_0020")
+        local before_list = #Mcp.listJobs()
+        local before_count = Mcp.countJobs()
         os.execute('ln -s "' .. outside .. '" "' .. link .. '"')
         if lfs.symlinkattributes(link, "mode") == "link" then
-            local before_list = #Mcp.listJobs()
             local removed_link = Mcp.cleanupExpiredJobs{
                 now = now, keep_job_id = "20260101_000000_0013" }
             check("符号链接任务目录不删外部内容",
                 lfs.attributes(outside .. "/sub/keep.txt", "mode") == "file"
                 and lfs.symlinkattributes(link, "mode") == "link")
             check("符号链接任务不进任务列表", #Mcp.listJobs() == before_list)
+            check("符号链接任务不计入菜单计数", Mcp.countJobs() == before_count,
+                tostring(Mcp.countJobs()))
             check("符号链接不增加清理计数", removed_link == 0,
                 tostring(removed_link))
             -- rmtree itself must remove the link, not walk into it.
@@ -814,6 +817,50 @@ do
     for _, dir in ipairs({ fresh, exported, current, partial, undated,
         no_state_fresh }) do
         Tools.rmtree(dir)
+    end
+end
+
+-- ============================================================
+print("== 4b. jobs 根目录本身是符号链接 ==")
+do
+    local jobs = Mcp.jobsDir()
+    Tools.mkdir_p(jobs)
+    local real = jobs .. ".real"
+    Tools.rmtree(real)
+    if not lfs.symlinkattributes then
+        print("  SKIP: 平台没有 symlinkattributes")
+    else
+        assert(os.rename(jobs, real))
+        os.execute('ln -s "' .. real .. '" "' .. jobs .. '"')
+        if lfs.symlinkattributes(jobs, "mode") ~= "link" then
+            -- No link: put the real tree back before skipping.
+            os.remove(jobs)
+            assert(os.rename(real, jobs))
+            print("  SKIP: 符号链接创建失败")
+        else
+            local inner = real .. "/20260101_000000_0099"
+            Tools.mkdir_p(inner)
+            Mcp.writeJson(inner .. "/state.json", {
+                schema = Mcp.STATE_SCHEMA, status = "committed",
+                updated_at = os.time() - 30 * 86400, submitted = 1, total = 1 })
+            Mcp.writeJson(inner .. "/meta.json", {
+                schema = Mcp.META_SCHEMA, job_id = "20260101_000000_0099",
+                total = 1, book = {} })
+            Mcp.writeJson(inner .. "/job.json", {
+                schema = Mcp.JOB_SCHEMA, job_id = "20260101_000000_0099",
+                book = {}, chapters = {}, segments = {} })
+            check("根链接：listJobs 为空", #Mcp.listJobs() == 0)
+            check("根链接：countJobs 为 0", Mcp.countJobs() == 0)
+            check("根链接：cleanup 不跟着删除", Mcp.cleanupExpiredJobs{ now = os.time() } == 0
+                and lfs.attributes(inner, "mode") == "directory")
+            local exported, export_err = Mcp.exportJob{ book_path = ROOT .. "/nope.epub" }
+            check("根链接：拒绝导出", exported == nil
+                and tostring(export_err):find("符号链接") ~= nil, tostring(export_err))
+            -- os.remove on a link removes the link itself; the real tree returns.
+            os.remove(jobs)
+            assert(os.rename(real, jobs))
+            Tools.rmtree(inner)
+        end
     end
 end
 

@@ -247,13 +247,59 @@ do
 end
 
 -- ============================================================
+print("== 1b. peekSchema：迁移前的只读判断 ==")
+do
+    -- The startup notice must be decided before initSchema blocks; peek must
+    -- answer without creating tables, migrating or writing a backup.
+    local dir = newDir("peek_fresh")
+    local cache = Cache:new()
+    check("peek: 全新库返回 fresh", cache:peekSchema() == "fresh")
+    check("peek: 不保留连接（open 才会建表）", cache.db == nil)
+    local reader = SQ3.open(dbPath(dir))
+    check("peek: 不建表", count(reader,
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'") == 0)
+    check("peek: 版本仍为 0", count(reader, "PRAGMA user_version") == 0)
+    reader:close()
+    check("peek: fresh 后 open 仍成功", cache:open() ~= nil)
+    check("peek: 初始化后返回 v3", cache:peekSchema() == "v3")
+    cache:close()
+
+    dir = newDir("peek_v2")
+    seedV2(dir)
+    local v2 = Cache:new()
+    check("peek: v2 库返回 v2", v2:peekSchema() == "v2")
+    local v2_reader = SQ3.open(dbPath(dir))
+    check("peek: v2 未迁移", count(v2_reader, "PRAGMA user_version") == 0)
+    check("peek: 不生成 .bak", not fileExists(dbPath(dir) .. ".bak"))
+    check("peek: 旧主键未变",
+        tableColumns(v2_reader, "book_translations").provider.pk ~= 4)
+    check("peek: 不产生新表", count(v2_reader,
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'providers'") == 0)
+    v2_reader:close()
+    check("peek: 之后 open 仍走真实迁移",
+        v2:open() ~= nil and count(v2.db, "PRAGMA user_version") == 3
+        and fileExists(dbPath(dir) .. ".bak"))
+    v2:close()
+end
+
+-- ============================================================
 print("== 2. v2 → v3 迁移 ==")
 do
     local dir = newDir("migrate")
     seedV2(dir)
+    -- A planted link at the backup path must be replaced, not followed.
+    local outside = ROOT .. "/outside_bak.txt"
+    local outside_file = assert(io.open(outside, "wb"))
+    outside_file:write("original")
+    outside_file:close()
+    os.execute('ln -s "' .. outside .. '" "' .. dbPath(dir) .. '.bak"')
     local cache = Cache:new()
     local db = cache:open()
     check("migrate: open 成功", db ~= nil)
+    -- If the platform refused the link this is vacuous, but on every target
+    -- we ship for (Linux/macOS) the backup path is a link here.
+    check("migrate: .bak 不跟随符号链接",
+        readFile(outside) == "original", tostring(readFile(outside)))
     checkV3Shape(db, "migrate")
     check("migrate: .bak 已生成", fileExists(dbPath(dir) .. ".bak"))
     check("migrate: 行数不丢", count(db, "SELECT COUNT(*) FROM book_translations") == #V2_ROWS,

@@ -197,9 +197,9 @@
 
 ## 8. §15.4 剩余验收（3.3.0 收口）
 
-> 本节补 §6 列出的四项缺口：章节选择器打开、DB v3 迁移、真 80+ 章目录解析、
-> fallback 三服务内存，以及「相对旧版不劣化 20%」的基线。设备与 §1 相同，
-> 每项按同一口径取中位数；单次读数不作结论。
+> 本节补 §6 列出的缺口：章节选择器打开、DB v3 迁移、真 80+ 章目录解析、
+> fallback 三服务内存、「相对旧版不劣化 20%」的基线，以及 3.3.1 补的关书 RSS 回落。
+> 设备与 §1 相同，每项按同一口径取中位数；单次读数不作结论。
 
 ### 8.1 章节选择器打开（真机阅读器内）
 
@@ -236,9 +236,11 @@
 - 试过但没有进代码：`PRAGMA cache_size=-32768` 仍是 87 s（无改善）；把 `INSERT` 改成
   按新主键 `ORDER BY` 后进程在 55 s 静默退出（疑似内存压力），已回滚。迁移是风险最高
   的代码路径，没有把握的改动不留在里面。
-- 建议：把这一行改成「100k 行 < 2 min（一次性，有 `.bak`）」，或把迁移挪到后台线程 +
-  进度提示。10 万行约是一本 646 章书（16k 段）的 6 倍，属于长期积累；一次性等 1.5 分钟
-  可以接受，而真正的风险是升级时用户以为卡死。
+- 3.3.1 已采用前一个方案：§15.4 的目标改为「100k 行 < 2 min（一次性，有 `.bak`）」，
+  启动时先 `Cache:peekSchema()` 只读判断，再显示「正在升级译文缓存…请不要退出 KOReader」
+  并强制重绘，迁移完成后关闭提示。10 万行约是一本 646 章书（16k 段）的 6 倍，属于长期
+  积累；一次性等 1.5 分钟可以接受，真正的风险是升级时用户以为卡死而强杀进程。后台迁移 +
+  进度条仍可作为后续增强。
 
 ### 8.3 fallback 三服务内存
 
@@ -286,9 +288,38 @@
 - 全部远在「不劣化 20%」以内。3.3.0 的改动（术语表、`meta`/`options` 拆分、任务保留、
   模板回收）都不在 CSS / 导入热路径上；fallback 的 +2.1% 是 3 次样本的噪声。
 - 复跑：`--only outline,css,import --runs 3 --work /mnt/us/dtbench/cur-work`，基线树换
-  `DT_PLUGIN=/mnt/us/dtbench/base322` 与另一个 `--work`。
+  `DT_PLUGIN=/mnt/us/dtbench/base322` 与另一个 `--work`。3.3.1 起可把基线那次的
+  `bench.json` 传给当前脚本的 `--baseline`，报告第 5 节会自动生成同一张表并按 20% 判据
+  给出「达标/未达标」，不再手工抄数字：
+  `--only outline,css,import --runs 3 --baseline /mnt/us/dtbench/base.json`。
 
-### 8.6 复跑命令
+### 8.6 关书 / 换书 RSS 回落（Voyage）
+
+3.3.1 的阅读器进程（Kindle Voyage，重启后加载 3.3.1 代码），经 httpinspector 的
+`ui/switchDocument` / `ui/closeDocument` 在同一进程里开书、换书、关书，每次
+`collectgarbage("collect")` 后读 `/proc/<pid>/status`：
+
+| 阶段 | VmRSS | VmHWM |
+| --- | --- | --- |
+| 冷启动打开 A（JavaScript for Impatient Programmers） | 83.5 MB | 86.9 MB |
+| 换到 B（Pride and Prejudice） | 68.0 MB | 86.9 MB |
+| 换回 A | 67.8 MB | 86.9 MB |
+| 再换到 B | 63.8 MB | 86.9 MB |
+| 再换回 A | 63.9 MB | 86.9 MB |
+| `closeDocument` 关书 | 63.9 MB | 86.9 MB |
+
+- 换书时旧书的 CREngine 表被释放：A→B 回落 15.5 MB；之后 A/B 循环的 RSS 没有回到第一次
+  打开 A 的 83.5 MB，也没有逐次增长（63.8–67.8 MB），VmHWM 全程 86.9 MB 不变。
+- 关书后进程停在 63.9 MB，没有出现「关书仍保留整本 A」的现象。早先在 3.3.0 进程上做的
+  同一循环（起点 123 MB，那是读过很久的会话）也观察到 A→B −33 MB、A/B 循环
+  80–82 MB 且 HWM 不变。
+- 口径：这是单次会话的绝对值，Lua 堆不会全部还给 OS；判据是「循环不增长 + HWM 不升高」，
+  与 §15.4 的 20% 相对判据不同。
+- 复跑：重启阅读器后依次请求 `/koreader/ui/switchDocument/'<URL 编码后的书路径>'`、
+  `/koreader/globals/collectgarbage/collect`，再从 SSH 读 `/proc/<pid>/status`；结束时用
+  `/koreader/ui/closeDocument/`。不修改书或译文。
+
+### 8.7 复跑命令
 
 ```sh
 # 迁移 / 内存（设备）
