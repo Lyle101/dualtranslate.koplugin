@@ -687,7 +687,7 @@ function dualtranslate:confirmMcpExport(ranges, menu, chapter_count)
     local dialog
     dialog = ButtonDialog:new{
         title = string.format(
-            _("将导出%s的原文到设备缓存，供电脑端读取，并可能发送给 AI 模型。"), scope),
+            _("将导出%s的原文到设备缓存（如已填写，术语表与风格指南也会一并写入），供电脑端读取，并可能发送给 AI 模型。"), scope),
         buttons = {{
             {
                 text = _("Cancel"),
