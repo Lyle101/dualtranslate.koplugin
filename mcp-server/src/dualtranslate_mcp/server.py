@@ -79,7 +79,8 @@ def build_server(config: Config | None = None, transport: Any = None):
 
         options.glossary 是用户指定的术语表（{source, target} 数组），翻译时必须
         逐条使用给定译法；options.style_guide 是用户的风格要求，非空时必须
-        遵守（旧任务可能为空）。长段落按 options.max_chars_per_segment 切分。
+        遵守（旧任务可能为空）。长段落已由设备按 options.max_chars_per_segment
+        切分为多个 part，按 part 翻译即可，不要再次切分。
         """
         return _guarded(lambda: service.get_job(job_id))
 
