@@ -242,6 +242,12 @@ class JobService:
         if state.get("provider_id") and state.get("model_name") == model_name:
             return {"job_id": job_id, **state}
         provider_id = provider_id_for(model_name)
+        # Switching models must not send the old model's uncommitted text as
+        # the new model's work (and must not let the device ledger inherit it).
+        # The device keeps each provider's imported ids separately, but the
+        # local partial buffer is per job; start the new provider clean.
+        if state.get("provider_id") and state.get("provider_id") != provider_id:
+            self._save_partial(job_id, {})
         state.update(
             {
                 "schema": STATE_SCHEMA,

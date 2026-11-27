@@ -642,11 +642,20 @@ function handlers.put(opts)
     end)
 end
 
--- Per-job ledger of segment ids earlier imports of *this* job already
--- committed.  Coverage used to be inferred from the whole book's rows, which
--- lets a different job's import mark this one complete (and then retention
--- would delete a job whose own result was never fully submitted).
-local function load_imported_ids(dir)
+-- Per-job, per-provider ledger of segment ids earlier imports of *this* job
+-- already committed.  Coverage used to be inferred from the whole book's
+-- rows, which lets a different job's import mark this one complete (and then
+-- retention would delete a job whose own result was never fully submitted).
+-- The file is a JSON map keyed by provider: switching models must neither
+-- inherit the old provider's ids nor lose them when switching back.
+local IMPORTED_SCHEMA = "dualtranslate.job.imported.v1"
+
+local function ledger_key(provider)
+    if type(provider) == "string" and provider ~= "" then return provider end
+    return "unknown"
+end
+
+local function load_imported_ids(dir, provider)
     local path = dir .. "/imported.txt"
     if path_is_link(path) then return nil, "imported.txt is a symlink" end
     -- 10k segments is ~90 KB; a 2 MB cap keeps a corrupted/hostile file from
@@ -655,22 +664,37 @@ local function load_imported_ids(dir)
     if size and size > 2 * 1024 * 1024 then
         return nil, "imported.txt is too large"
     end
-    local file = io.open(path, "rb")
-    if not file then return {} end
-    local ids = {}
-    for line in file:lines() do
-        line = line:gsub("%s+$", "")
-        if line ~= "" then ids[line] = true end
+    local raw = Mcp.slurp(path)
+    local ledger = { schema = IMPORTED_SCHEMA, providers = {} }
+    if raw and raw ~= "" then
+        local ok, data = pcall(JSON.decode, raw)
+        if ok and type(data) == "table" and type(data.providers) == "table" then
+            ledger.providers = data.providers
+        end
+        -- An old line-format ledger (pre-release only) has no provider
+        -- identity; guessing one would recreate the bug this map fixes.
     end
-    file:close()
-    return ids
+    local key = ledger_key(provider)
+    local ids = {}
+    local stored = ledger.providers[key]
+    if type(stored) == "table" then
+        for _, id in ipairs(stored) do
+            if type(id) == "string" then ids[id] = true end
+        end
+    end
+    return ids, ledger, key
 end
 
-local function save_imported_ids(dir, ids)
+local function save_imported_ids(dir, ledger, key, ids)
     local list = {}
     for id in pairs(ids) do list[#list + 1] = id end
     table.sort(list)
-    return write_atomic(dir .. "/imported.txt", table.concat(list, "\n") .. "\n")
+    ledger.schema = IMPORTED_SCHEMA
+    ledger.providers = ledger.providers or {}
+    ledger.providers[key] = list
+    local ok, encoded = pcall(JSON.encode, ledger)
+    if not ok or not encoded then return false end
+    return write_atomic(dir .. "/imported.txt", encoded)
 end
 
 function handlers.import(opts)
@@ -700,15 +724,13 @@ function handlers.import(opts)
     if not result then return nil, "cannot read result file" end
     local state = Mcp.loadState(job_id) or { schema = Mcp.STATE_SCHEMA }
     local result_provider = result.provider and result.provider.provider_id
-    local previously, ledger_err = load_imported_ids(Mcp.jobDir(job_id))
-    if not previously then return nil, ledger_err end
-    -- The ledger is per job *and* per provider: parts committed by another
-    -- provider must not make this one look complete.  A switch starts from an
-    -- empty view but leaves the old ledger on disk, so a failed switch does
-    -- not destroy the coverage of the provider that still owns the job.
-    local ledger_matches = state.provider_id == nil or result_provider == nil
-        or state.provider_id == result_provider
-    local previous = ledger_matches and previously or {}
+    -- Read the ledger for the provider that produced this result, not for
+    -- whatever state.provider_id currently says: dt_confirm_model can switch
+    -- the model between runs.  Old providers keep their own entry, so a
+    -- switch back does not restart from zero.
+    local previous, ledger, provider_key, ledger_err = load_imported_ids(
+        Mcp.jobDir(job_id), result_provider)
+    if not previous then return nil, ledger_err end
     local summary, import_err = Store.importResult(job, result, {
         allow_partial = opts["allow-partial"] == true,
         previously_accepted = previous,
@@ -718,7 +740,7 @@ function handlers.import(opts)
     -- next run with coverage but an "unfinished" state (retryable), never the
     -- reverse (finished state with lost coverage).
     for _, id in ipairs(summary.accepted_ids or {}) do previous[id] = true end
-    if not save_imported_ids(Mcp.jobDir(job_id), previous) then
+    if not save_imported_ids(Mcp.jobDir(job_id), ledger, provider_key, previous) then
         -- DB/entries are already committed; a missing ledger only makes the
         -- next manual batch conservative, so this must not fail the import.
         io.stderr:write("dualtranslate: cannot write imported.txt\n")

@@ -562,6 +562,9 @@ do
         file:close()
         return JSON.decode(raw)
     end
+    local function write_state(state)
+        write_file(dir .. "/state.json", JSON.encode(state))
+    end
 
     write_result("result.partial.json", { { id = "s000001", text = "甲" } })
     local out, code = run("import --job " .. dir .. "/job.json --result "
@@ -590,6 +593,32 @@ do
     data = decode_single_line(out)
     check("换 provider 不继承旧账本", code ~= 0 and data and data.ok == false
         and tostring(data.message):find("还有 1 段缺失") ~= nil, out)
+
+    -- The real switch path: dt_confirm_model changes state.provider_id before
+    -- the next import.  The ledger is keyed by the result's provider, so the
+    -- old model's ids must not cover the new one.
+    local other_state = read_state()
+    other_state.provider_id = "mcp:other"
+    other_state.model_name = "other"
+    write_state(other_state)
+    out, code = run("import --job " .. dir .. "/job.json --result "
+        .. dir .. "/result.partial.json --allow-partial")
+    data = decode_single_line(out)
+    check("确认换 provider 后 partial 只算新 provider", code == 0
+        and data and data.ok == true and read_state().submitted == 1,
+        tostring(read_state() and read_state().submitted))
+
+    -- Switching back must still see the first provider's two segments.
+    local gpt_state = read_state()
+    gpt_state.provider_id = "mcp:gpt-5"
+    gpt_state.model_name = "gpt-5"
+    write_state(gpt_state)
+    write_result("result.partial.json", { { id = "s000001", text = "甲" } })
+    out, code = run("import --job " .. dir .. "/job.json --result "
+        .. dir .. "/result.partial.json")
+    data = decode_single_line(out)
+    check("换回 provider 仍保留旧账本", code == 0 and data and data.ok == true
+        and read_state().submitted == 2, tostring(read_state() and read_state().submitted))
     os.execute('rm -rf "' .. dir .. '"')
 end
 

@@ -304,6 +304,9 @@ Mcp.JOB_HEAD_LIMIT = 1024 * 1024
 function Mcp.loadJobShell(job_id)
     if not Mcp.validJobId(job_id) then return nil end
     local path = Mcp.jobPath(job_id)
+    if path and lfs.symlinkattributes and lfs.symlinkattributes(path, "mode") == "link" then
+        return nil
+    end
     local file = path and io.open(path, "rb")
     if file then
         local head, marker

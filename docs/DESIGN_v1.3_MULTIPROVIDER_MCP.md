@@ -2614,7 +2614,7 @@ PRAGMA user_version;
 │       ├── jobs/<job_id>/meta.json          -- 书字段/总段数/锚点（列表只读它）
 │       ├── jobs/<job_id>/options.json       -- 术语表/风格指南/切分上限（job-status 读它）
 │       ├── jobs/<job_id>/state.json
-│       ├── jobs/<job_id>/imported.txt       -- 本任务+本 provider 已提交的 segment id（累计覆盖）
+│       ├── jobs/<job_id>/imported.txt       -- 本任务按 provider 分组的已提交 segment id（JSON，累计覆盖）
 │       ├── jobs/<job_id>/result.partial.json
 │       └── jobs/<job_id>/result.json
 └── plugins/dualtranslate.koplugin/

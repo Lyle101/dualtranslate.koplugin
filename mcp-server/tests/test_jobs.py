@@ -190,6 +190,19 @@ def test_submit_merges_and_reports_remaining(service: JobService) -> None:
     assert third["submitted"] == 3
 
 
+def test_confirm_model_switch_clears_uncommitted_partial(service: JobService) -> None:
+    service.confirm_model(JOB_ID, "gpt-5")
+    service.submit(JOB_ID, [{"id": "s000001", "text": "a"}])
+    assert service.job_status(JOB_ID)["submitted"] == 1
+    # A different model must not inherit the first model's uncommitted text.
+    service.confirm_model(JOB_ID, "other")
+    assert service.job_status(JOB_ID)["submitted"] == 0
+    # Re-confirming the same model does not throw the buffer away.
+    service.submit(JOB_ID, [{"id": "s000002", "text": "b"}])
+    service.confirm_model(JOB_ID, "other")
+    assert service.job_status(JOB_ID)["submitted"] == 1
+
+
 def test_commit_requires_model_confirmation(service: JobService) -> None:
     service.submit(JOB_ID, [{"id": "s000001", "text": "a"}])
     reply = service.commit(JOB_ID)

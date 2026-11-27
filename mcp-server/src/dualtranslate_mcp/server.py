@@ -106,6 +106,8 @@ def build_server(config: Config | None = None, transport: Any = None):
         未提供 model_name 时通过 MCP elicitation 直接询问用户；客户端不支持
         elicitation 时返回 needs_model_confirmation，由 agent 用文字追问。
         设备端用 provider_id 区分不同模型的译文，所以模型名不能是 unknown。
+        任务进行中切换模型会清空尚未提交的本地译文缓存（避免把旧模型的文字
+        记到新模型名下）；已提交/已导入的段落按 provider 分别记账，不受影响。
         """
         if not (model_name or "").strip() and ModelChoice is not None:
             elicited = await elicit_model(
