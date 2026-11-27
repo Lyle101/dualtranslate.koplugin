@@ -57,9 +57,12 @@ reader 进程，macOS 的 SDL 版连 `socketutil → device` 都过不去（`SDL
   它们已收进 `.gitignore`（不进 `git status`）；想跑完连目录都不留，先在 shell 里
   `export KO_HOME=/tmp/dt_kohome`（datastorage 优先读这个变量）。
 - migration_test.lua / store_delete_test.lua / p1c_switch_test.lua 用真实 SQLite；lock_test.lua /
-  overlay_v3_test.lua / overlay_revision_test.lua / template_gc_test.lua / outline_test.lua 用真实 lfs + json。
+  overlay_v3_test.lua / overlay_revision_test.lua / template_gc_test.lua / glossary_test.lua /
+  outline_test.lua 用真实 lfs + json。
   均依赖 KOReader 自带库（默认 /Applications/KOReader.app/Contents/koreader，可用 KO_ROOT 覆盖），
-  需用 luajit 运行，缺失时打印 SKIP 并退出 0；
+  需用 luajit 运行，缺失时打印 SKIP 并退出 0。设备上要同时设 `KO_ROOT` 与 `LUA_CPATH`
+  （`KO_ROOT=/mnt/us/koreader LUA_CPATH="/mnt/us/koreader/common/?.so;/mnt/us/koreader/libs/?.so;;"`），
+  否则 `json` 依赖的 `lpeg.so` 找不到，套件会直接 SKIP（看起来像通过）；
   checkpoint 冲突用例要等 busy_timeout 重试，migration_test 整体约 20 秒。
 - bench_test.lua 还会用 KO_ROOT 下的 luajit 启动 `tools/bench.lua` 子进程，检查
   `--work/--only/.dtbench/--overlay` 的 CLI 边界；它依赖 POSIX shell（`sh`/`rm` 可用），
