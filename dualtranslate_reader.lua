@@ -34,6 +34,29 @@ local function context_meta(context)
     }
 end
 
+-- One line saying what editorial instructions travel with a job, so the user
+-- sees it in the export result and in the task detail instead of having to
+-- reopen the editor.  Defaults are not "custom": an empty style guide is
+-- stored as the default text, and that must not read as user-authored.
+local function glossary_instruction_text(terms, custom)
+    local parts = {}
+    if terms > 0 then
+        parts[#parts + 1] = string.format(_("术语 %d 条"), terms)
+    end
+    if custom then parts[#parts + 1] = _("风格指南自定义") end
+    if #parts == 0 then return nil end
+    return table.concat(parts, " · ")
+end
+
+local function glossary_summary(options)
+    if type(options) ~= "table" then return nil end
+    local terms = type(options.glossary) == "table" and #options.glossary or 0
+    local guide = options.style_guide
+    local custom = type(guide) == "string" and guide ~= ""
+        and guide ~= Glossary.DEFAULT_STYLE_GUIDE
+    return glossary_instruction_text(terms, custom)
+end
+
 function Reader.attach(plugin)
     local dualtranslate = plugin
 
@@ -854,20 +877,29 @@ function dualtranslate:exportMcpJob(ranges, menu)
         self._mcp_job_menu_cache = nil
         refresh_menu()
         -- A whole-book export takes a minute; a 6-second toast is easy to miss
-        -- while the screen repaints, so this one waits for a tap.
-        local message = (_(
-            "导出完成\n\n任务：%s\n%d 个文件 · %d 段\n"
-            .. "电脑端可读取 cache/dualtranslate/mcp/jobs/\n\n"
-            .. "请轻触屏幕以关闭此消息")):format(
-            result.job_id, result.chapters, result.segments)
+        -- while the screen repaints, so this one waits for a tap.  The
+        -- glossary line is what the agent will actually be told to honour.
+        local message = {
+            _("导出完成"), "",
+            string.format(_("任务：%s"), result.job_id),
+            string.format(_("%d 个文件 · %d 段"), result.chapters, result.segments),
+        }
+        local options_note = glossary_summary(result.job and result.job.options)
+        if options_note then
+            message[#message + 1] = string.format(_("随任务写入：%s"), options_note)
+        end
         local unreadable = tonumber(result.unreadable) or 0
         if unreadable > 0 then
             -- A chapter file that could not be parsed is skipped silently by
             -- the walk; say so, or the job looks complete.
-            message = string.format(_("有 %d 个文件读不出正文，未包含在任务里。"),
-                unreadable) .. "\n\n" .. message
+            message[#message + 1] = string.format(
+                _("有 %d 个文件读不出正文，未包含在任务里。"), unreadable)
         end
-        TranslationUI.showPersistent(message)
+        message[#message + 1] = ""
+        message[#message + 1] = _("电脑端可读取 cache/dualtranslate/mcp/jobs/")
+        message[#message + 1] = ""
+        message[#message + 1] = _("请轻触屏幕以关闭此消息")
+        TranslationUI.showPersistent(table.concat(message, "\n"))
     end
     UIManager:scheduleIn(0.1, step)
 end
@@ -904,16 +936,27 @@ local function glossary_dropped_note(stats)
     return table.concat(notes, "\n")
 end
 
+-- A corrupt file is loaded as "no terms", and saving would replace it.  The
+-- reader keeps a .corrupt copy, but the editor must say so: otherwise the
+-- user sees an empty list and assumes the terms were never saved.
+local function glossary_corrupt_note(current)
+    if not (current and current.corrupt) then return nil end
+    return _("原术语表文件损坏，已备份为 glossary.json.corrupt；保存会用当前内容覆盖")
+end
+
 function dualtranslate:showGlossaryDialog(menu)
     local book_path = self:currentBookPath()
     if not book_path then return end
     local dir = self:getBookCacheDirectory(book_path)
     local current = Glossary.load(dir)
+    local description = _("只影响 MCP 导出；删除译文不会删除这里的内容")
+    local corrupt_note = glossary_corrupt_note(current)
+    if corrupt_note then description = corrupt_note .. "\n" .. description end
     local dialog
     dialog = InputDialog:new{
         title = string.format(_("术语表（每行一条：原文=译文，最多 %d 条）"),
             Glossary.MAX_TERMS),
-        description = _("只影响 MCP 导出；删除译文不会删除这里的内容"),
+        description = description,
         input = Glossary.format(current.terms),
         input_hint = _("例如：\nDarcy=达西\nNetherfield=内瑟菲尔德"),
         -- Full-screen text editor: the on-screen keyboard would otherwise
@@ -962,10 +1005,13 @@ function dualtranslate:showStyleGuideDialog(menu)
     if not book_path then return end
     local dir = self:getBookCacheDirectory(book_path)
     local current = Glossary.load(dir)
+    local description = _("留空保存会使用默认要求；超长会截断")
+    local corrupt_note = glossary_corrupt_note(current)
+    if corrupt_note then description = corrupt_note .. "\n" .. description end
     local dialog
     dialog = InputDialog:new{
         title = _("风格指南（发送给翻译模型的统一要求）"),
-        description = _("留空保存会使用默认要求；超长会截断"),
+        description = description,
         input = current.style_guide,
         input_hint = _("留空则使用默认要求：") .. Glossary.DEFAULT_STYLE_GUIDE,
         fullscreen = true,
@@ -1143,6 +1189,14 @@ local function format_job_detail(job)
             total, percent))
     end
     field(_("引擎"), job.model_name or job.provider_id)
+    -- What the agent was told to honour.  A row that came from the task list
+    -- (jobDetail returned nil) has no counts at all; leave the line out
+    -- instead of claiming 无.
+    if job.glossary_terms ~= nil or job.style_guide_custom ~= nil then
+        local instructions = glossary_instruction_text(
+            tonumber(job.glossary_terms) or 0, job.style_guide_custom == true)
+        field(_("翻译要求"), instructions or _("无"))
+    end
 
     local chapters = job.chapters or {}
     lines[#lines + 1] = ""

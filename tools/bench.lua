@@ -38,6 +38,14 @@
 --       --only outline,css,import,anchor | --work DIR | --md PATH | --json PATH
 --       --device NAME（默认读 DT_DEVICE）| --list [--list-dir DIR]
 --       --overlay DIR [--provider ID] | --keep | --help
+--       --migrate [--rows N] | --memory
+--
+-- 验收补齐（§15.4 剩余项，不进 PERF 的每本书表格）：
+--   --migrate  建 100k 行 v2 库并计时 v3 迁移（含 .bak 备份）
+--   --memory   3,000 段 CSS 夹具：单服务 / 三服务均分 / 三服务全量 的
+--              Lua 堆与进程 RSS（同一进程内按顺序跑，RSS 单调，看增量）
+--   章节选择器打开耗时在真机阅读器里测：tools/probe_picker.lua 经
+--   httpinspector 的 dofile 执行，见 docs/PERF.md §8。
 --
 -- 安全：只写 --work 目录（默认设备 /mnt/us/dtbench，桌面 /tmp/dt_bench），
 -- 目录里有 .dtbench 标记才会清理 data/ 与 css/；--work 与 KO_ROOT 重叠会被拒绝。
@@ -81,6 +89,9 @@ local opts = {
     keep = false,
     overlay = nil,
     provider = nil,
+    migrate = false,
+    memory = false,
+    rows = 100000,
 }
 do
     local index = 1
@@ -108,6 +119,9 @@ do
         elseif item == "--list-dir" then opts.list_dir = next_value(item)
         elseif item == "--overlay" then opts.overlay = next_value(item)
         elseif item == "--provider" then opts.provider = next_value(item)
+        elseif item == "--migrate" then opts.migrate = true
+        elseif item == "--memory" then opts.memory = true
+        elseif item == "--rows" then opts.rows = tonumber(next_value(item)) or opts.rows
         elseif item == "--keep" then opts.keep = true
         elseif item == "--help" or item == "-h" then
             print("用法: luajit tools/bench.lua [--book EPUB]... [--runs N] [--segments N]")
@@ -115,6 +129,7 @@ do
             print("      [--md PATH] [--json PATH] [--device NAME] [--keep]")
             print("      luajit tools/bench.lua --list [--list-dir DIR]")
             print("      luajit tools/bench.lua --overlay DIR [--provider ID]")
+            print("      luajit tools/bench.lua --migrate [--rows N] | --memory")
             os.exit(0)
         else
             io.stderr:write("忽略未知参数: " .. tostring(item) .. "\n")
@@ -359,6 +374,17 @@ local function fmt_kb(bytes)
     return string.format("%.0f KB", bytes / 1024)
 end
 
+local function fmt_mb(bytes)
+    if not bytes then return "—" end
+    return string.format("%.1f MB", bytes / 1024 / 1024)
+end
+
+-- collectgarbage("count") and /proc/self/status are already in KiB.
+local function fmt_mb_kb(kb)
+    if not kb then return "—" end
+    return string.format("%.1f MB", kb / 1024)
+end
+
 local function fmt_samples(samples)
     local sorted = {}
     for index, value in ipairs(samples) do sorted[index] = value end
@@ -370,6 +396,22 @@ end
 
 local function rule_count(css)
     return select(2, tostring(css or ""):gsub("{", ""))
+end
+
+-- Process memory, for the §15.4 memory rows.  Linux only; nil elsewhere.
+-- field is "VmRSS" (current) or "VmHWM" (peak since start).
+local function read_proc_kb(field)
+    local file = io.open("/proc/self/status", "rb")
+    if not file then return nil end
+    for line in file:lines() do
+        local value = line:match("^" .. (field or "VmRSS") .. ":%s*(%d+)")
+        if value then
+            file:close()
+            return tonumber(value)
+        end
+    end
+    file:close()
+    return nil
 end
 
 local function outline_cache_path(book_path)
@@ -1201,8 +1243,10 @@ local function render_markdown(environment, books, results)
     add("- **锚点页表**：`Epub.chapter_anchor_paths` 冷解析目录锚点最多的 " .. environment.runs
         .. " 个章节（各不同，3 槽 LRU 不会命中），中位数为单章成本；这是最坏单章，不是均匀抽样。"
         .. "CREngine 的 `getPageFromXPointer` 探测（每章 N 次）无法在 headless 复现，未计入。")
-    add("- **未覆盖**：章节选择器打开（< 1 s）、DB v3 迁移（100k 行 < 10 s）、内存增量"
-        .. "（< 20 / 40 MB）、以及「相对旧版不劣化 20%」所需的历史基线——本次只记录绝对值。")
+    add("- **本表口径**：只记录本机绝对值；章节选择器打开（< 1 s）、DB v3 迁移"
+        .. "（100k 行 < 10 s）与内存增量（< 20 / 40 MB）由 `--migrate` / `--memory`"
+        .. " 与 `tools/probe_picker.lua` 单独测量，「相对旧版不劣化 20%」用 v3.2.2 的同一"
+        .. "脚本在同一台设备复跑；结果见 `docs/PERF.md` §8。")
     add("")
     return table.concat(lines, "\n")
 end
@@ -1431,6 +1475,187 @@ if opts.overlay then
         delta(after_hit, before, "css_builds"),
         delta(after_hit, before, "css_hits")))
     restore_template()
+    os.exit(0)
+end
+
+-- ---------------- acceptance extras (§15.4 leftovers) ----------------
+-- A v2 cache, same shape tests/migration_test.lua seeds: the old primary key
+-- has no provider/selector and user_version stays 0.
+local V2_BOOK_DDL = [[
+CREATE TABLE book_translations (
+    book_path TEXT NOT NULL,
+    source_lang TEXT NOT NULL,
+    target_lang TEXT NOT NULL,
+    source_text TEXT NOT NULL,
+    translated_text TEXT NOT NULL,
+    provider TEXT,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL,
+    use_count INTEGER DEFAULT 1,
+    PRIMARY KEY(book_path, source_lang, target_lang, source_text)
+);
+]]
+
+local V2_TRANSLATIONS_DDL = [[
+CREATE TABLE translations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_lang TEXT NOT NULL,
+    target_lang TEXT NOT NULL,
+    source_text TEXT NOT NULL,
+    translated_text TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL,
+    use_count INTEGER DEFAULT 1,
+    book_path TEXT,
+    UNIQUE(source_lang, target_lang, source_text)
+);
+CREATE INDEX idx_translations_lookup ON translations(source_lang, target_lang, source_text);
+CREATE INDEX idx_translations_book ON translations(book_path);
+]]
+
+if opts.migrate then
+    local SQ3 = require("lua-ljsqlite3/init")
+    local db_file = data_dir .. "/dualtranslate_cache.sqlite3"
+    local function remove_db()
+        for _, suffix in ipairs({ "", "-wal", "-shm", "-journal", ".bak" }) do
+            os.remove(db_file .. suffix)
+        end
+    end
+    -- The .bak copy is part of the upgrade cost but not of the SQL rewrite;
+    -- report it separately so the 10 s target can be read either way.  The
+    -- copy is measured on the file the migration just wrote, so the page
+    -- cache is warm: treat it as a lower bound.
+    local function measure_copy(path)
+        local target = path .. ".copytest"
+        local input = io.open(path, "rb")
+        if not input then return nil end
+        local output = io.open(target, "wb")
+        if not output then input:close(); return nil end
+        local started = clock()
+        while true do
+            local chunk = input:read(65536)
+            if not chunk then break end
+            output:write(chunk)
+        end
+        input:close()
+        output:close()
+        local elapsed = (clock() - started) * 1000
+        os.remove(target)
+        return elapsed
+    end
+    local function build_v2(rows)
+        remove_db()
+        local db = SQ3.open(db_file)
+        db:exec("PRAGMA journal_mode=WAL;")
+        db:exec(V2_BOOK_DDL)
+        db:exec(V2_TRANSLATIONS_DDL)
+        db:exec("BEGIN IMMEDIATE;")
+        local stmt = db:prepare([[INSERT INTO book_translations
+            (book_path, source_lang, target_lang, source_text, translated_text,
+             provider, created_at, last_used_at, use_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)]])
+        for index = 1, rows do
+            -- 40 books, rows grouped per book: that is how a real cache is
+            -- filled (one book translated in one session), and the v3 insert
+            -- then walks the primary key in order instead of jumping between
+            -- 40 B-trees.  Interleaving would measure FUSE random writes.
+            local book_index = math.floor((index - 1) * 40 / rows) + 1
+            stmt:bind(string.format("/mnt/us/documents/book%02d.epub", book_index),
+                "auto", "zh-Hans",
+                string.format("Paragraph %d of the migration fixture.", index),
+                string.format("第 %d 段译文", index),
+                index % 7 == 0 and "mcp:gpt-5" or "system",
+                1000 + index, 1000 + index, 1)
+            stmt:step()
+            stmt:reset()
+            stmt:clearbind()
+        end
+        stmt:close()
+        db:exec("COMMIT;")
+        db:exec("PRAGMA user_version = 0;")
+        db:close()
+    end
+    local samples = {}
+    for run = 1, opts.runs do
+        build_v2(opts.rows)
+        local cache = Cache:new()
+        collectgarbage("collect")
+        local cpu_started = os.clock()
+        local started = clock()
+        local ok, err = Store.migrateIfNeeded(cache)
+        samples[#samples + 1] = (clock() - started) * 1000
+        local cpu_ms = (os.clock() - cpu_started) * 1000
+        if not ok then
+            io.stderr:write("迁移失败: " .. tostring(err) .. "\n")
+            cache:close()
+            cleanup_work()
+            os.exit(1)
+        end
+        local backup = lfs.attributes(db_file .. ".bak", "size") or 0
+        cache:close()
+        print(string.format("  run %d: %s（%d 行，.bak %s，CPU %s）", run,
+            fmt_ms(samples[#samples]), opts.rows, fmt_mb(backup), fmt_ms(cpu_ms)))
+    end
+    local copy_ms = measure_copy(db_file .. ".bak")
+    print(string.format("migrate  %s（%d 行 v2→v3，%d 次中位数；.bak 复制约 %s）",
+        fmt_ms(median(samples)), opts.rows, #samples, fmt_ms(copy_ms)))
+    remove_db()
+    cleanup_work()
+    os.exit(0)
+end
+
+-- 15.4 memory: how much the three-provider fallback costs over one provider.
+-- The three cases run in one process (single -> split -> full), so the RSS
+-- column is cumulative; the per-case delta is what is comparable.
+if opts.memory then
+    local segments = opts.css_segments
+    local fixture_book = { path = opts.work .. "/fixture.epub", spine_count = 200, size = 0 }
+    local cases = {
+        { name = "single", providers = {
+            { id = PROVIDER_A, count = segments, offset = 0 } } },
+        { name = "fallback-split", providers = split_specs(segments) },
+        { name = "fallback-full", providers = full_specs(segments) },
+    }
+    print(string.format("memory  CSS 夹具 %d 段（单服务 / 三服务均分 / 三服务全量）", segments))
+    for _, case in ipairs(cases) do
+        local dir = opts.work .. "/mem/" .. case.name
+        local fixture, fixture_err = prepare_css_fixture(dir, fixture_book, case.providers)
+        if not fixture then
+            io.stderr:write("无法准备夹具: " .. tostring(fixture_err) .. "\n")
+            cleanup_work()
+            os.exit(1)
+        end
+        Overlay.clearCssCache()
+        Overlay.clearEntriesCache()
+        collectgarbage("collect")
+        local lua_before = collectgarbage("count")
+        local peak_before = read_proc_kb("VmHWM")
+        local started = clock()
+        local css = Overlay.buildCss(dir, {
+            translation_visible = true,
+            translation_color = "#666666",
+            translation_size = "1em",
+            provider = case.providers[1].id,
+            fallback = #case.providers > 1,
+        })
+        local elapsed = (clock() - started) * 1000
+        -- VmHWM survives the GC, so the delta is this case's decoding peak:
+        -- that is what three providers actually cost while the CSS is built.
+        local peak_after = read_proc_kb("VmHWM")
+        collectgarbage("collect")
+        local lua_after = collectgarbage("count")
+        print(string.format("  %-15s %8s  规则 %5d  峰值 RSS +%s（VmHWM %s）"
+            .. "  构建后 Lua +%s / RSS %s",
+            case.name, fmt_ms(elapsed), rule_count(css),
+            peak_after and peak_before and fmt_mb_kb(peak_after - peak_before) or "?",
+            peak_after and fmt_mb_kb(peak_after) or "?",
+            fmt_mb_kb(lua_after - lua_before),
+            fmt_mb_kb(read_proc_kb("VmRSS"))))
+        Tools.rmtree(dir)
+    end
+    Tools.rmtree(opts.work .. "/mem")
+    cleanup_work()
     os.exit(0)
 end
 

@@ -294,6 +294,82 @@ do
     check("恢复后不留 keep", not exists(Glossary.keepPath(orphan)))
 end
 
+-- ============================================================
+print("== 9. 异常文件：目录冒充 / 不可读 / 恢复失败 ==")
+do
+    -- A directory named glossary.json is not user terms.  Moving it aside
+    -- would only make the next load fail on a directory, and recover_stash
+    -- must not move a keep *directory* into place either.
+    local dir = ROOT .. "/book_dirstash"
+    os.execute('mkdir -p "' .. dir .. '/glossary.json"')
+    check("目录不暂存", Glossary.stash(dir) == nil)
+    check("目录未被改名", lfs.attributes(dir .. "/glossary.json", "mode") == "directory"
+        and not exists(Glossary.keepPath(dir)))
+
+    local keepdir = ROOT .. "/book_keepdir"
+    os.execute('mkdir -p "' .. keepdir .. '" "' .. Glossary.keepPath(keepdir) .. '/inner"')
+    Glossary.load(keepdir)
+    check("目录型 keep 不恢复成术语表",
+        lfs.attributes(Glossary.keepPath(keepdir), "mode") == "directory"
+        and not exists(keepdir .. "/glossary.json"))
+
+    -- A file where a directory is expected: mkdir_p fails, but the in-memory
+    -- bytes must still be parked next to it so a later load can recover them.
+    local blocked = ROOT .. "/book_blocked"
+    write(blocked, "not a directory")
+    local raw = '{"schema":"dualtranslate.glossary.v1","terms":[{"source":"A","target":"甲"}]}'
+    check("恢复失败返回 false", Glossary.unstash(blocked, { data = raw }) == false)
+    check("内存字节停到 keep", read(Glossary.keepPath(blocked)) == raw,
+        read(Glossary.keepPath(blocked)))
+    check("块状路径读取不报错", Glossary.load(blocked).style_guide
+        == Glossary.DEFAULT_STYLE_GUIDE)
+    os.remove(Glossary.keepPath(blocked))
+
+    -- The keep path itself can be a stray directory, and the cache path can be
+    -- blocked by a file: bytes must fall back to "<keep>.1", not be dropped.
+    local occupied = ROOT .. "/book_keep_busy"
+    write(occupied, "not a directory")
+    os.execute('mkdir -p "' .. Glossary.keepPath(occupied) .. '/x"')
+    local raw2 = '{"schema":"dualtranslate.glossary.v1","terms":[{"source":"B","target":"乙"}]}'
+    check("keep 被占时返回 false",
+        Glossary.unstash(occupied, { data = raw2 }) == false)
+    check("字节落到 keep.1", read(Glossary.keepPath(occupied) .. ".1") == raw2,
+        read(Glossary.keepPath(occupied) .. ".1"))
+    -- Once the paths are usable again, load recovers from the fallback copy.
+    os.remove(occupied)
+    os.execute('rm -rf "' .. Glossary.keepPath(occupied) .. '"')
+    local recovered = Glossary.load(occupied)
+    check("load 从 keep.1 恢复", #recovered.terms == 1
+        and recovered.terms[1].source == "B", tostring(#recovered.terms))
+    check("恢复后不留 keep.1",
+        not exists(Glossary.keepPath(occupied) .. ".1"))
+
+    -- Rename cannot succeed (keep is a non-empty directory) and, on a
+    -- non-root account, the file itself cannot be read: the caller must be
+    -- told "unreadable" so it skips the delete instead of destroying terms.
+    local shadow = ROOT .. "/book_unreadable"
+    Glossary.save(shadow, { terms = { { source = "Darcy", target = "达西" } } })
+    os.execute('mkdir -p "' .. Glossary.keepPath(shadow) .. '/x"')
+    os.execute('chmod 000 "' .. shadow .. '/glossary.json"')
+    local probe = io.open(shadow .. "/glossary.json", "rb")
+    local readable = probe ~= nil
+    if probe then probe:close() end
+    local stashed, stash_err = Glossary.stash(shadow)
+    if readable then
+        -- Running as root: chmod 000 does not block the read, so the
+        -- in-memory fallback is the correct answer, not "unreadable".
+        check("root 下回退为内存副本", stashed ~= nil and stashed.data ~= nil,
+            tostring(stash_err))
+    else
+        check("改名失败且读不出时返回 unreadable",
+            stashed == nil and stash_err == "unreadable", tostring(stash_err))
+    end
+    os.execute('chmod 644 "' .. shadow .. '/glossary.json"')
+    os.execute('rm -rf "' .. shadow .. '" "' .. Glossary.keepPath(shadow) .. '"')
+    os.execute('rm -rf "' .. dir .. '" "' .. keepdir .. '"')
+    os.execute('rm -rf "' .. occupied .. '" "' .. Glossary.keepPath(occupied) .. '"')
+end
+
 print(string.format("\n==== 术语表测试：%d 通过，%d 失败 ====", passed, failed))
 if failed == 0 then
     os.execute('rm -rf "' .. ROOT .. '"')

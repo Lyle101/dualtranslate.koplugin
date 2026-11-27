@@ -139,14 +139,38 @@ function Glossary.format(terms)
     return table.concat(lines, "\n")
 end
 
+-- The keep path itself can be occupied (a stale directory from an old bug, a
+-- read-only mount): park_keep then uses "<keep>.1".  Recovery checks both, so
+-- a fallback copy is still brought back instead of leaking forever.
+local KEEP_SUFFIXES = { "", ".1" }
+
 -- A cache sweep moves the file out of the directory before deleting it (see
 -- Glossary.stash); recover it if that process died before moving it back.
+-- Only a regular file is recovered: a directory (or a socket) sitting at the
+-- keep path is somebody else's leftover, and renaming it into place would
+-- leave "glossary.json" unreadable for good.
 local function recover_stash(dir)
-    local keep = Glossary.keepPath(dir)
     local target = dir .. "/" .. Glossary.FILE
-    if lfs.attributes(keep, "mode") and not lfs.attributes(target, "mode") then
-        Tools.mkdir_p(dir)
-        os.rename(keep, target)
+    if lfs.attributes(target, "mode") then return end
+    -- Newest copy wins: a failed rename-over-existing can leave an older keep
+    -- next to the bytes that were just parked.
+    local candidate, candidate_time, candidate_suffix
+    for _, suffix in ipairs(KEEP_SUFFIXES) do
+        local keep = Glossary.keepPath(dir) .. suffix
+        if lfs.attributes(keep, "mode") == "file" then
+            local stamp = lfs.attributes(keep, "modification") or 0
+            if not candidate or stamp > candidate_time then
+                candidate, candidate_time, candidate_suffix = keep, stamp, suffix
+            end
+        end
+    end
+    if not candidate then return end
+    Tools.mkdir_p(dir)
+    if not os.rename(candidate, target) then return end
+    for _, suffix in ipairs(KEEP_SUFFIXES) do
+        if suffix ~= candidate_suffix then
+            os.remove(Glossary.keepPath(dir) .. suffix)
+        end
     end
 end
 
@@ -252,7 +276,9 @@ end
 function Glossary.stash(dir)
     if type(dir) ~= "string" or dir == "" then return nil end
     local source = dir .. "/" .. Glossary.FILE
-    if not lfs.attributes(source, "mode") then return nil end
+    -- A directory named glossary.json is not user terms; moving it aside would
+    -- only make the next load fail on a directory instead of a missing file.
+    if lfs.attributes(source, "mode") ~= "file" then return nil end
     local keep = Glossary.keepPath(dir)
     if os.rename(source, keep) then return { keep = keep } end
     local file = io.open(source, "rb")
@@ -263,9 +289,37 @@ function Glossary.stash(dir)
     return { data = raw }
 end
 
+-- Park in-memory glossary bytes next to the cache directory.  Atomic like
+-- saveRaw: a half-written keep must not replace a complete one left by an
+-- earlier crash.  A keep path occupied by a directory falls back to ".1",
+-- which recover_stash also reads.
+local function park_keep(dir, data)
+    local keep = Glossary.keepPath(dir)
+    for _, suffix in ipairs(KEEP_SUFFIXES) do
+        local target = keep .. suffix
+        local temporary = target .. ".tmp"
+        local out = io.open(temporary, "wb")
+        if out then
+            local written = out:write(data)
+            local closed = out:close()
+            if written and closed and os.rename(temporary, target) then
+                return true
+            end
+            os.remove(temporary)
+        end
+    end
+    return false
+end
+
 function Glossary.unstash(dir, stashed)
     if type(dir) ~= "string" or dir == "" or stashed == nil then return true end
-    if not Tools.mkdir_p(dir) then return false end
+    if not Tools.mkdir_p(dir) then
+        -- The directory could not be recreated.  A keep file is already safe
+        -- where it is (recover_stash retries on the next load), but memory
+        -- bytes would die with this process, so park them the same way.
+        if stashed.data then park_keep(dir, stashed.data) end
+        return false
+    end
     if stashed.keep then
         -- A failed rename leaves the keep file where it is: recover_stash
         -- will put it back on the next load, so no bytes are lost.
@@ -274,12 +328,7 @@ function Glossary.unstash(dir, stashed)
     if Glossary.saveRaw(dir, stashed.data) then return true end
     -- The directory is gone and the normal write failed.  Park the bytes next
     -- to it so recover_stash can still bring them back later.
-    local keep = Glossary.keepPath(dir)
-    local out = io.open(keep, "wb")
-    if out then
-        out:write(stashed.data)
-        out:close()
-    end
+    park_keep(dir, stashed.data)
     return false
 end
 

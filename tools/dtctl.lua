@@ -390,14 +390,16 @@ end
 -- (get-segments paginates on the device), but load_job still wants one copy
 -- after a transport change.
 local CAT_NAMES = { ["job.json"] = true, ["state.json"] = true,
-    ["result.json"] = true, ["result.partial.json"] = true }
+    ["result.json"] = true, ["result.partial.json"] = true,
+    ["options.json"] = true }
 
 handlers.cat = function(opts)
     local job_path, job_id_or_err = validate_job_path(opts.job)
     if not job_path then return nil, job_id_or_err end
     local name = opts.name
     if not CAT_NAMES[name] then
-        return nil, "--name must be job.json, state.json, result.json or result.partial.json"
+        return nil, "--name must be job.json, state.json, options.json, "
+            .. "result.json or result.partial.json"
     end
     local path = Mcp.jobDir(job_id_or_err) .. "/" .. name
     local size = lfs.attributes(path, "size")
@@ -418,12 +420,22 @@ handlers["job-status"] = function(opts)
     local meta = Mcp.loadMeta(job_id)
     local book, total, chapter_count, segment_ids, options
     if meta then
-        -- Index path: no job.json decode at all.
+        -- Index path: no job.json decode at all.  Options moved to their own
+        -- small file, but a meta written before the split still carries them.
         book = meta.book or {}
-        -- A meta.json written before options existed still has the top-level
-        -- max_chars_per_segment; do not lose it for old jobs.
-        options = meta.options
-            or { max_chars_per_segment = meta.max_chars_per_segment }
+        options = Mcp.loadOptions(job_id, meta)
+        if not options then
+            -- options.json missing or unreadable: job.json still has a copy in
+            -- its head (one bounded read, not a whole-file decode), and losing
+            -- the user's glossary to a damaged sidecar would be silent.
+            local shell = Mcp.loadJobShell(job_id)
+            options = shell and shell.options
+        end
+        if not options then
+            -- A meta.json written before options existed still has the
+            -- top-level max_chars_per_segment; do not lose it for old jobs.
+            options = { max_chars_per_segment = meta.max_chars_per_segment }
+        end
         segment_ids = Mcp.listSegmentIds(job_id) or {}
         total = tonumber(meta.total) or #segment_ids
         chapter_count = tonumber(meta.chapter_count) or 0
@@ -451,6 +463,11 @@ handlers["job-status"] = function(opts)
     -- answers with an empty glossary instead of nil, so `options.glossary`
     -- never needs a nil guard in a tool consumer.
     options = type(options) == "table" and options or {}
+    -- options came from job.json but predates the field: the meta top level
+    -- still has it, and the PC applies the same last resort.
+    if options.max_chars_per_segment == nil and meta then
+        options.max_chars_per_segment = meta.max_chars_per_segment
+    end
     return {
         ok = true, job_id = job_id,
         book_path = book.device_path,
@@ -621,11 +638,25 @@ function handlers.import(opts)
     state.submitted = summary.submitted
     state.total = summary.total
     Mcp.saveState(job_id, state)
+    -- Design 10.2: the import just succeeded, so this is the moment to drop
+    -- finished job directories older than the retention window (job.json
+    -- carries the whole book text, options.json the user's glossary).  Never
+    -- the job that was just imported, and never one that is still in flight.
+    -- A cleanup failure must not turn a committed import into an error the PC
+    -- would retry: the translations are already in the database.
+    local cleanup_ok, removed_jobs = pcall(Mcp.cleanupExpiredJobs,
+        { keep_job_id = job_id })
+    if not cleanup_ok then
+        io.stderr:write("dualtranslate: job cleanup failed: "
+            .. tostring(removed_jobs) .. "\n")
+        removed_jobs = 0
+    end
     summary.rejected = as_array(summary.rejected)
     summary.chapters = as_array(summary.chapters)
     summary.partial_chapters = as_array(summary.partial_chapters)
     summary.failed_chapters = as_array(summary.failed_chapters)
-    return { ok = true, job_id = job_id, imported = summary }
+    return { ok = true, job_id = job_id, imported = summary,
+        removed_jobs = removed_jobs }
 end
 
 handlers["list-providers"] = function(opts)

@@ -4,17 +4,18 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.15（未发布：术语表/风格指南、模板磁盘回收；v3.2.2 基线） |
-| 日期 | 2026-11-26 |
-| 适用代码 | DualTranslate `v3.2.2` + 未发布的模板回收与 MCP 术语表（P0–P3 已合入；P4 的 CI、orphan 边界、性能基准与模板回收已落地；Q5 已接线） |
-| 目标版本 | `v3.2.2` 已发布：多服务 + 章节选择 + MCP 外部翻译（P3）；设备端收件箱已移除 |
-| 状态 | P0–P3 已实施（SSH 双 key + elicitation + 列表项 + 父项译文对齐 + 引擎失败降级；设备端收件箱已移除）；P4 已落地：GitHub Actions（Lua 套件 + MCP server 的 pytest）、reconcile 遇读不到 mtime 的 orphan 不再删除、`tools/bench.lua` 与 `docs/PERF.md`、CSS 模板磁盘回收（未发版）；`Q5 术语表/风格指南` 已接线（每书每语言 `glossary.json` → `job.options` → `meta.json` → `dtctl job-status` / `dt_get_job`，未发版）；512 MB 设备的关书 RSS 回落仍待 A/B；`entries` ndjson 与按章 CSS 明确不做 |
+| 文档版本 | 0.16（v3.3.0 已发布：术语表/风格指南、任务目录保留、§15.4 性能收口） |
+| 日期 | 2026-11-27 |
+| 适用代码 | DualTranslate `v3.3.0`（P0–P3 已合入；P4 的 CI、orphan 边界、性能基准、模板回收已落地；Q5 已发布） |
+| 目标版本 | `v3.3.0` 已发布：多服务 + 章节选择 + MCP 外部翻译（P3）+ 术语表；设备端收件箱已移除 |
+| 状态 | P0–P3 已实施（SSH 双 key + elicitation + 列表项 + 父项译文对齐 + 引擎失败降级；设备端收件箱已移除）；P4 已落地：GitHub Actions（Lua 套件 + MCP server 的 pytest）、reconcile 遇读不到 mtime 的 orphan 不再删除、`tools/bench.lua` 与 `docs/PERF.md`、CSS 模板磁盘回收；`Q5 术语表/风格指南` 已发布（每书每语言 `glossary.json` → `job.options` → `options.json` → `dtctl job-status` / `dt_get_job`）；MCP 任务目录 7 天保留已实现；§15.4 剩余项已收口（DB 迁移 100k 行实测 91–104 s，未达标，见 PERF §8.2）；512 MB 设备的关书 RSS 回落仍待 A/B；`entries` ndjson 与按章 CSS 明确不做 |
 | 代码状态 | 全部有回归测试，CI 自 `4d60e58` 起每次 push 跑全套（30 个功能套件，不含 `fulltest/loadtest` 聚合器与可选的 `smoke_live`；外加 MCP server 的 pytest） |
 
 **修订记录**
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 0.16 | 2026-11-27 | v3.3.0：术语表/风格指南与模板回收发布；`options` 从 `meta.json` 拆到 `options.json`（列表不再逐条解码术语表，`job-status` / `LocalTransport` 先读它，再回退旧 job）；`Mcp.cleanupExpiredJobs` 在导入成功时删除 7 天前**已全部导入**的任务（跳过当前任务、部分导入与未完成任务）；术语表加固（`recover_stash` 只认普通文件、`unstash` 在 `mkdir` 失败时把内存字节停到 keep、损坏文件在编辑器里告警、目录冒充/不可读/恢复失败补测试）；任务详情与导出完成提示「术语 N 条 · 风格指南自定义」；`tools/bench.lua` 增加 `--migrate` / `--memory`，新增 `tools/probe_picker.lua`，PERF §8 收口 §15.4 剩余项（选择器打开 61.2 ms、真 83 章书 448 ms、三服务增量 7.5 MB、相对 v3.2.2 −0.2%～+2.1%，迁移 100k 行 91–104 s 未达标） |
 | 0.15 | 2026-11-26 | Q5 术语表/风格指南（未发版）：新增 `dualtranslate_glossary.lua`，每书+每目标语言一份 `glossary.json`（`terms[{source,target}]` + `style_guide`），与 manifest 分离，编辑不 bump revision、不重建模板、不触发重载；菜单「MCP 外部翻译 → 术语表… / 风格指南…」全屏编辑，`原文=译文` 逐行解析（空行忽略、重复原文后写覆盖、全角等号/全角空格、单条 200/400 字节、整表 300 条）；「删除本书全部译文」把 `glossary.json` 原子改名到目录旁再恢复（用户手写内容，不是译文产物；恢复失败则保留目录），损坏文件先留 `.corrupt` 备份；导出把两者写入 `job.options`，`meta.json` 同步一份，`dtctl job-status` 与 `dt_get_job` 返回固定形状（老 job 返回空术语表），工具说明要求 Agent 遵守；新增 `tests/glossary_test.lua`（47 项）与 dtctl/pytest 断言；`Overlay.reclaimCssTemplates` 的路径比较折叠重复 `/` |
 | 0.14 | 2026-11-26 | 模板磁盘回收（未发版）：读取模板/打开书时 touch mtime 作为「最近使用」，开书 10 s 后删除 30 天未使用的 `css-template.css`，再按 50 MB 总量上限从最旧开始删；跳过当前书，只删模板文件，每轮最多 20 份、每进程 6 h 最多扫描一次；新增 `tests/template_gc_test.lua`（30 项）。同步 P4 状态与 §15.4 的 CSS 验收口径（模板命中 56.2 ms） |
 | 0.13 | 2026-11-26 | v3.2.2：**冷启动预编译模板**（导入/整书翻译结束时写入 `css-template.css`，样式不参与 key；冷启动 56.2 ms、改字号 32.3 ms，见 PERF §7）；`clearCssCache` 与 entries 缓存、模板缓存三者解耦；`document` 不再常驻第二份拼接 CSS；**删除未接线的按章 CSS 过滤与 11 项测试**（D14）；新增 `tests/bench_test.lua` 覆盖 `--work/--only/.dtbench/--overlay` |
@@ -1408,12 +1409,16 @@ sequenceDiagram
 
 ```
 cache/dualtranslate/mcp/jobs/<job_id>/job.json
+cache/dualtranslate/mcp/jobs/<job_id>/meta.json            -- 书字段 / 总段数 / 锚点（列表只读它）
+cache/dualtranslate/mcp/jobs/<job_id>/options.json         -- 术语表 / 风格指南 / 切分上限
 cache/dualtranslate/mcp/jobs/<job_id>/state.json
 cache/dualtranslate/mcp/jobs/<job_id>/result.partial.json  -- 分批提交（dtctl put 上传）
 cache/dualtranslate/mcp/jobs/<job_id>/result.json          -- 翻译后（dtctl put 上传）
 ```
 
-任务目录保留策略：`committed` 且超过 7 天的 job 由 `dtctl` 在下次导入成功时顺带清理；「删除本书全部译文」必须同时删除 `job.book.device_path` 指向该书的 job 目录（`job.json` 含原文，不能留）。这是 P3 的必做项，不能推到 P4。
+`options` 从 `meta.json` 拆到 `options.json`（3.3.0）：任务列表每次重建会逐条解码 meta，300 条术语的上限让单条 meta 到 ~180 KB（实测 32 ms/任务、20 个任务 636 ms），而列表并不需要术语表。`dtctl job-status` 与 PC 端 `LocalTransport` 都先读 `options.json`，读不到再回退 `meta.options`（3.2.x 的 job）与 `job.options`（更老的 job），三类 job 都返回同一个固定形状。
+
+任务目录保留策略：**全部导入**（`committed` 且 `submitted ≥ total`）且超过 7 天的 job 由 `dtctl` 在下次导入成功时顺带清理（`Mcp.cleanupExpiredJobs`：只扫 jobs 根目录、跳过本次刚导入的 job、`exported`/`submitted`/部分导入一律不动；时间取 `state.updated_at`，缺失时用 `state.json` 的 mtime，没有 `state.json` 的旧目录用目录 mtime）；「删除本书全部译文」必须同时删除 `job.book.device_path` 指向该书的 job 目录（`job.json` 含原文，不能留）。这是 P3 的必做项，不能推到 P4。
 
 #### 10.2.1 导出的分片执行（3.2.0）
 
@@ -1518,7 +1523,7 @@ session:abort()                -- 取消：删临时目录并置 aborted
 - `id` 是 job 内唯一编号（`s000001`），不是全局 ID；导入时按 job 查原文。
 - `source` 必须由设备端抽取，PC 不改写；导入时用 `id` 找到 job 原文，不信任 result 里的 selector。
 - `book.file_size/file_mtime` 用于导入时校验书是否被替换；不一致则拒绝或要求重新导出。
-- `glossary/style_guide` 可选，帮助跨章节术语一致。未发布版本起由设备端菜单实际填入：术语存在每书每目标语言的 `glossary.json`（与 manifest 分离，编辑不改变 overlay 身份），导出时归一化后写进 job；`meta.json` 也带一份 `options`，因此 `dtctl job-status` 不需要解码整份 job.json 就能把它交给 PC，`dt_get_job` 返回同样形状（3.2.x 的 meta 没有 `options`，这类老 job 返回空 glossary + 空 style_guide）。代价是 meta 会随术语表增大（上限 300 条 / 单条 200+400 字节）：`listJobs` 每次菜单重建都会解码 meta，典型几十条可忽略，极端上限在真机约 34 ms/任务（192 KB meta 实测）。
+- `glossary/style_guide` 可选，帮助跨章节术语一致。3.3.0 起由设备端菜单实际填入：术语存在每书每目标语言的 `glossary.json`（与 manifest 分离，编辑不改变 overlay 身份），导出时归一化后写进 job；同时写一份 `options.json`，`dtctl job-status` 不需要解码整份 job.json 就能把它交给 PC，`dt_get_job` 返回同样形状（3.2.x 的 job 把 options 放在 `meta.json`，更老的 job 只有 `job.options`；两类老 job 都返回空 glossary + 空 style_guide）。拆分的理由：`listJobs` 每次菜单重建都会逐条解码 meta，300 条术语时单条 meta 约 180 KB、真机 32 ms/任务，20 个任务就是 636 ms；拆开后列表只读约 1 KB 的 meta，术语表只在 `job-status` 读一次。
 
 **长段落切分与回填（容易踩的坑）：**
 
@@ -2281,7 +2286,7 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 | `chapter_complete_test.lua` | 0 候选章节计入 `chapters`；`complete` 可达 |
 | `overlay_revision_test.lua` | entries revision 与 manifest 不同步时 CSS 缓存必须失效 |
 | `template_gc_test.lua` | CSS 模板过期/总量上限/当前书/单轮上限/节流/符号链接边界/重复分隔符 |
-| `glossary_test.lua` | 术语解析（空行/重复/全角等号/超长/上限）、原子写、损坏容错、与 manifest/模板解耦 |
+| `glossary_test.lua` | 术语解析（空行/重复/全角等号/超长/上限）、原子写、损坏容错、暂存/恢复、目录冒充、不可读时保留目录、恢复失败时字节落 keep、与 manifest/模板解耦 |
 | `lock_test.lua` | 并发持锁、stale 超时、`fn` 抛错后解锁 |
 
 ### 15.2 MCP Server 测试（Python）
@@ -2323,12 +2328,19 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 | CSS 构建（3,000 段，单 provider，模板命中） | < 200 ms（3.2.2 实测 56.2 ms；无模板冷构建 839 ms） |
 | CSS 构建（3,000 段，fallback 三服务，模板命中） | < 500 ms（entries 全加载 + 合并后写入模板；样式替换不再解码） |
 | MCP 导入 3,000 段 | < 5 s（Kindle） |
-| DB v3 迁移 100k 行 | < 10 s |
+| DB v3 迁移 100k 行 | < 10 s（3.3.0 实测 91–104 s，未达标；eMMC 页写等待为主，见 PERF §8.2） |
 | 内存增量（单 provider） | < 20 MB（相对现状） |
 | 内存增量（fallback 三服务） | < 40 MB；`css_cache` 改「每书 1 条 + 总大小上限 8 MB」，否则 16 条 × 1–3 MB 会到 30–50 MB |
 | overlay 单 provider 文件 | 3,000 段约 0.8-1.5 MB |
 
 > 表中为 Kindle 真机 P50 参考值。IO 波动会让单次测量偏差很大，验收口径统一为「同一设备 5 次取中位数，P50 相对现状不劣化超过 20%」；`tools/bench.lua` 已交付（`--overlay` 为 5 次中位数口径），结果见 `docs/PERF.md`，避免用一次冷启动读数作为结论。
+>
+> **3.3.0 收口（详见 PERF §8）**：章节选择器打开实测 61.2 ms（796 行那本构建合计 86.0 ms，达标）；真 83 章书的目录
+> 解析折算 100 章 448 ms（达标，§3 的 747 ms 是 39 MB 大书按章折算的上界）；fallback
+> 三服务最坏形态峰值增量 7.5 MB（达标）；相对 v3.2.2 的同书基线 −0.2%～+2.1%（达标）；
+> DB v3 迁移 100k 行 91–104 s（**未达标**：墙钟减去 CPU 与复制约 76–88 s 是 eMMC/FUSE 页写等待，
+> 提高 page cache 与排序插入都没有改善）。迁移只在升级时发生一次，建议把该行目标改为
+> 「100k 行 < 2 min」或改为后台迁移，见 PERF §8.2 的取舍说明。
 
 ### 15.5 验收矩阵
 
@@ -2390,7 +2402,7 @@ P0 --> P1 --> P2 --> P3 --> P4
 | `dualtranslate_state.lua` | P1/P2 | `hasActiveJob(book_path, provider)`；队列字段、标签、旧队列兼容 |
 | `dualtranslate_pagetrans.lua` | P1 | 按 provider 判断 complete/chapters |
 | `dualtranslate_providers.lua` | P1 | provider 元数据；`mcp_external` 伪引擎 |
-| `dualtranslate_mcp.lua`（新） | P3 | 导出 job、任务列表、信号（3.2.1 起不含收件箱导入）；`meta.json` 带 `options` |
+| `dualtranslate_mcp.lua`（新） | P3 | 导出 job、任务列表、信号（3.2.1 起不含收件箱导入）；`meta.json` 只留索引，`options.json` 带术语表（3.3.0） |
 | `dualtranslate_glossary.lua`（新） | P4/Q5 | 术语表/风格指南解析与存储（每书每目标语言 `glossary.json`） |
 | `tools/dtctl.lua`（新） | P3 | headless CLI |
 | `tools/dtctl.sh`（新） | P3 | 环境包装 |
@@ -2448,9 +2460,9 @@ SSH 直连、MCP elicitation、自动刷新作为第二阶段增强。这样即�
 > **3.2.2 状态**：Q1/Q2 已解决（SSH 双 key 与 elicitation 已在真机联调）；Q4 采用默认口径
 > （当前书 + 当前目标语言）；Q6 不做（整书流程不用旧表）；Q7 暂不评估（ndjson 实测比整份
 > 解码更慢，entries 解析缓存 + 模板已把 3,133 段冷启动降到 56 ms，10k+ 段尚未测；按章 CSS
-> 另按 D14 删除）。**Q5 已解决（未发版）**：新增 `dualtranslate_glossary.lua` 与
+> 另按 D14 删除）。**Q5 已解决（3.3.0）**：新增 `dualtranslate_glossary.lua` 与
 > 「MCP 外部翻译 → 术语表… / 风格指南…」；存储是每书每目标语言的 `glossary.json`
-> （与 manifest 分离），导出注入 `options`，`meta.json` 同步一份，`dtctl job-status`
+> （与 manifest 分离），导出注入 `options` 并单独写 `options.json`，`dtctl job-status`
 > 与 PC 的 `dt_get_job` 都返回固定形状（老 job 为空），工具说明要求 Agent 遵守。
 > Q3 仍不做。
 
@@ -2458,7 +2470,7 @@ SSH 直连、MCP elicitation、自动刷新作为第二阶段增强。这样即�
 2. MCP 客户端是哪一个（Claude Desktop / Cursor / 其他）？需要确认是否支持 elicitation；不支持则走「工具返回提示，Agent 问用户」路径。
 3. 是否需要 MCP Server 自己直连模型 API（不依赖 Agent）？本期不做，但架构上可加 `translate_with_api` 工具。
 4. 删除服务是「当前书 + 当前目标语言」还是「当前书所有语言」？本设计默认前者，后者作为高级选项。
-5. ~~是否需要术语表/风格指南？~~ 已做（未发版）：每书每目标语言一份 `glossary.json`，菜单编辑，导出注入 `options`，PC 可读。
+5. ~~是否需要术语表/风格指南？~~ 已做（3.3.0）：每书每目标语言一份 `glossary.json`，菜单编辑，导出注入 `options`（`options.json`），PC 可读。
 6. 旧 `translations` 表是否需要 provider 化？当前整书流程不用；若未来恢复划词翻译，再改造。
 7. overlay 是否需要按章节拆分以支持超大书？当前按 provider 分文件；若 10k+ 段仍慢，P4 评估 `entries/<provider>/<chapter>.json`。
 
@@ -2593,7 +2605,8 @@ PRAGMA user_version;
 │   │   └── overlay.v2.bak
 │   └── mcp/
 │       ├── jobs/<job_id>/job.json
-│       ├── jobs/<job_id>/meta.json          -- 书字段/总段数/锚点/options（job-status 只读它）
+│       ├── jobs/<job_id>/meta.json          -- 书字段/总段数/锚点（列表只读它）
+│       ├── jobs/<job_id>/options.json       -- 术语表/风格指南/切分上限（job-status 读它）
 │       ├── jobs/<job_id>/state.json
 │       ├── jobs/<job_id>/result.partial.json
 │       └── jobs/<job_id>/result.json

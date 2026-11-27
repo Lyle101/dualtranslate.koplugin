@@ -408,6 +408,34 @@ do
     check("索引 context", seg and seg.segments[1].prev == "text 1"
         and seg.segments[1].next == "text 3", seg_out)
 
+    -- New layout: the glossary lives in options.json, so meta.json stays tiny
+    -- (the task list decodes one meta per job on every open).
+    write_file(index_dir .. "/meta.json", JSON.encode({
+        schema = "dualtranslate.job.meta.v1", job_id = index_job,
+        created_at = os.time(),
+        book = { device_path = BOOK, title = "Index", source_lang = "en",
+            target_lang = "zh-Hans", spine_count = 1,
+            file_size = BOOK_SIZE, file_mtime = BOOK_MTIME },
+        chapter_count = 1, total = 3, max_chars_per_segment = 4500,
+    }))
+    write_file(index_dir .. "/options.json", JSON.encode({
+        schema = "dualtranslate.job.options.v1", job_id = index_job,
+        options = {
+            max_chars_per_segment = 4500, split_long_segments = true,
+            glossary = { { source = "Lizzy", target = "莉齐" } },
+            style_guide = "民国白话",
+        },
+    }))
+    status_out = rpc2({ argv = { "job-status", "--job", index_job_path } })
+    status = decode_single_line(status_out)
+    check("options.json 生效", status and status.options
+        and status.options.glossary[1] and status.options.glossary[1].source == "Lizzy"
+        and status.options.style_guide == "民国白话", status_out)
+    local cat_options = decode_single_line(rpc2({ argv = { "cat", "--job",
+        index_job_path, "--name", "options.json" } }))
+    check("cat options.json", cat_options and cat_options.exists == true
+        and tostring(cat_options.content):find("Lizzy", 1, true) ~= nil)
+
     os.execute('rm -rf "' .. index_dir .. '"')
 end
 -- ============================================================
@@ -459,6 +487,36 @@ do
         and data.code ~= nil, out:sub(1, 160))
     check("不再返回短 id 表", id_count == 0, tostring(id_count))
     os.execute('rm -rf "' .. trunc_dir .. '"')
+end
+
+-- ============================================================
+print("== 9. 导入后清理过期的 committed 任务 ==")
+do
+    local function make_job(id, status, age_days, submitted, total)
+        local dir = DATA .. "/cache/dualtranslate/mcp/jobs/" .. id
+        os.execute('mkdir -p "' .. dir .. '"')
+        write_file(dir .. "/state.json", JSON.encode({
+            schema = "dualtranslate.state.v1", status = status,
+            updated_at = os.time() - age_days * 86400,
+            submitted = submitted, total = total }))
+        return dir
+    end
+    local expired = make_job("20260101_000000_0801", "committed", 8, 1, 1)
+    local fresh = make_job("20260101_000000_0601", "committed", 6, 1, 1)
+    local exported = make_job("20260101_000000_0901", "exported", 9, 0, 1)
+    local partial = make_job("20260101_000000_0701", "committed", 9, 0, 1)
+    local out, code = run("import --job " .. JOB_PATH)
+    local data = decode_single_line(out)
+    check("再次导入成功", code == 0 and data and data.ok == true, out)
+    check("清理计数为 1", data and data.removed_jobs == 1,
+        data and tostring(data.removed_jobs))
+    check("8 天的 committed 被删", lfs.attributes(expired, "mode") == nil)
+    check("6 天的 committed 保留", lfs.attributes(fresh, "mode") ~= nil)
+    check("exported 不删", lfs.attributes(exported, "mode") ~= nil)
+    check("部分导入不删", lfs.attributes(partial, "mode") ~= nil)
+    check("当前任务保留", lfs.attributes(JOB_DIR, "mode") ~= nil)
+    os.execute('rm -rf "' .. expired .. '" "' .. fresh .. '" "'
+        .. exported .. '" "' .. partial .. '"')
 end
 
 print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))

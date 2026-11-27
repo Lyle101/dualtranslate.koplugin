@@ -601,11 +601,30 @@ do
     check("job.json 仍是合法 JSON", Mcp.readJson(result.dir .. "/job.json") ~= nil)
     local meta = Mcp.loadMeta(result.job_id)
     check("meta.total", meta and meta.total == 8 and meta.chapter_count == 2)
-    -- job-status serves the PC from meta.json alone, so options must be here.
-    check("meta 带 options", meta and meta.options
-        and #meta.options.glossary == 2
-        and meta.options.style_guide == "用民国白话，保留段落结构",
-        meta and meta.options and tostring(meta.options.style_guide))
+    -- The task list decodes meta.json once per job on every open, so the
+    -- glossary lives in its own file and meta must stay small.
+    check("meta 不带 options", meta and meta.options == nil)
+    local options = Mcp.loadOptions(result.job_id, meta)
+    check("options.json 带术语表", options
+        and #options.glossary == 2
+        and options.style_guide == "用民国白话，保留段落结构",
+        options and tostring(options.style_guide))
+    -- Old exports kept options inside meta; loadOptions must still answer.
+    local legacy_meta_dir = Mcp.jobDir("20260101_000000_0003")
+    Tools.mkdir_p(legacy_meta_dir)
+    Mcp.writeJson(legacy_meta_dir .. "/meta.json", {
+        schema = Mcp.META_SCHEMA, job_id = "20260101_000000_0003", total = 0,
+        options = { glossary = { { source = "a", target = "b" } } },
+    })
+    local legacy_options = Mcp.loadOptions("20260101_000000_0003")
+    check("旧 meta 的 options 仍可读", legacy_options
+        and #legacy_options.glossary == 1, tostring(legacy_options))
+    Tools.rmtree(legacy_meta_dir)
+    local options_detail = Mcp.jobDetail(result.job_id)
+    check("detail 带上术语条数", options_detail
+        and options_detail.glossary_terms == 2
+        and options_detail.style_guide_custom == true,
+        options_detail and tostring(options_detail.glossary_terms))
     local seg_ids = Mcp.listSegmentIds(result.job_id)
     check("索引 id 数", seg_ids and #seg_ids == 8 and seg_ids[1] == "s000001")
     local page = Mcp.readSegmentPage(result.job_id, 0, 2, true)
@@ -687,6 +706,76 @@ do
     check("空编号拒绝", Mcp.loadJob("") == nil)
     check("合法编号通过校验", Mcp.validJobId("20261115_120000_0001"))
     check("斜杠拒绝", not Mcp.validJobId("2026/11"))
+end
+
+-- ============================================================
+print("== 4b. committed 任务保留 7 天 ==")
+do
+    local now = os.time()
+    local function make_job(id, status, age_days, submitted, total)
+        local dir = Mcp.jobDir(id)
+        Tools.mkdir_p(dir)
+        Mcp.writeJson(dir .. "/state.json", { schema = Mcp.STATE_SCHEMA,
+            status = status, updated_at = now - age_days * 86400,
+            submitted = submitted, total = total })
+        return dir
+    end
+    local expired = make_job("20260101_000000_0010", "committed", 8, 10, 10)
+    local fresh = make_job("20260101_000000_0011", "committed", 6, 10, 10)
+    local exported = make_job("20260101_000000_0012", "exported", 30, 0, 10)
+    local current = make_job("20260101_000000_0013", "committed", 30, 10, 10)
+    -- --allow-partial also marks the job committed, but the PC still needs
+    -- get-segments/submit for the missing parts: never delete it.
+    local partial = make_job("20260101_000000_0015", "committed", 30, 4, 10)
+    -- A committed job with no updated_at falls back to state.json's mtime.
+    local undated = make_job("20260101_000000_0014", "committed", 0, 10, 10)
+    local state_path = undated .. "/state.json"
+    local undated_state = Mcp.readJson(state_path)
+    undated_state.updated_at = nil
+    Mcp.writeJson(state_path, undated_state)
+    -- ... and an old state.json without updated_at is old too.
+    local undated_old = make_job("20260101_000000_0016", "committed", 8, 10, 10)
+    local old_state_path = undated_old .. "/state.json"
+    local old_state = Mcp.readJson(old_state_path)
+    old_state.updated_at = nil
+    Mcp.writeJson(old_state_path, old_state)
+    assert(lfs.touch(old_state_path, now - 8 * 86400, now - 8 * 86400))
+    -- No state.json at all: an export that died before writing it.  The
+    -- directory mtime is the only age we have, and it is old here.
+    local no_state = Mcp.jobDir("20260101_000000_0017")
+    Tools.mkdir_p(no_state)
+    assert(lfs.touch(no_state, now - 9 * 86400, now - 9 * 86400))
+    -- ... but a directory an export is still writing has no state.json yet and
+    -- a fresh mtime: it must stay.
+    local no_state_fresh = Mcp.jobDir("20260101_000000_0019")
+    Tools.mkdir_p(no_state_fresh)
+    assert(lfs.touch(no_state_fresh, now, now))
+    -- Corrupt state.json behaves the same as a missing one.
+    local corrupt = Mcp.jobDir("20260101_000000_0018")
+    Tools.mkdir_p(corrupt)
+    local corrupt_file = assert(io.open(corrupt .. "/state.json", "wb"))
+    corrupt_file:write("{not json")
+    corrupt_file:close()
+    assert(lfs.touch(corrupt, now - 9 * 86400, now - 9 * 86400))
+
+    local removed = Mcp.cleanupExpiredJobs{
+        now = now, keep_job_id = "20260101_000000_0013" }
+    check("7 天前的 committed 被删", lfs.attributes(expired, "mode") == nil)
+    check("6 天的 committed 保留", lfs.attributes(fresh, "mode") ~= nil)
+    check("exported 不删", lfs.attributes(exported, "mode") ~= nil)
+    check("当前任务不删", lfs.attributes(current, "mode") ~= nil)
+    check("部分导入不删", lfs.attributes(partial, "mode") ~= nil)
+    check("无 updated_at 时用 mtime（新）", lfs.attributes(undated, "mode") ~= nil)
+    check("无 updated_at 且 mtime 旧则删", lfs.attributes(undated_old, "mode") == nil)
+    check("没有 state.json 的旧目录被删", lfs.attributes(no_state, "mode") == nil)
+    check("没有 state.json 的新目录保留",
+        lfs.attributes(no_state_fresh, "mode") ~= nil)
+    check("state.json 损坏的旧目录被删", lfs.attributes(corrupt, "mode") == nil)
+    check("清理计数", removed == 4, tostring(removed))
+    for _, dir in ipairs({ fresh, exported, current, partial, undated,
+        no_state_fresh }) do
+        Tools.rmtree(dir)
+    end
 end
 
 -- ============================================================

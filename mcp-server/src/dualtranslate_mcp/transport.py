@@ -23,7 +23,8 @@ from .models import validate_job
 
 JOB_ID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
 META_SCHEMA = "dualtranslate.job.meta.v1"
-CAT_NAMES = {"job.json", "state.json", "result.json", "result.partial.json"}
+OPTIONS_SCHEMA = "dualtranslate.job.options.v1"
+CAT_NAMES = {"job.json", "state.json", "options.json", "result.json", "result.partial.json"}
 CM_FLAGS = {"context", "allow-partial"}
 # list-providers opens the cache DB, and opening a v2 DB migrates it (a
 # write), so that command needs the write key (design 10.3).
@@ -160,32 +161,51 @@ class LocalTransport:
     def _job_status(self, job_path: str) -> dict:
         job, state = self._job_bundle(job_path)
         book = job.get("book", {})
-        # Mirror dtctl: the device serves job-status from meta.json, and that
-        # is where options live.  A meta written before options existed only
-        # has the top-level max_chars_per_segment.
+        # Mirror dtctl: options live in options.json (written with the job),
+        # and a job exported before the split still has them inside meta.json.
+        # Both transports must answer the same for the same job.
         options = None
-        meta_path = self._path(job_path).parent / "meta.json"
+        meta: dict = {}
+        job_dir = self._path(job_path).parent
+        options_path = job_dir / "options.json"
+        if options_path.exists():
+            try:
+                data = json.loads(options_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                # ValueError covers JSONDecodeError and bad UTF-8: a damaged
+                # sidecar must fall through, not fail job-status.
+                data = {}
+            # The job id check mirrors Mcp.loadOptions: a copied or renamed
+            # directory must not lend another task's glossary.
+            if (isinstance(data, dict) and data.get("schema") == OPTIONS_SCHEMA
+                    and data.get("job_id") == job.get("job_id")
+                    and isinstance(data.get("options"), dict)):
+                options = data["options"]
+        meta_path = job_dir / "meta.json"
         if meta_path.exists():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):
+                meta = {}
+            if not isinstance(meta, dict):
                 meta = {}
             # dtctl's loadMeta rejects a meta with another schema and falls
             # back to the whole job; mirror that so a corrupt index cannot
-            # silently empty the glossary on a USB mount.
-            if meta.get("schema") == META_SCHEMA:
-                if isinstance(meta.get("options"), dict):
-                    options = meta["options"]
-                else:
-                    # Old meta: only the top-level max_chars survived.  Do not
-                    # fall back to job.options here -- dtctl answers from meta,
-                    # and both transports must agree for the same job.
-                    options = {"max_chars_per_segment":
-                               meta.get("max_chars_per_segment")}
+            # silently empty the glossary on a USB mount.  A meta without
+            # options falls through to job.json's copy for the same reason.
+            if (options is None and meta.get("schema") == META_SCHEMA
+                    and isinstance(meta.get("options"), dict)):
+                options = meta["options"]
         if options is None:
             options = job.get("options")
         if not isinstance(options, dict):
             options = {}
+        # A job from before options existed only kept max_chars at meta's top
+        # level; dtctl has the same last-resort fallback.
+        if (options.get("max_chars_per_segment") is None
+                and meta.get("schema") == META_SCHEMA):
+            options = dict(options)
+            options["max_chars_per_segment"] = meta.get("max_chars_per_segment")
         return {
             "ok": True,
             "job_id": job["job_id"],

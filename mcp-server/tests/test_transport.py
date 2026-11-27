@@ -128,6 +128,54 @@ def test_local_job_status_prefers_meta_options(tmp_path: Path) -> None:
     assert status["options"]["max_chars_per_segment"] == 4500
 
 
+def test_local_job_status_reads_options_file(tmp_path: Path) -> None:
+    """New exports keep the glossary out of meta.json so listing stays cheap."""
+    device = tmp_path / "device"
+    remote_job = _write_job(device)
+    job_dir = device / "cache/dualtranslate/mcp/jobs/2026_2"
+    (job_dir / "meta.json").write_text(
+        json.dumps({"schema": "dualtranslate.job.meta.v1", "job_id": "2026_2",
+                    "total": 1, "max_chars_per_segment": 4500}),
+        encoding="utf-8",
+    )
+    (job_dir / "options.json").write_text(
+        json.dumps({"schema": "dualtranslate.job.options.v1", "job_id": "2026_2",
+                    "options": {"glossary": [{"source": "Darcy", "target": "达西"}],
+                                "style_guide": "保留段落结构",
+                                "max_chars_per_segment": 4500,
+                                "split_long_segments": True}}),
+        encoding="utf-8",
+    )
+    status = LocalTransport(KO_ROOT, str(device)).rpc(["job-status", "--job", remote_job])
+    assert status["options"]["glossary"] == [{"source": "Darcy", "target": "达西"}]
+    assert status["options"]["style_guide"] == "保留段落结构"
+    assert status["options"]["split_long_segments"] is True
+
+    # A corrupt options file must fall back to the copy in job.json instead of
+    # silently emptying the glossary (dtctl reads the same head copy).
+    (job_dir / "options.json").write_text("{not json", encoding="utf-8")
+    job_doc = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+    job_doc["options"] = {
+        "max_chars_per_segment": 4500, "split_long_segments": True,
+        "glossary": [{"source": "Lizzy", "target": "莉齐"}],
+        "style_guide": "民国白话",
+    }
+    (job_dir / "job.json").write_text(json.dumps(job_doc), encoding="utf-8")
+    status = LocalTransport(KO_ROOT, str(device)).rpc(["job-status", "--job", remote_job])
+    assert status["options"]["glossary"] == [{"source": "Lizzy", "target": "莉齐"}]
+    assert status["options"]["style_guide"] == "民国白话"
+
+    # Not JSON, not UTF-8, and not an object: every damaged shape must answer
+    # from job.json instead of failing job-status.
+    (job_dir / "options.json").write_bytes(b"\xff")
+    status = LocalTransport(KO_ROOT, str(device)).rpc(["job-status", "--job", remote_job])
+    assert status["options"]["glossary"] == [{"source": "Lizzy", "target": "莉齐"}]
+    (job_dir / "options.json").unlink()
+    (job_dir / "meta.json").write_text("[]", encoding="utf-8")
+    status = LocalTransport(KO_ROOT, str(device)).rpc(["job-status", "--job", remote_job])
+    assert status["options"]["max_chars_per_segment"] == 4500
+
+
 def test_local_rpc_refuses_write_and_escape(tmp_path: Path) -> None:
     device = tmp_path / "device"
     remote_job = _write_job(device)

@@ -216,14 +216,18 @@ end
 -- A 10k-segment job.json is ~4.7 MB and takes ~9.8 s to decode+validate on a
 -- Voyage; get-segments runs once per page, so the whole-file path was the
 -- bottleneck.  Export writes the segments array one object per line (JSON
--- allows the newlines), plus a tiny meta.json for book fields and totals.
--- Keeping the index inside job.json means one file and one write, not two.
+-- allows the newlines), plus a tiny meta.json for book fields and totals and
+-- an options.json for the glossary.  The index stays inside job.json so it is
+-- written once, not per page.
 --
 -- Measured on the device: io.lines()/read("*l") costs ~0.5-1 ms per line, so
 -- every reader below slurps the file once (~24 ms) and slices it with
 -- string.find; a page costs O(offset) characters, not O(offset) syscalls.
 -- ---------------------------------------------------------------------------
 Mcp.META_SCHEMA = "dualtranslate.job.meta.v1"
+-- options.json: the glossary/style guide that travel with the job.  Separate
+-- from meta.json so listing tasks never decodes up to 300 terms per job.
+Mcp.OPTIONS_SCHEMA = "dualtranslate.job.options.v1"
 
 function Mcp.slurp(path)
     local file = io.open(path, "rb")
@@ -372,6 +376,9 @@ function Mcp.writeJobFiles(dir, job)
         cursor = cursor + #line + 2 -- ",\n" between objects
     end
     local job_json = head .. table.concat(lines, ",\n") .. "\n]}"
+    -- options live in their own small file: meta.json is decoded once per job
+    -- every time the task list is rebuilt, and a 300-term glossary makes it
+    -- ~180 KB.  dtctl job-status and the PC both read options from here.
     local meta = {
         schema = Mcp.META_SCHEMA,
         job_id = job.job_id,
@@ -379,15 +386,21 @@ function Mcp.writeJobFiles(dir, job)
         book = job.book,
         chapter_count = #(job.chapters or {}),
         total = #job.segments,
+        -- Kept for readers of an older meta shape and for jobs whose options
+        -- file is missing (the PC can still split long segments).
         max_chars_per_segment = job.options and job.options.max_chars_per_segment,
-        -- dtctl job-status serves the PC from meta.json alone: without a copy
-        -- of options here the agent could never read the glossary without
-        -- downloading (and decoding) the whole job.json.
-        options = job.options,
         anchors = anchors,
     }
     if not Tools.mkdir_p(dir) then return false end
     if not write_file(dir .. "/job.json", job_json) then return false end
+    if type(job.options) == "table" then
+        local options = {
+            schema = Mcp.OPTIONS_SCHEMA,
+            job_id = job.job_id,
+            options = job.options,
+        }
+        if not Mcp.writeJson(dir .. "/options.json", options) then return false end
+    end
     return Mcp.writeJson(dir .. "/meta.json", meta)
 end
 
@@ -396,6 +409,23 @@ function Mcp.loadMeta(job_id)
     local data = Mcp.readJson(Mcp.jobDir(job_id) .. "/meta.json")
     if type(data) ~= "table" or data.schema ~= Mcp.META_SCHEMA then return nil end
     return data
+end
+
+-- Translation instructions for a job.  New jobs keep them in options.json;
+-- jobs exported before the split keep a copy in meta.json.  meta is accepted
+-- so job-status, which already read it, does not pay for a second decode.
+function Mcp.loadOptions(job_id, meta)
+    if not Mcp.validJobId(job_id) then return nil end
+    local data = Mcp.readJson(Mcp.jobDir(job_id) .. "/options.json")
+    if type(data) == "table" and data.schema == Mcp.OPTIONS_SCHEMA
+        and data.job_id == job_id and type(data.options) == "table" then
+        return data.options
+    end
+    meta = meta or Mcp.loadMeta(job_id)
+    if type(meta) == "table" and type(meta.options) == "table" then
+        return meta.options
+    end
+    return nil
 end
 
 -- One task as the detail dialog shows it: which book, which chapters, how far
@@ -410,6 +440,10 @@ function Mcp.jobDetail(job_id, base)
     if type(book) ~= "table" then book = {} end
     local job_state = Mcp.loadState(job_id) or {}
     local chapters = (shell and shell.chapters) or {}
+    local options = Mcp.loadOptions(job_id, meta) or (shell and shell.options)
+    local terms = type(options) == "table" and type(options.glossary) == "table"
+        and #options.glossary or 0
+    local guide = type(options) == "table" and options.style_guide or nil
     return {
         job_id = job_id,
         created_at = tonumber(meta and meta.created_at)
@@ -427,6 +461,10 @@ function Mcp.jobDetail(job_id, base)
         provider_id = job_state.provider_id,
         model_name = job_state.model_name,
         submitted = tonumber(job_state.submitted) or 0,
+        glossary_terms = terms,
+        -- Empty and "still the default" both mean the user wrote nothing.
+        style_guide_custom = type(guide) == "string" and guide ~= ""
+            and guide ~= Glossary.DEFAULT_STYLE_GUIDE or false,
     }
 end
 
@@ -603,6 +641,69 @@ function Mcp.cleanupBookJobs(book_path)
         if item.book_path == book_path then
             Tools.rmtree(Mcp.jobDir(item.job_id))
             removed = removed + 1
+        end
+    end
+    return removed
+end
+
+-- Design 10.2: a committed job keeps the whole book's source text and the
+-- user's glossary, but it has already been imported; the directory is only
+-- useful for inspection.  Drop the ones older than a week on the next
+-- successful import.  Jobs still in flight (exported/submitted) are never
+-- touched, and neither is the job this import just committed.
+Mcp.JOB_RETENTION_DAYS = 7
+
+-- Only a *finished* import is disposable: `--allow-partial` also writes
+-- "committed", but the PC still needs get-segments/submit for the missing
+-- parts, so submitted < total stays.  total == 0 (an export with no
+-- segments) is never deleted either: it costs nothing and "finished" is
+-- meaningless there.
+local function job_is_finished(job_state)
+    local submitted = tonumber(job_state.submitted)
+    local total = tonumber(job_state.total)
+    return submitted ~= nil and total ~= nil and total > 0 and submitted >= total
+end
+
+function Mcp.cleanupExpiredJobs(opts)
+    opts = opts or {}
+    local days = tonumber(opts.days) or Mcp.JOB_RETENTION_DAYS
+    local cutoff = (tonumber(opts.now) or os.time()) - days * 86400
+    local keep_id = opts.keep_job_id
+    local removed = 0
+    local ok, iterator, state = pcall(lfs.dir, Mcp.jobsDir())
+    if not ok or not iterator then return 0 end
+    -- Collect first: deleting a directory while lfs.dir walks the parent can
+    -- skip the next entry on some filesystems.
+    local names = {}
+    for name in iterator, state do names[#names + 1] = name end
+    for _, name in ipairs(names) do
+        if Mcp.validJobId(name) and name ~= keep_id
+            and lfs.attributes(Mcp.jobDir(name), "mode") == "directory" then
+            local dir = Mcp.jobDir(name)
+            local job_state = Mcp.loadState(name)
+            local stamp, disposable
+            if type(job_state) == "table" then
+                disposable = job_state.status == "committed"
+                    and job_is_finished(job_state)
+                -- updated_at is written at commit; the state file's own mtime
+                -- covers a state.json written before that field existed or one
+                -- that lost it (0 would otherwise read as "ancient").
+                stamp = tonumber(job_state.updated_at)
+                if not stamp or stamp <= 0 then
+                    stamp = lfs.attributes(dir .. "/state.json", "modification")
+                end
+            else
+                -- No readable state.json: an export that died between job.json
+                -- and state.json.  It was never importable, so the directory
+                -- mtime is all we have; leaving it forever is the leak this
+                -- cleanup exists to stop.
+                disposable = true
+                stamp = lfs.attributes(dir, "modification")
+            end
+            if disposable and stamp and stamp < cutoff
+                and Tools.rmtree(dir) then
+                removed = removed + 1
+            end
         end
     end
     return removed

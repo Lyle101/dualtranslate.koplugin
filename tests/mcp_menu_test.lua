@@ -278,7 +278,10 @@ do
         segments = { { id = "s000001", parent_id = "s000001", part = 1,
             parent_total = 1, chapter_index = 1, chapter_title = "One",
             selector = "p[1]", xpointer = "/body/p[1]", source = "Hello" } },
-        options = { max_chars_per_segment = 4500 },
+        options = { max_chars_per_segment = 4500,
+            glossary = { { source = "A", target = "甲" },
+                { source = "B", target = "乙" } },
+            style_guide = "民国白话" },
     }
     local file = assert(io.open(job_dir .. "/job.json", "wb"))
     file:write(JSON.encode(job)); file:close()
@@ -317,6 +320,8 @@ do
     check("详情含章节标题", detail:find("1. One", 1, true) ~= nil, detail)
     check("详情含进度", detail:find("0 / 1 段", 1, true) ~= nil, detail)
     check("详情含状态", detail:find("已导出", 1, true) ~= nil, detail)
+    check("详情含翻译要求",
+        detail:find("翻译要求：术语 2 条 · 风格指南自定义", 1, true) ~= nil, detail)
     check("详情有删除按钮", viewer_button(last_viewer, "删除任务") ~= nil)
     viewer_button(last_viewer, "删除任务").callback()
     check("删除后任务目录消失", Mcp.countJobs() == 0)
@@ -590,6 +595,16 @@ do
     dualtranslate.epub = fake_epub
     dualtranslate.exportMcpJob = real_export_mcp_job
 
+    -- 17 Q5: the completion message must say what editorial instructions went
+    -- out with the job, not just how many segments.
+    local Glossary = require("dualtranslate_glossary")
+    local cache_dir = dualtranslate:getBookCacheDirectory(BOOK)
+    Glossary.save(cache_dir, {
+        terms = { { source = "Darcy", target = "达西" },
+            { source = "Lizzy", target = "莉齐" } },
+        style_guide = "民国白话",
+    })
+
     notifications = {}
     dualtranslate:exportMcpJob(nil)
     check("分片次数等于章节数", slices == 3, tostring(slices))
@@ -607,6 +622,9 @@ do
     check("导出完成提示", done ~= nil, table.concat(notifications, " | "))
     check("结果来自 collected（1 段）", done and done:find("1 段", 1, true) ~= nil, tostring(done))
     check("完成提示等待轻触关闭", done and done:find("轻触屏幕", 1, true) ~= nil, tostring(done))
+    check("完成提示带术语表", done
+        and done:find("随任务写入：术语 2 条 · 风格指南自定义", 1, true) ~= nil,
+        tostring(done))
 
     -- 显式范围原样下传（不会被当成「整本」）
     dualtranslate:exportMcpJob({ { index = 2, from = "a", to = "b" } })
@@ -617,6 +635,7 @@ do
 
     dualtranslate.getBookOutline, dualtranslate.epub = real_outline, real_epub
     UIManager.scheduleIn, ProgressbarDialog.new = real_schedule, real_new
+    os.remove(cache_dir .. "/glossary.json")
 end
 
 print(string.format("\n==== 结果：%d 通过，%d 失败 ====", passed, failed))

@@ -173,6 +173,28 @@ do
         and out:find("不是 v3 overlay 目录", 1, true) ~= nil, "code=" .. tostring(code))
 end
 
+-- ============================================================
+print("== 5. 验收补齐模式 ==")
+do
+    local work = ROOT .. "/migrate_work"
+    local code, out = run("--migrate --rows 500 --runs 1 --work " .. quote(work))
+    check("--migrate 退出 0", code == 0,
+        "code=" .. tostring(code) .. " out=" .. out:sub(1, 200))
+    check("--migrate 报告行数", out:find("500 行", 1, true) ~= nil)
+    check("--migrate 报告备份复制", out:find(".bak 复制约", 1, true) ~= nil)
+    check("--migrate 清掉基准库",
+        not exists(work .. "/data/dualtranslate_cache.sqlite3"))
+
+    local memory_work = ROOT .. "/memory_work"
+    code, out = run("--memory --css-segments 60 --work " .. quote(memory_work))
+    check("--memory 退出 0", code == 0,
+        "code=" .. tostring(code) .. " out=" .. out:sub(1, 200))
+    check("--memory 三种形态", out:find("single", 1, true) ~= nil
+        and out:find("fallback-split", 1, true) ~= nil
+        and out:find("fallback-full", 1, true) ~= nil)
+    check("--memory 清掉夹具", not exists(memory_work .. "/mem"))
+end
+
 print(string.format("\n==== bench CLI 测试：%d 通过，%d 失败 ====", passed, failed))
 if failed == 0 then
     os.execute('rm -rf "' .. ROOT .. '"')
