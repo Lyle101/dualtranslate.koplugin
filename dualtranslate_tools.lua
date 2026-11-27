@@ -46,10 +46,21 @@ function Tools.mkdir_p(path)
     return util.makePath(path) == true
 end
 
+-- lfs.attributes follows symlinks; a recursive delete must not.  /mnt/us is
+-- world-writable on Kindle, so a link planted in a cache/job directory could
+-- otherwise make the plugin erase the link target (which may be the user's
+-- documents).  symlinkattributes is present in every KOReader build we ship
+-- for; the fallback keeps old builds usable.
+local function path_mode(path)
+    if lfs.symlinkattributes then return lfs.symlinkattributes(path, "mode") end
+    return lfs.attributes(path, "mode")
+end
+
 -- Recursive delete, pure Lua. Returns true when the path no longer exists.
+-- Symlinks are removed themselves, never followed (same rule as rm -rf).
 function Tools.rmtree(path)
     if not path or path == "" then return true end
-    local mode = lfs.attributes(path, "mode")
+    local mode = path_mode(path)
     if not mode then return true end
     if mode == "directory" then
         local ok, iterator, state = pcall(lfs.dir, path)
@@ -64,7 +75,7 @@ function Tools.rmtree(path)
     else
         pcall(os.remove, path)
     end
-    return lfs.attributes(path, "mode") == nil
+    return path_mode(path) == nil
 end
 
 -- Split a paragraph into request-sized chunks.  Two callers need exactly the

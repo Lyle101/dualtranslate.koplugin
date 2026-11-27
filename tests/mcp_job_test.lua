@@ -772,6 +772,45 @@ do
         lfs.attributes(no_state_fresh, "mode") ~= nil)
     check("state.json 损坏的旧目录被删", lfs.attributes(corrupt, "mode") == nil)
     check("清理计数", removed == 4, tostring(removed))
+
+    -- A symlink planted as a job id must not be followed: lfs.attributes would
+    -- report "directory", and rmtree would otherwise erase the link target
+    -- (/mnt/us is world-writable, so this is not purely theoretical).
+    if lfs.symlinkattributes then
+        local outside = ROOT .. "/outside_job"
+        Tools.mkdir_p(outside .. "/sub")
+        local keep_file = assert(io.open(outside .. "/sub/keep.txt", "wb"))
+        keep_file:write("keep"); keep_file:close()
+        Mcp.writeJson(outside .. "/state.json", { schema = Mcp.STATE_SCHEMA,
+            status = "committed", updated_at = now - 30 * 86400,
+            submitted = 10, total = 10 })
+        Mcp.writeJson(outside .. "/meta.json", { schema = Mcp.META_SCHEMA,
+            job_id = "20260101_000000_0020", total = 10, book = {} })
+        Mcp.writeJson(outside .. "/job.json", { schema = Mcp.JOB_SCHEMA,
+            job_id = "20260101_000000_0020", book = {}, chapters = {},
+            segments = {} })
+        local link = Mcp.jobDir("20260101_000000_0020")
+        os.execute('ln -s "' .. outside .. '" "' .. link .. '"')
+        if lfs.symlinkattributes(link, "mode") == "link" then
+            local before_list = #Mcp.listJobs()
+            local removed_link = Mcp.cleanupExpiredJobs{
+                now = now, keep_job_id = "20260101_000000_0013" }
+            check("符号链接任务目录不删外部内容",
+                lfs.attributes(outside .. "/sub/keep.txt", "mode") == "file"
+                and lfs.symlinkattributes(link, "mode") == "link")
+            check("符号链接任务不进任务列表", #Mcp.listJobs() == before_list)
+            check("符号链接不增加清理计数", removed_link == 0,
+                tostring(removed_link))
+            -- rmtree itself must remove the link, not walk into it.
+            Tools.rmtree(link)
+            check("rmtree 只删链接本身",
+                lfs.symlinkattributes(link, "mode") == nil
+                and lfs.attributes(outside .. "/sub/keep.txt", "mode") == "file")
+        else
+            print("  SKIP: 符号链接创建失败")
+        end
+        Tools.rmtree(outside)
+    end
     for _, dir in ipairs({ fresh, exported, current, partial, undated,
         no_state_fresh }) do
         Tools.rmtree(dir)

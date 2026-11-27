@@ -45,6 +45,19 @@ function Mcp.jobDir(job_id)
     return Mcp.jobsDir() .. "/" .. job_id
 end
 
+-- A job directory must be a real directory under jobs/.  lfs.attributes
+-- follows symlinks, and /mnt/us is world-writable, so a link planted as a job
+-- id could otherwise make listJobs read (and cleanupExpiredJobs erase) the
+-- link target.  Template reclamation uses the same rule.
+local function job_dir_is_real(job_id)
+    local dir = Mcp.jobDir(job_id)
+    if not dir then return false end
+    local mode
+    if lfs.symlinkattributes then mode = lfs.symlinkattributes(dir, "mode")
+    else mode = lfs.attributes(dir, "mode") end
+    return mode == "directory"
+end
+
 function Mcp.jobPath(job_id)
     local dir = Mcp.jobDir(job_id)
     return dir and (dir .. "/job.json") or nil
@@ -141,7 +154,7 @@ function Mcp.listJobs()
     local ok, iterator, state = pcall(lfs.dir, Mcp.jobsDir())
     if not ok or not iterator then return jobs end
     for name in iterator, state do
-        if Mcp.validJobId(name) then
+        if Mcp.validJobId(name) and job_dir_is_real(name) then
             local meta = Mcp.loadMeta(name)
             local row
             local total = meta and tonumber(meta.total)
@@ -638,7 +651,7 @@ function Mcp.cleanupBookJobs(book_path)
     if type(book_path) ~= "string" or book_path == "" then return 0 end
     local removed = 0
     for _, item in ipairs(Mcp.listJobs()) do
-        if item.book_path == book_path then
+        if item.book_path == book_path and job_dir_is_real(item.job_id) then
             Tools.rmtree(Mcp.jobDir(item.job_id))
             removed = removed + 1
         end
@@ -678,7 +691,7 @@ function Mcp.cleanupExpiredJobs(opts)
     for name in iterator, state do names[#names + 1] = name end
     for _, name in ipairs(names) do
         if Mcp.validJobId(name) and name ~= keep_id
-            and lfs.attributes(Mcp.jobDir(name), "mode") == "directory" then
+            and job_dir_is_real(name) then
             local dir = Mcp.jobDir(name)
             local job_state = Mcp.loadState(name)
             local stamp, disposable
