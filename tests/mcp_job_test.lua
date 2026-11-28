@@ -865,6 +865,63 @@ do
 end
 
 -- ============================================================
+print("== 4c. 父目录（cache / cache/dualtranslate）是符号链接 ==")
+do
+    if not lfs.symlinkattributes then
+        print("  SKIP: 平台没有 symlinkattributes")
+    else
+        local function with_link(target, label, verify)
+            local real = target .. ".real"
+            -- A previous interrupted run may have left the link in place and
+            -- the real tree at ".real"; restore that first, never rmtree the
+            -- real tree just because lfs.attributes follows the link.
+            if lfs.symlinkattributes(target, "mode") == "link" then
+                os.remove(target)
+                if lfs.attributes(real, "mode") == "directory"
+                    and not lfs.attributes(target, "mode") then
+                    assert(os.rename(real, target))
+                end
+            end
+            Tools.rmtree(real)
+            if lfs.attributes(target, "mode") ~= "directory" then
+                print("  SKIP: " .. label .. " 不存在")
+                return
+            end
+            assert(os.rename(target, real))
+            os.execute('ln -s "' .. real .. '" "' .. target .. '"')
+            if lfs.symlinkattributes(target, "mode") ~= "link" then
+                os.remove(target)
+                assert(os.rename(real, target))
+                print("  SKIP: 符号链接创建失败")
+                return
+            end
+            local ok, err = pcall(verify)
+            -- os.remove 删链接本身，不会跟进真实目录。
+            os.remove(target)
+            assert(os.rename(real, target))
+            if not ok then error(err, 0) end
+        end
+        with_link(data_dir .. "/cache", "cache", function()
+            check("cache 链接：jobsRootIsLink", Mcp.jobsRootIsLink() == true)
+            check("cache 链接：listJobs 为空", #Mcp.listJobs() == 0)
+            check("cache 链接：countJobs 为 0", Mcp.countJobs() == 0)
+            check("cache 链接：cleanup 不执行",
+                Mcp.cleanupExpiredJobs{ now = os.time() } == 0)
+        end)
+        with_link(data_dir .. "/cache/dualtranslate", "cache/dualtranslate", function()
+            check("dualtranslate 链接：jobsRootIsLink", Mcp.jobsRootIsLink() == true)
+            check("dualtranslate 链接：listJobs 为空", #Mcp.listJobs() == 0)
+            check("dualtranslate 链接：countJobs 为 0", Mcp.countJobs() == 0)
+        end)
+        with_link(data_dir .. "/cache/dualtranslate/mcp", "cache/dualtranslate/mcp", function()
+            check("mcp 链接：jobsRootIsLink", Mcp.jobsRootIsLink() == true)
+            check("mcp 链接：listJobs 为空", #Mcp.listJobs() == 0)
+            check("mcp 链接：countJobs 为 0", Mcp.countJobs() == 0)
+        end)
+    end
+end
+
+-- ============================================================
 print("== 5. 临时目录清理 ==")
 do
     local leftovers = {}

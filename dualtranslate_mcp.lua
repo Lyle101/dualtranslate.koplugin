@@ -58,16 +58,36 @@ local function job_dir_is_real(job_id)
     return mode == "directory"
 end
 
--- The jobs root itself gets the same treatment: a link planted over it
--- redirects every job read -- and the 7-day retention deletes -- at the link
--- target.  Missing is fine (the first export creates it); a link is refused.
--- Exported for dtctl, which must apply the same rule before put/import.
+-- The jobs root and every directory between it and the data directory get
+-- the same treatment: a link planted over jobs/ -- or over cache/ or
+-- cache/dualtranslate/ -- redirects every job read and the 7-day retention
+-- at the link target.  Checking only the last component left those parents
+-- free to be swapped.  Missing is fine (the first export creates it); a link
+-- is refused.  Exported for dtctl, which must apply the same rule before
+-- put/import.  A user who wants the cache on another volume should move the
+-- KOReader data directory instead: fail-closed is deliberate here, because
+-- /mnt/us is world-writable.
 function Mcp.jobsRootIsLink()
-    local root = Mcp.jobsDir()
-    if lfs.symlinkattributes then
-        return lfs.symlinkattributes(root, "mode") == "link"
+    local cache = DataStorage:getDataDir() .. "/cache"
+    local dualtranslate = cache .. "/dualtranslate"
+    for _, path in ipairs({
+        cache, dualtranslate, dualtranslate .. "/mcp", Mcp.jobsDir(),
+    }) do
+        if lfs.symlinkattributes and lfs.symlinkattributes(path, "mode") == "link" then
+            return true
+        end
     end
     return false
+end
+
+-- The menu shows 0 jobs when the root is unsafe; a one-line log entry is the
+-- only clue short of opening the export dialog.  Log once per process, not on
+-- every menu rebuild.
+local warned_jobs_root = false
+local function warn_unsafe_jobs_root()
+    if warned_jobs_root then return end
+    warned_jobs_root = true
+    logger.warn("dualtranslate: MCP jobs root is behind a symlink; job access is disabled")
 end
 
 function Mcp.jobPath(job_id)
@@ -169,7 +189,10 @@ end
 -- 646-chapter book.  Directories without a usable meta.json (jobs exported
 -- before the index layout) still take the whole-file path.
 function Mcp.listJobs()
-    if Mcp.jobsRootIsLink() then return {} end
+    if Mcp.jobsRootIsLink() then
+        warn_unsafe_jobs_root()
+        return {}
+    end
     local jobs = {}
     local ok, iterator, state = pcall(lfs.dir, Mcp.jobsDir())
     if not ok or not iterator then return jobs end
@@ -227,7 +250,10 @@ end
 -- Counting only needs valid directory names; the menu renders on every open
 -- and must not parse every job.json just to show "(N)".
 function Mcp.countJobs()
-    if Mcp.jobsRootIsLink() then return 0 end
+    if Mcp.jobsRootIsLink() then
+        warn_unsafe_jobs_root()
+        return 0
+    end
     local count = 0
     local ok, iterator, state = pcall(lfs.dir, Mcp.jobsDir())
     if not ok or not iterator then return 0 end
@@ -594,6 +620,7 @@ function Mcp.exportJob(opts)
     -- source text) inside whatever the link points at.
     if Mcp.jobsRootIsLink() then
         return nil, "任务目录 cache/dualtranslate/mcp/jobs 是符号链接，已拒绝导出"
+            .. "（如需把缓存放到别的卷，请改 KOReader 数据目录，不要给缓存目录做链接）"
     end
     -- Required lazily: Epub is also required by the reader, and the MCP
     -- module must stay loadable from dtctl without UI modules.  The reader
@@ -712,7 +739,10 @@ local function job_is_finished(job_state)
 end
 
 function Mcp.cleanupExpiredJobs(opts)
-    if Mcp.jobsRootIsLink() then return 0 end
+    if Mcp.jobsRootIsLink() then
+        warn_unsafe_jobs_root()
+        return 0
+    end
     opts = opts or {}
     local days = tonumber(opts.days) or Mcp.JOB_RETENTION_DAYS
     local cutoff = (tonumber(opts.now) or os.time()) - days * 86400

@@ -4,17 +4,18 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | 0.17（v3.3.1：符号链接误删修复、术语表跨书复用、迁移提示与基线参数化） |
-| 日期 | 2026-11-27 |
-| 适用代码 | DualTranslate `v3.3.1`（P0–P3 已合入；P4 的 CI、orphan 边界、性能基准、模板回收已落地；Q5 已发布并补跨书工具） |
-| 目标版本 | `v3.3.1`：多服务 + 章节选择 + MCP 外部翻译（P3）+ 术语表；设备端收件箱已移除 |
-| 状态 | P0–P3 已实施（SSH 双 key + elicitation + 列表项 + 父项译文对齐 + 引擎失败降级；设备端收件箱已移除）；P4 已落地：GitHub Actions（Lua 套件 + MCP server 的 pytest）、reconcile 遇读不到 mtime 的 orphan 不再删除、`tools/bench.lua` 与 `docs/PERF.md`、CSS 模板磁盘回收；`Q5 术语表/风格指南` 已发布（每书每语言 `glossary.json` → `job.options` → `options.json` → `dtctl job-status` / `dt_get_job`），3.3.1 增加默认术语表、跨书复制与随书文件导入/导出；MCP 任务目录 7 天保留已实现；3.3.1 修复 `rmtree` 跟随符号链接、补 jobs 根与 dtctl 路径检查，手工分批导入按累计覆盖收口；§15.4 的 DB 迁移目标改为「100k 行 < 2 min」，升级前显示提示；512 MB 设备的关书 RSS 回落已 A/B（PERF §8.6：换书回落 15.5 MB、A/B 循环无增长）；`entries` ndjson 与按章 CSS 明确不做 |
+| 文档版本 | 0.18（v3.4.0：父目录链接与 `.tmp` 硬化、PC 端 per-provider 缓冲、按语言默认术语表） |
+| 日期 | 2026-11-28 |
+| 适用代码 | DualTranslate `v3.4.0`（未发布；P0–P3 已合入；P4 的 CI、orphan 边界、性能基准、模板回收已落地；Q5 已发布并补跨书工具） |
+| 目标版本 | `v3.4.0`：多服务 + 章节选择 + MCP 外部翻译（P3）+ 术语表；设备端收件箱已移除 |
+| 状态 | P0–P3 已实施（SSH 双 key + elicitation + 列表项 + 父项译文对齐 + 引擎失败降级；设备端收件箱已移除）；P4 已落地：GitHub Actions（Lua 套件 + MCP server 的 pytest）、reconcile 遇读不到 mtime 的 orphan 不再删除、`tools/bench.lua` 与 `docs/PERF.md`、CSS 模板磁盘回收；`Q5 术语表/风格指南` 已发布（每书每语言 `glossary.json` → `job.options` → `options.json` → `dtctl job-status` / `dt_get_job`），3.3.1 增加默认术语表、跨书复制与随书文件导入/导出；MCP 任务目录 7 天保留已实现；3.3.1 修复 `rmtree` 跟随符号链接、补 jobs 根与 dtctl 路径检查，手工分批导入按累计覆盖收口；§15.4 的 DB 迁移目标改为「100k 行 < 2 min」，升级前显示提示；512 MB 设备的关书 RSS 回落已 A/B（PERF §8.6：换书回落 15.5 MB、A/B 循环无增长）；3.4.0 起任务目录拒绝任何一级父目录链接，`.tmp` 原子写在 POSIX 上用 `O_NOFOLLOW`，PC 端未提交译文按 provider 分开保存，默认术语表按目标语言分开；`entries` ndjson 与按章 CSS 明确不做 |
 | 代码状态 | 全部有回归测试，CI 自 `4d60e58` 起每次 push 跑全套（30 个功能套件，不含 `fulltest/loadtest` 聚合器与可选的 `smoke_live`；外加 MCP server 的 pytest） |
 
 **修订记录**
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 0.18 | 2026-11-28 | v3.4.0：`Mcp.jobsRootIsLink` 逐级检查 `cache`、`cache/dualtranslate`、`mcp` 与 `jobs`（父目录链接不再被跟随）；`Tools.open_temp` 在 Linux/macOS/BSD 用 `O_CREAT|O_TRUNC|O_NOFOLLOW`，二次 ELOOP 直接失败，关闭 `.tmp` 的 TOCTOU；PC 端未提交译文改为每 provider 一份 `translations.<provider>.json`，旧 `translations.json` 按 `state.provider_id` 迁移，换模型保留各自进度；默认术语表改为 `glossary.default.<lang>.json`，旧共用文件只作为读回退并标注；迁移提示补充「界面可能短暂无响应」，仍为前台一次性迁移 |
 | 0.17 | 2026-11-27 | v3.3.1：`Tools.rmtree` 改用 `symlinkattributes`（链接只删链接本身），任务目录根、job 目录与 dtctl 读取路径拒绝符号链接，原子写的 `.tmp` 打开前先移走同名链接；手工分批导入按任务自己的 `imported.txt`（按 provider 分组的 JSON，记录已提交 segment id）计算累计覆盖，`state.submitted` 写累计值；DB 迁移前 `Cache:peekSchema` 只读判断并显示「正在升级译文缓存…」提示，§15.4 目标改为 100k 行 < 2 min；术语表工具（默认/跨书复制/导出导入）；模板回收 deferred 时 60 s 补扫；`bench.lua --baseline` 自动生成 20% 判据表；补 recover_stash 双副本损坏用例 |
 | 0.16 | 2026-11-27 | v3.3.0：术语表/风格指南与模板回收发布；`options` 从 `meta.json` 拆到 `options.json`（列表不再逐条解码术语表，`job-status` / `LocalTransport` 先读它，再回退旧 job）；`Mcp.cleanupExpiredJobs` 在导入成功时删除 7 天前**已全部导入**的任务（跳过当前任务、部分导入与未完成任务）；术语表加固（`recover_stash` 只认普通文件、`unstash` 在 `mkdir` 失败时把内存字节停到 keep、损坏文件在编辑器里告警、目录冒充/不可读/恢复失败补测试）；任务详情与导出完成提示「术语 N 条 · 风格指南自定义」；`tools/bench.lua` 增加 `--migrate` / `--memory`，新增 `tools/probe_picker.lua`，PERF §8 收口 §15.4 剩余项（选择器打开 61.2 ms、真 83 章书 448 ms、三服务增量 7.5 MB、相对 v3.2.2 −0.2%～+2.1%，迁移 100k 行 91–104 s 未达标） |
 | 0.15 | 2026-11-26 | Q5 术语表/风格指南（未发版）：新增 `dualtranslate_glossary.lua`，每书+每目标语言一份 `glossary.json`（`terms[{source,target}]` + `style_guide`），与 manifest 分离，编辑不 bump revision、不重建模板、不触发重载；菜单「MCP 外部翻译 → 术语表… / 风格指南…」全屏编辑，`原文=译文` 逐行解析（空行忽略、重复原文后写覆盖、全角等号/全角空格、单条 200/400 字节、整表 300 条）；「删除本书全部译文」把 `glossary.json` 原子改名到目录旁再恢复（用户手写内容，不是译文产物；恢复失败则保留目录），损坏文件先留 `.corrupt` 备份；导出把两者写入 `job.options`，`meta.json` 同步一份，`dtctl job-status` 与 `dt_get_job` 返回固定形状（老 job 返回空术语表），工具说明要求 Agent 遵守；新增 `tests/glossary_test.lua`（47 项）与 dtctl/pytest 断言；`Overlay.reclaimCssTemplates` 的路径比较折叠重复 `/` |
@@ -1625,7 +1626,8 @@ book_root = "/mnt/us/documents"
 
 - 每次最多 100 段；单段最多 20,000 字符。
 - 校验 `id` 属于该 job、`text` 非空、无 NUL、长度合理。
-- Server 在**本地工作副本**中合并去重 `result.partial.json`，再经写入 key 的 `dtctl put`（stdin）上传覆盖设备端同名文件，并同步上传 `state.json`；返回 `accepted/rejected/remaining`。设备端没有 SFTP 写权限，上传只有这一条通道（见 10.5）。
+- Server 在**本地工作副本**中按 provider 合并去重（`translations.<provider>.json`），`dt_submit_translations` 只把进度同步到设备端 `state.json`；`dt_commit_job` 才生成 `result.json`，经写入 key 的 `dtctl put`（stdin）上传后执行 `dtctl import`。设备端没有 SFTP 写权限，上传只有这一条通道（见 10.5）。
+- 本地工作副本按 provider 分开（3.4.0）：`translations.<provider>.json`，未确认模型前先用 `translations.unconfirmed.json`，首次确认时并入该 provider。换模型不会把旧模型未提交的文字当成新模型的产出，也不会丢旧模型的工作；换回来仍能看到原进度。3.3.x 的单份 `translations.json` 在第一次访问时按设备 `state.provider_id` 归位，没有确认过则进入待确认缓冲区。
 - 支持 Agent 分多次提交，避免上下文/请求过大。
 
 `dt_commit_job` 输入：
@@ -1832,8 +1834,8 @@ logger.dbg, logger.info, logger.warn, logger.err = to_stderr("DBG"), to_stderr("
 
 **参数与路径校验（必须在 dtctl 内做，不能只靠 MCP Server）：**
 
-- `--job` / `--result` 必须位于 `mcp/jobs/<job_id>/` 下；`job_id` 匹配 `^[0-9A-Za-z_-]+$`；`realpath` 后仍在该目录内（防 `..` 与符号链接逃逸）。
-- `put` 的 `--name` 只允许 `state.json` / `result.partial.json` / `result.json`；stdin 内容必须是合法 JSON 且不超过 50MB；写入持 per-job 锁，临时文件 + rename。
+- `--job` / `--result` 必须位于 `mcp/jobs/<job_id>/` 下；`job_id` 匹配 `^[0-9A-Za-z_-]+$`；`realpath` 后仍在该目录内（防 `..` 与符号链接逃逸）。3.4.0 起 `Mcp.jobsRootIsLink` 逐级检查 `cache`、`cache/dualtranslate`、`mcp` 与 `jobs`：任何一级是链接都拒绝，避免只检查最后一级时父目录被替换。
+- `put` 的 `--name` 只允许 `state.json` / `result.partial.json` / `result.json`；stdin 内容必须是合法 JSON 且不超过 50MB；写入持 per-job 锁，临时文件 + rename。临时文件用 `O_CREAT|O_TRUNC|O_NOFOLLOW` 打开（Linux/macOS/BSD；无 FFI 时退回先删链接再打开），`.tmp` 被植入链接时不会再截断目标。
 - `job.book.device_path` 必须位于 `book_root` 下，且与 `--book`（若传）一致；拒绝空值或 `/`。
 - `--provider` 必须匹配 provider_id 文法；`--target` 必须在语言白名单内；`touch-reload --op` 必须在 `import|delete|display|refresh` 内。
 - 校验失败：stdout 输出 `{"ok":false,"code":"INVALID_ARGUMENT",...}`，退出码 2，不写任何文件。
@@ -2343,7 +2345,10 @@ v1.2.11 不认识 v3 DB/overlay。降级需要：
 > DB v3 迁移 100k 行 91–104 s（墙钟减去 CPU 与复制约 76–88 s 是 eMMC/FUSE 页写等待，
 > 提高 page cache 与排序插入都没有改善）。迁移只在升级时发生一次，3.3.1 已把该行目标改为
 > 「100k 行 < 2 min」，并在启动迁移前显示提示（`Cache:peekSchema` 只读判断 → 提示 →
-> `initSchema` → 关闭提示），见 PERF §8.2 的取舍说明。
+> `initSchema` → 关闭提示），见 PERF §8.2 的取舍说明。3.4.0 的结论是**保留前台一次性
+> 迁移**：2 分钟目标已达标，瓶颈是 eMMC 页写而不是 SQL（继续优化 100k 行的 SQL 没有
+> 收益）；后台迁移需要子进程 + 状态轮询 + 队列等待，风险高于收益。提示里补充「升级
+> 期间界面可能短暂无响应，这是正常的」，后台迁移与进度条留作后续增强。
 
 ### 15.5 验收矩阵
 
@@ -2468,8 +2473,11 @@ SSH 直连、MCP elicitation、自动刷新作为第二阶段增强。这样即�
 > 每目标语言的 `glossary.json`（与 manifest 分离），导出注入 `options` 并单独写
 > `options.json`，`dtctl job-status` 与 PC 的 `dt_get_job` 都返回固定形状（老 job 为空），
 > 工具说明要求 Agent 遵守。3.3.1 的「术语表工具…」支持存为默认、载入默认、从其他书
-> 复制、导出到书旁 `<书名>.dualtranslate-glossary.json` 与从书旁文件导入；默认术语表
-> 在 `cache/dualtranslate/glossary.default.json`，不属于任何书的缓存目录。
+> 复制、导出到书旁 `<书名>.dualtranslate-glossary.json` 与从书旁文件导入；3.4.0 起默认
+> 术语表按目标语言分别保存为 `cache/dualtranslate/glossary.default.<lang>.json`（语言
+> 代码经过文件名净化），读取时缺当前语言文件会回退到旧版共用的
+> `glossary.default.json` 并在确认框标注「旧版共用默认」；损坏的当前语言文件不回退。
+> 默认表不属于任何书的缓存目录。
 > Q3 仍不做。
 
 1. 用户的 Kindle 是否已具备 SSH/USBNetwork？若没有，R2 先按「USB 收件箱 + 插件导入」交付。

@@ -1107,6 +1107,9 @@ function dualtranslate:showGlossaryToolsDialog(menu)
     local book_path = self:currentBookPath()
     if not book_path then return end
     local dir = self:getBookCacheDirectory(book_path)
+    -- Defaults are per target language (3.4.0): the same translator's terms
+    -- for a Chinese translation should not be loaded into every language.
+    local target_lang = self:getTargetLang()
     local dialog
     local function close() UIManager:close(dialog) end
     local function note(message)
@@ -1124,31 +1127,35 @@ function dualtranslate:showGlossaryToolsDialog(menu)
             note(_("本书还没有术语，先在「术语表…」里填写"))
             return
         end
-        local saved, err = Glossary.saveDefault(current)
+        local saved, err = Glossary.saveDefault(current, target_lang)
         if not saved then
             note(_("保存默认术语表失败：") .. tostring(err))
             return
         end
-        applied(string.format(_("已把本书术语表存为默认（%d 条，含风格指南）"),
-            #saved.terms))
+        applied(string.format(
+            _("已把本书术语表存为默认（%d 条，含风格指南，目标语言：%s）"),
+            #saved.terms, tostring(target_lang)))
     end
 
     local function load_default()
-        local payload, err = Glossary.loadDefault()
+        local payload, err, code = Glossary.loadDefault(target_lang)
         if not payload then
-            if tostring(err):find("找不到文件") then
-                note(_("还没有默认术语表：先在某本书里「存为默认术语表」。"))
+            if code == "missing" then
+                note(string.format(
+                    _("还没有 %s 的默认术语表：先在某本书里「存为默认术语表」。"),
+                    tostring(target_lang)))
             else
                 note(_("默认术语表不可读：") .. tostring(err))
             end
             return
         end
         local current = Glossary.load(dir)
+        local legacy_note = payload.legacy_default and _("（旧版共用默认）") or ""
         local confirm
         confirm = ButtonDialog:new{
             title = string.format(
-                _("用默认术语表覆盖本书？\n默认：%d 条术语 + 风格指南\n本书现有：%d 条术语"),
-                #payload.terms, #current.terms),
+                _("用默认术语表覆盖本书？\n默认%s：%d 条术语 + 风格指南\n本书现有：%d 条术语"),
+                legacy_note, #payload.terms, #current.terms),
             buttons = {{
                 {
                     text = _("取消"),
@@ -1163,8 +1170,9 @@ function dualtranslate:showGlossaryToolsDialog(menu)
                             note(_("载入默认术语表失败：") .. tostring(save_err))
                             return
                         end
-                        applied(string.format(_("已载入默认术语表（%d 条，含风格指南）"),
-                            #saved.terms))
+                        applied(string.format(
+                            _("已载入 %s 的默认术语表%s（%d 条，含风格指南）"),
+                            tostring(target_lang), legacy_note, #saved.terms))
                     end,
                 },
             }},
@@ -1269,7 +1277,8 @@ function dualtranslate:showGlossaryToolsDialog(menu)
     end
 
     dialog = ButtonDialog:new{
-        title = _("术语表工具\n在书之间复用术语：默认术语表、跨书复制、随书文件导出/导入。"
+        title = _("术语表工具\n在书之间复用术语：默认术语表（按目标语言分开保存）、"
+            .. "跨书复制、随书文件导出/导入。"
             .. "复制、导入与载入默认会先确认；导出会覆盖书旁同名文件。"),
         buttons = {
             {

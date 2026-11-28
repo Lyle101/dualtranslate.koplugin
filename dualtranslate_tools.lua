@@ -46,17 +46,136 @@ function Tools.mkdir_p(path)
     return util.makePath(path) == true
 end
 
--- Scratch handle for an atomic rewrite through "<path>.tmp".  On Kindle
--- /mnt/us is a world-writable FUSE mount, so a link pre-planted at the
--- scratch path would make io.open(..., "wb") truncate its target.  Remove a
--- link first (a regular stale tmp is simply overwritten), then open.
--- Returns the handle and the temporary path; callers rename it into place.
+-- A scratch handle that never follows a link.  On Kindle /mnt/us is a
+-- world-writable FUSE mount, so a link planted at "<path>.tmp" would make
+-- io.open(..., "wb") truncate its target.  Removing the link first left a
+-- TOCTOU window; O_NOFOLLOW closes it.  Platforms without O_NOFOLLOW (or
+-- without LuaJIT FFI) fall back to the old remove-then-open behavior.
+local ffi_ok, ffi = pcall(require, "ffi")
+local C = ffi_ok and ffi.C or nil
+local OPEN_FLAGS
+if ffi_ok and C then
+    -- O_* values are macros, not exported symbols, and differ per OS.
+    if ffi.os == "Linux" or ffi.os == "Android" then
+        OPEN_FLAGS = { wr = 1, creat = 64, trunc = 512, nofollow = 131072, eloop = 40 }
+    elseif ffi.os == "OSX" then
+        OPEN_FLAGS = { wr = 1, creat = 512, trunc = 1024, nofollow = 256, eloop = 62 }
+    elseif ffi.os == "BSD" then
+        OPEN_FLAGS = { wr = 1, creat = 512, trunc = 1024, nofollow = 256, eloop = 62 }
+    end
+end
+local open_declared = false
+if OPEN_FLAGS then
+    -- A duplicate declaration is harmless: some other module may have
+    -- declared the same symbols already, and then the calls below still work.
+    pcall(ffi.cdef, [[
+        int open(const char *pathname, int flags, ...);
+        long write(int fd, const void *buf, unsigned long count);
+        int close(int fd);
+    ]])
+    local ok_open = pcall(function() return C.open end)
+    local ok_write = pcall(function() return C.write end)
+    local ok_close = pcall(function() return C.close end)
+    open_declared = ok_open and ok_write and ok_close
+end
+if open_declared and (ffi.os == "Linux" or ffi.os == "Android") then
+    -- The numeric value of O_NOFOLLOW is not stable across kernel ABIs:
+    -- old 32-bit ARM kernels use 0100000 (0x8000), while the asm-generic
+    -- value is 0400000 (0x20000).  Guessing wrong silently follows the link,
+    -- so probe the running kernel with a read-only open of /proc/self/exe
+    -- (itself a symlink).  A wrong value may open the target read-only; that
+    -- changes nothing.  If neither value gives ELOOP, disable the FFI path
+    -- rather than pretend to be safe.
+    local function probe(flag)
+        local fd = C.open("/proc/self/exe", flag) -- O_RDONLY
+        if fd >= 0 then
+            C.close(fd)
+            return false
+        end
+        return ffi.errno() == OPEN_FLAGS.eloop
+    end
+    if not probe(OPEN_FLAGS.nofollow) then
+        local alternate = OPEN_FLAGS.nofollow == 131072 and 32768 or 131072
+        if probe(alternate) then
+            OPEN_FLAGS.nofollow = alternate
+        else
+            open_declared = false
+        end
+    end
+end
+
+-- Minimal file object for the FFI path: callers only use write()/close(),
+-- exactly what open_temp promises.  (io.open's handle cannot be constructed
+-- from a raw descriptor in pure Lua.)
+local CFile = {}
+CFile.__index = CFile
+
+function CFile:write(data)
+    if self.closed then return nil end
+    local length = #data
+    local offset = 1
+    while offset <= length do
+        local chunk = data:sub(offset, offset + 65535)
+        local written = C.write(self.fd, chunk, #chunk)
+        if written ~= #chunk then return nil end
+        offset = offset + #chunk
+    end
+    return self
+end
+
+function CFile:close()
+    if self.closed then return true end
+    self.closed = true
+    return C.close(self.fd) == 0
+end
+
+-- Returns a handle + temporary path, or nil + temporary path.  A second
+-- ELOOP (a link re-planted between the unlink and the retry) is refused
+-- instead of falling back to a following open.
+local function open_no_follow(temporary)
+    local flags = OPEN_FLAGS.wr + OPEN_FLAGS.creat + OPEN_FLAGS.trunc
+        + OPEN_FLAGS.nofollow
+    -- The mode is a vararg: a plain Lua number would be passed as a double,
+    -- and open() would create the file with mode 0000.  Cast to int.  0666
+    -- matches io.open; the process umask still applies.
+    local mode = ffi.cast("int", 438) -- 0666
+    local fd = C.open(temporary, flags, mode)
+    if fd >= 0 then
+        return setmetatable({ fd = fd }, CFile)
+    end
+    if ffi.errno() ~= OPEN_FLAGS.eloop then return nil end
+    os.remove(temporary)
+    fd = C.open(temporary, flags, mode)
+    if fd >= 0 then
+        return setmetatable({ fd = fd }, CFile)
+    end
+    if ffi.errno() == OPEN_FLAGS.eloop then return nil, true end
+    return nil
+end
+
 function Tools.open_temp(path, mode)
+    mode = mode or "wb"
     local temporary = path .. ".tmp"
+    -- Atomic replacement is always a full rewrite; other modes would need
+    -- io.open and its follow-the-link behavior, so refuse them outright.
+    if mode ~= "wb" then return nil, temporary end
+    if open_declared then
+        local handle, refused = open_no_follow(temporary)
+        if handle then return handle, temporary end
+        if refused then return nil, temporary end
+        -- A non-ELOOP failure means the filesystem or the process denied the
+        -- open; the fallback below may still work, but never through a link.
+        if lfs.symlinkattributes
+            and lfs.symlinkattributes(temporary, "mode") == "link" then
+            return nil, temporary
+        end
+    end
+    -- No FFI (or no O_NOFOLLOW support): remove a planted link first (a
+    -- regular stale tmp is simply overwritten), then open.
     if lfs.symlinkattributes and lfs.symlinkattributes(temporary, "mode") == "link" then
         os.remove(temporary)
     end
-    return io.open(temporary, mode or "wb"), temporary
+    return io.open(temporary, mode), temporary
 end
 
 -- lfs.attributes follows symlinks; a recursive delete must not.  /mnt/us is

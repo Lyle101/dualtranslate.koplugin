@@ -45,7 +45,7 @@ function dualtranslate:init()
     if schema_state == "v2" then
         local InfoMessage = require("ui/widget/infomessage")
         upgrade_notice = InfoMessage:new{
-            text = _("正在升级译文缓存…\n\n首次升级需要约 1–2 分钟，请不要退出 KOReader。\n旧数据已备份；升级完成后此提示会自动关闭。"),
+            text = _("正在升级译文缓存…\n\n首次升级需要约 1–2 分钟，升级期间界面可能短暂无响应，这是正常的。\n请不要退出 KOReader；旧数据已备份，升级完成后此提示会自动关闭。"),
             timeout = nil,
         }
         UIManager:show(upgrade_notice)

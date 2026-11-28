@@ -11,7 +11,11 @@ cannot commit it: the plugin has no device-side import any more.
 
 from __future__ import annotations
 
+import functools
 import json
+import os
+import re
+import threading
 from pathlib import Path
 
 from .config import Config
@@ -27,12 +31,45 @@ from .models import (
 from .transport import HeadlessUnavailable, Transport, TransportError
 
 
+# The local buffer before a model is confirmed.  It is adopted by the first
+# confirmed provider; a provider_id cannot equal this because the device
+# grammar only allows system / microsoft_free / mcp:<slug>.
+PENDING_PROVIDER = "unconfirmed"
+LEGACY_PARTIAL_NAME = "translations.json"
+
+
+def _per_job_lock(method):
+    """Serialize the read-modify-write paths for one job (design 10.3).
+
+    The tools run on a thread pool, and the local buffer is also touched by
+    read-only tools (legacy adoption).  An RLock lets the write methods call
+    the locked helpers without deadlocking.
+    """
+
+    @functools.wraps(method)
+    def wrapped(self, job_id, *args, **kwargs):
+        with self._job_lock(job_id):
+            return method(self, job_id, *args, **kwargs)
+
+    return wrapped
+
+
 class JobService:
     def __init__(self, config: Config, transport: Transport):
         self.config = config
         self.transport = transport
         self.cache_dir = config.work_dir / "jobs"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._locks: dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _job_lock(self, job_id: str) -> threading.RLock:
+        with self._locks_guard:
+            lock = self._locks.get(job_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._locks[job_id] = lock
+            return lock
 
     # -- paths ---------------------------------------------------------------
 
@@ -44,8 +81,18 @@ class JobService:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _partial_path(self, job_id: str) -> Path:
-        return self._work_dir(job_id) / "translations.json"
+    @staticmethod
+    def _partial_name(provider_id: str) -> str:
+        # provider ids are constrained on the device, but this is also the
+        # only place a PC-side value becomes a file name; keep it flat.
+        key = re.sub(r"[^0-9A-Za-z._-]+", "_", provider_id or "")
+        return f"translations.{key or PENDING_PROVIDER}.json"
+
+    def _partial_path(self, job_id: str, provider_id: str) -> Path:
+        return self._work_dir(job_id) / self._partial_name(provider_id)
+
+    def _legacy_partial_path(self, job_id: str) -> Path:
+        return self._work_dir(job_id) / LEGACY_PARTIAL_NAME
 
     def _rpc(self, argv: list[str], stdin: bytes | None = None) -> dict:
         return self.transport.rpc(argv, stdin)
@@ -110,19 +157,124 @@ class JobService:
         self._save_state_local(job_id, state)
         self._upload_state(job_id, state)
 
-    def _load_partial(self, job_id: str) -> dict[str, str]:
-        path = self._partial_path(job_id)
+    @staticmethod
+    def _read_partial_file(path: Path) -> dict[str, str]:
         if not path.exists():
             return {}
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        # Any other OSError must reach the caller: a transient unreadable
+        # buffer that reads as {} would let the next submit overwrite every
+        # translation it could not see.
+        try:
+            data = json.loads(raw)
         except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
             return {}
         return {str(key): str(value) for key, value in data.items()}
 
-    def _save_partial(self, job_id: str, translations: dict[str, str]) -> None:
-        path = self._partial_path(job_id)
-        path.write_text(json.dumps(translations, ensure_ascii=False), encoding="utf-8")
+    @staticmethod
+    def _read_partial_for_migration(path: Path) -> dict[str, str] | None:
+        """Read a buffer for a merge; None means unreadable or corrupt.
+
+        Migration must never delete bytes it could not understand, and a
+        read-only work dir must not turn a read-only tool into an error.
+        """
+        if not path.exists():
+            return {}
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return {str(key): str(value) for key, value in data.items()}
+
+    @staticmethod
+    def _write_partial_file(path: Path, translations: dict[str, str]) -> None:
+        """Atomically replace a buffer; a crash must not leave half JSON."""
+        raw = json.dumps(translations, ensure_ascii=False)
+        temporary = path.with_name(path.name + ".tmp")
+        try:
+            temporary.write_text(raw, encoding="utf-8")
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+
+    def _current_provider(self, job_id: str) -> str:
+        provider_id = self.load_state(job_id).get("provider_id")
+        if isinstance(provider_id, str) and provider_id.strip():
+            return provider_id
+        return PENDING_PROVIDER
+
+    @_per_job_lock
+    def _adopt_legacy_partial(self, job_id: str, provider_id: str) -> None:
+        """Move a pre-3.4 single translation buffer to its provider's file.
+
+        Old builds kept one ``translations.json`` per job.  The device state
+        says which model wrote it, so it must be adopted before any provider
+        starts reading, or the first per-provider load silently loses it.
+        Called from read paths too: a failure leaves the legacy file exactly
+        where it is (the next write retries) instead of failing a status read.
+        """
+        legacy = self._legacy_partial_path(job_id)
+        try:
+            if not legacy.exists():
+                return
+            legacy_data = self._read_partial_for_migration(legacy)
+            if legacy_data is None:
+                return
+            target = self._partial_path(job_id, provider_id)
+            if target.exists():
+                target_data = self._read_partial_for_migration(target)
+                if target_data is None:
+                    return
+                merged = dict(legacy_data)
+                merged.update(target_data)
+                self._write_partial_file(target, merged)
+                legacy.unlink()
+                return
+            try:
+                legacy.rename(target)
+            except OSError:
+                self._write_partial_file(target, legacy_data)
+                legacy.unlink()
+        except OSError:
+            # Read-only or full work dir: keep the old buffer and let the
+            # write path try again.
+            return
+
+    @_per_job_lock
+    def _load_partial(
+        self, job_id: str, provider_id: str | None = None
+    ) -> dict[str, str]:
+        provider_id = provider_id or self._current_provider(job_id)
+        self._adopt_legacy_partial(job_id, provider_id)
+        return self._read_partial_file(self._partial_path(job_id, provider_id))
+
+    @_per_job_lock
+    def _save_partial(
+        self, job_id: str, provider_id: str, translations: dict[str, str]
+    ) -> None:
+        self._adopt_legacy_partial(job_id, provider_id)
+        self._write_partial_file(
+            self._partial_path(job_id, provider_id), translations
+        )
+
+    @_per_job_lock
+    def _delete_partial(self, job_id: str, provider_id: str) -> None:
+        self._partial_path(job_id, provider_id).unlink(missing_ok=True)
 
     def list_jobs(self) -> list[dict]:
         try:
@@ -133,6 +285,12 @@ class JobService:
 
     def get_job(self, job_id: str) -> dict:
         status = self.status(job_id)
+        state = self.load_state(job_id)
+        # Provider and submitted must come from the same buffer.  dt_confirm_model
+        # writes the local state first; the device state is the fallback after a
+        # PC restart.
+        provider_id = state.get("provider_id") or status.get("provider_id")
+        model_name = state.get("model_name") or status.get("model_name")
         options = status.get("options") or {}
         return {
             "job_id": job_id,
@@ -146,9 +304,13 @@ class JobService:
             "chapter_count": status.get("chapter_count", 0),
             "total": status.get("total", 0),
             "status": status.get("status", "exported"),
-            "provider_id": status.get("provider_id"),
-            "model_name": status.get("model_name"),
-            "submitted": len(self._load_partial(job_id)),
+            "provider_id": provider_id,
+            "model_name": model_name,
+            # Snapshot the same provider even if a concurrent confirm_model
+            # lands between the read above and this call.
+            "submitted": len(
+                self._load_partial(job_id, provider_id or PENDING_PROVIDER)
+            ),
             # 17 Q5: always present (empty for jobs exported before it), so a
             # tool consumer can read options.glossary without a nil guard.
             "options": {
@@ -185,6 +347,7 @@ class JobService:
     def _upload_state(self, job_id: str, state: dict) -> None:
         self._upload(job_id, "state.json", state)
 
+    @_per_job_lock
     def submit(self, job_id: str, segments: list[dict]) -> dict:
         status = self.job_meta(job_id)
         known = set(status.get("segment_ids") or [])
@@ -208,9 +371,10 @@ class JobService:
             except ValidationError as error:
                 rejected.append({"id": segment_id, "reason": str(error)})
 
-        merged = self._load_partial(job_id)
+        provider_id = self._current_provider(job_id)
+        merged = self._load_partial(job_id, provider_id)
         merged.update(accepted)
-        self._save_partial(job_id, merged)
+        self._save_partial(job_id, provider_id, merged)
 
         state = self.load_state(job_id)
         state.update(
@@ -231,6 +395,7 @@ class JobService:
             "remaining": max(0, int(status.get("total", 0)) - len(merged)),
         }
 
+    @_per_job_lock
     def confirm_model(
         self, job_id: str, model_name: str, display_name: str | None = None
     ) -> dict:
@@ -240,14 +405,36 @@ class JobService:
         if not model_name:
             raise ValidationError("model_name must not be empty")
         if state.get("provider_id") and state.get("model_name") == model_name:
+            self._adopt_legacy_partial(job_id, state["provider_id"])
+            # A PC restart can lose the local state cache before the buffer;
+            # only raise the reported count, never lower a device-reported one.
+            current = len(self._load_partial(job_id, state["provider_id"]))
+            if current > int(state.get("submitted") or 0):
+                state["submitted"] = current
+                self._save_state(job_id, state)
             return {"job_id": job_id, **state}
         provider_id = provider_id_for(model_name)
-        # Switching models must not send the old model's uncommitted text as
-        # the new model's work (and must not let the device ledger inherit it).
-        # The device keeps each provider's imported ids separately, but the
-        # local partial buffer is per job; start the new provider clean.
-        if state.get("provider_id") and state.get("provider_id") != provider_id:
-            self._save_partial(job_id, {})
+        old_provider = state.get("provider_id")
+        old_key = old_provider if isinstance(old_provider, str) and old_provider else PENDING_PROVIDER
+        # Read the old provider's buffer first, so a pre-confirmation buffer
+        # is adopted before the first provider file is inspected.  Switching
+        # models keeps each provider's uncommitted text in its own file: the
+        # new model starts from whatever it submitted before (usually zero),
+        # and switching back restores the old model's work.  Nothing from the
+        # old model is sent as the new model's text (and the device ledger is
+        # already keyed by provider).
+        self._adopt_legacy_partial(job_id, old_key)
+        translations = self._load_partial(job_id, provider_id)
+        if old_key == PENDING_PROVIDER:
+            pending = self._read_partial_file(
+                self._partial_path(job_id, PENDING_PROVIDER)
+            )
+            if pending:
+                merged = dict(translations)
+                merged.update(pending)
+                self._save_partial(job_id, provider_id, merged)
+                self._delete_partial(job_id, PENDING_PROVIDER)
+                translations = merged
         state.update(
             {
                 "schema": STATE_SCHEMA,
@@ -257,7 +444,7 @@ class JobService:
                 "display_name": (display_name or "").strip() or f"MCP · {model_name}",
                 "confirmed": True,
                 "total": status.get("total", 0),
-                "submitted": len(self._load_partial(job_id)),
+                "submitted": len(translations),
             }
         )
         self._save_state(job_id, state)
@@ -265,18 +452,24 @@ class JobService:
 
     def job_status(self, job_id: str) -> dict:
         status = self.status(job_id)
-        submitted = len(self._load_partial(job_id))
+        state = self.load_state(job_id)
+        provider_id = state.get("provider_id") or status.get("provider_id")
+        model_name = state.get("model_name") or status.get("model_name")
+        submitted = len(
+            self._load_partial(job_id, provider_id or PENDING_PROVIDER)
+        )
         total = int(status.get("total", 0))
         return {
             "job_id": job_id,
             "status": status.get("status", "exported"),
-            "provider_id": status.get("provider_id"),
-            "model_name": status.get("model_name"),
+            "provider_id": provider_id,
+            "model_name": model_name,
             "submitted": submitted,
             "total": total,
             "remaining": max(0, total - submitted),
         }
 
+    @_per_job_lock
     def commit(
         self,
         job_id: str,

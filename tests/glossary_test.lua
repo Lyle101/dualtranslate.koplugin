@@ -413,6 +413,41 @@ do
         default_payload and default_payload.style_guide)
     check("默认保存无 tmp 残留", not exists(Glossary.defaultPath() .. ".tmp"))
 
+    -- 3.4.0: defaults are per target language.  The old shared file is still
+    -- read as a fallback so an upgrade does not lose the user's default.
+    local lang_path = Glossary.defaultPath("zh-Hans")
+    check("默认路径按目标语言",
+        lang_path == data_root .. "/cache/dualtranslate/glossary.default.zh-Hans.json")
+    local lang_saved, lang_err = Glossary.saveDefault({
+        terms = { { source = "Darcy", target = "达西（中）" } },
+        style_guide = "中文默认",
+    }, "zh-Hans")
+    check("按语言保存默认", lang_saved ~= nil, tostring(lang_err))
+    check("语言默认文件落盘", exists(lang_path))
+    local lang_payload = Glossary.loadDefault("zh-Hans")
+    check("按语言读回默认", lang_payload and #lang_payload.terms == 1
+        and lang_payload.terms[1].target == "达西（中）"
+        and not lang_payload.legacy_default,
+        lang_payload and tostring(lang_payload.legacy_default))
+    local legacy_for_other, _, legacy_code = Glossary.loadDefault("ja")
+    check("其他语言回落到旧版共用默认", legacy_for_other
+        and legacy_for_other.legacy_default == true
+        and legacy_code == "legacy"
+        and #legacy_for_other.terms == 2)
+    write(lang_path, "{bad")
+    local corrupt_lang, corrupt_lang_err = Glossary.loadDefault("zh-Hans")
+    check("损坏的语言默认不回落到共用默认", corrupt_lang == nil
+        and tostring(corrupt_lang_err):find("JSON") ~= nil, tostring(corrupt_lang_err))
+    os.remove(lang_path)
+    os.remove(Glossary.defaultPath())
+    local none, _, none_code = Glossary.loadDefault("fr")
+    check("缺语言文件且无旧共用时返回 missing", none == nil
+        and none_code == "missing", tostring(none_code))
+    local traversal = Glossary.defaultPath("../x")
+    check("语言代码不会逃出目录",
+        traversal == data_root .. "/cache/dualtranslate/glossary.default.___x.json",
+        traversal)
+
     local missing, missing_err = Glossary.loadFile(ROOT .. "/nope.json")
     check("缺文件给出原因", missing == nil and tostring(missing_err):find("找不到") ~= nil)
     write(ROOT .. "/empty.json", "")
@@ -528,6 +563,8 @@ do
     write(outside, "original")
     local dir = ROOT .. "/book_tmp_link"
     Tools.mkdir_p(dir)
+    local bad_mode, bad_mode_tmp = Tools.open_temp(dir .. "/glossary.json", "ab")
+    check("非 wb 模式拒绝", bad_mode == nil and type(bad_mode_tmp) == "string")
     local tmp_link = dir .. "/glossary.json.tmp"
     os.execute('ln -s "' .. outside .. '" "' .. tmp_link .. '"')
     if lfs.symlinkattributes and lfs.symlinkattributes(tmp_link, "mode") == "link" then

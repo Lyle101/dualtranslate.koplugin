@@ -190,17 +190,152 @@ def test_submit_merges_and_reports_remaining(service: JobService) -> None:
     assert third["submitted"] == 3
 
 
-def test_confirm_model_switch_clears_uncommitted_partial(service: JobService) -> None:
+def test_confirm_model_keeps_a_buffer_per_provider(service: JobService) -> None:
     service.confirm_model(JOB_ID, "gpt-5")
     service.submit(JOB_ID, [{"id": "s000001", "text": "a"}])
     assert service.job_status(JOB_ID)["submitted"] == 1
-    # A different model must not inherit the first model's uncommitted text.
+    # A different model starts from its own (empty) buffer; the first
+    # model's uncommitted text is neither inherited nor discarded.
     service.confirm_model(JOB_ID, "other")
     assert service.job_status(JOB_ID)["submitted"] == 0
-    # Re-confirming the same model does not throw the buffer away.
     service.submit(JOB_ID, [{"id": "s000002", "text": "b"}])
+    # Re-confirming the same model keeps its buffer.
     service.confirm_model(JOB_ID, "other")
     assert service.job_status(JOB_ID)["submitted"] == 1
+    # Switching back restores the first model's work.
+    service.confirm_model(JOB_ID, "gpt-5")
+    assert service.job_status(JOB_ID)["submitted"] == 1
+
+
+def test_submit_before_confirmation_is_adopted(service: JobService) -> None:
+    # An agent may submit before asking the user for a model name; that
+    # buffer belongs to whichever provider is confirmed next.
+    service.submit(JOB_ID, [{"id": "s000001", "text": "a"}])
+    assert service.job_status(JOB_ID)["submitted"] == 1
+    service.confirm_model(JOB_ID, "gpt-5")
+    assert service.job_status(JOB_ID)["submitted"] == 1
+    work = service._work_dir(JOB_ID)
+    assert (work / "translations.mcp_gpt-5.json").exists()
+    assert not (work / "translations.unconfirmed.json").exists()
+    # A later switch starts clean and does not inherit the pending buffer
+    # (it was already assigned to gpt-5).
+    service.confirm_model(JOB_ID, "other")
+    assert service.job_status(JOB_ID)["submitted"] == 0
+
+
+def test_legacy_partial_is_adopted(service: JobService) -> None:
+    # Upgrading a 3.3.x work dir: one translations.json for the whole job.
+    work = service._work_dir(JOB_ID)
+    (work / "translations.json").write_text(
+        json.dumps({"s000001": "a"}), encoding="utf-8"
+    )
+    service.confirm_model(JOB_ID, "gpt-5")
+    # confirm loads the device state, adopts the legacy file, and reports it.
+    assert service.job_status(JOB_ID)["submitted"] == 1
+    assert (work / "translations.mcp_gpt-5.json").exists()
+    assert not (work / "translations.json").exists()
+
+
+def test_legacy_partial_follows_confirmed_state(
+    service: JobService, tmp_path: Path
+) -> None:
+    # The device already knows the provider (a 3.3.x job), so the single
+    # buffer is adopted by that provider instead of the pending slot.
+    state_path = (
+        tmp_path / "device/cache/dualtranslate/mcp/jobs" / JOB_ID / "state.json"
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update({"status": "submitting", "provider_id": "mcp:gpt-5",
+                  "model_name": "gpt-5", "submitted": 1, "total": 3})
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    work = service._work_dir(JOB_ID)
+    (work / "translations.json").write_text(
+        json.dumps({"s000001": "a"}), encoding="utf-8"
+    )
+    assert service.job_status(JOB_ID)["submitted"] == 1
+    assert (work / "translations.mcp_gpt-5.json").exists()
+    assert not (work / "translations.unconfirmed.json").exists()
+
+
+def test_commit_does_not_use_another_providers_buffer(service: JobService) -> None:
+    service.confirm_model(JOB_ID, "gpt-5")
+    service.submit(
+        JOB_ID,
+        [
+            {"id": "s000001", "text": "a"},
+            {"id": "s000002", "text": "b"},
+            {"id": "s000003", "text": "c"},
+        ],
+    )
+    service.confirm_model(JOB_ID, "other")
+    reply = service.commit(JOB_ID)
+    assert reply["ok"] is False
+    assert reply["status"] == "incomplete_job"
+    assert reply["remaining"] == 3
+    # Switching back restores the first model's complete buffer, so commit
+    # proceeds (and stops only because LocalTransport cannot run dtctl).
+    service.confirm_model(JOB_ID, "gpt-5")
+    reply = service.commit(JOB_ID)
+    assert reply["ok"] is False
+    assert reply["status"] == "import_unavailable"
+    assert reply["translated"] == 3
+
+
+def test_legacy_partial_merges_when_state_has_provider(
+    service: JobService, tmp_path: Path
+) -> None:
+    # Real 3.3.x upgrade with a confirmed model: the legacy buffer is merged
+    # into that provider's file, and the per-provider file wins conflicts.
+    state_path = (
+        tmp_path / "device/cache/dualtranslate/mcp/jobs" / JOB_ID / "state.json"
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update({"status": "submitting", "provider_id": "mcp:gpt-5",
+                  "model_name": "gpt-5", "submitted": 2, "total": 3})
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    work = service._work_dir(JOB_ID)
+    (work / "translations.mcp_gpt-5.json").write_text(
+        json.dumps({"s000001": "old", "s000002": "kept"}), encoding="utf-8"
+    )
+    (work / "translations.json").write_text(
+        json.dumps({"s000001": "legacy", "s000003": "new"}), encoding="utf-8"
+    )
+    assert service.job_status(JOB_ID)["submitted"] == 3
+    merged = json.loads((work / "translations.mcp_gpt-5.json").read_text(encoding="utf-8"))
+    assert merged["s000001"] == "old"
+    assert merged["s000002"] == "kept"
+    assert merged["s000003"] == "new"
+    assert not (work / "translations.json").exists()
+
+
+def test_corrupt_legacy_partial_is_not_deleted(service: JobService) -> None:
+    # A damaged buffer is user data too: never read it as {}, then unlink it.
+    work = service._work_dir(JOB_ID)
+    (work / "translations.json").write_text("{not json", encoding="utf-8")
+    service.confirm_model(JOB_ID, "gpt-5")
+    assert (work / "translations.json").read_text(encoding="utf-8") == "{not json"
+    assert service.job_status(JOB_ID)["submitted"] == 0
+
+
+def test_legacy_partial_merges_into_existing_provider_file(
+    service: JobService,
+) -> None:
+    work = service._work_dir(JOB_ID)
+    (work / "translations.mcp_gpt-5.json").write_text(
+        json.dumps({"s000001": "old", "s000002": "kept"}), encoding="utf-8"
+    )
+    (work / "translations.json").write_text(
+        json.dumps({"s000001": "legacy", "s000003": "new"}), encoding="utf-8"
+    )
+    service.confirm_model(JOB_ID, "gpt-5")
+    assert service.job_status(JOB_ID)["submitted"] == 3
+    merged = json.loads((work / "translations.mcp_gpt-5.json").read_text(encoding="utf-8"))
+    # The pre-confirmation buffer is the current session's work, so it wins
+    # on a conflicting id; every other id survives.
+    assert merged["s000001"] == "legacy"
+    assert merged["s000002"] == "kept"
+    assert merged["s000003"] == "new"
+    assert not (work / "translations.json").exists()
 
 
 def test_commit_requires_model_confirmation(service: JobService) -> None:

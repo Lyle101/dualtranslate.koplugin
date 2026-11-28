@@ -370,39 +370,73 @@ end
 -- never touches it.
 -- ---------------------------------------------------------------------------
 
-function Glossary.defaultPath()
+-- The default is per target language: a translator's Chinese terms for an
+-- English book are not the right default for a Japanese book, and the old
+-- single file silently shared both.  A code is sanitized so it can never
+-- leave the dualtranslate directory; defaultPath() without a code keeps the
+-- pre-3.4 path for reading an upgraded installation's file.
+local function language_key(target_lang)
+    if type(target_lang) ~= "string" or target_lang == "" then return nil end
+    return (target_lang:gsub("[^%w_-]", "_"))
+end
+
+function Glossary.defaultPath(target_lang)
     local DataStorage = require("datastorage")
-    return DataStorage:getDataDir() .. "/cache/dualtranslate/glossary.default.json"
+    local base = DataStorage:getDataDir() .. "/cache/dualtranslate/"
+    local key = language_key(target_lang)
+    if key then return base .. "glossary.default." .. key .. ".json" end
+    return base .. "glossary.default.json"
 end
 
 -- Read and normalize a glossary payload from an explicit file.  Returns
 -- nil + a readable reason, so a damaged export cannot silently import as
 -- "no terms".
+-- Third return value is a stable reason code ("missing", "empty",
+-- "invalid", "empty_terms"): loadDefault falls back to the old shared file
+-- only on "missing", and must not break when a message is reworded.
 function Glossary.loadFile(path)
-    if type(path) ~= "string" or path == "" then return nil, "缺少文件路径" end
+    if type(path) ~= "string" or path == "" then
+        return nil, "缺少文件路径", "invalid"
+    end
     local file = io.open(path, "rb")
-    if not file then return nil, "找不到文件：" .. path end
+    if not file then return nil, "找不到文件：" .. path, "missing" end
     local raw = file:read("*a")
     file:close()
-    if not raw or raw == "" then return nil, "文件是空的" end
+    if not raw or raw == "" then return nil, "文件是空的", "empty" end
     local ok, data = pcall(JSON.decode, raw)
-    if not ok or type(data) ~= "table" then return nil, "文件不是有效的术语表 JSON" end
+    if not ok or type(data) ~= "table" then
+        return nil, "文件不是有效的术语表 JSON", "invalid"
+    end
     local terms = normalize_terms(data.terms)
     local style = type(data.style_guide) == "string" and trim(data.style_guide) or ""
     if #style > Glossary.MAX_STYLE_GUIDE_BYTES then
         style = Tools.utf8_head(style, Glossary.MAX_STYLE_GUIDE_BYTES)
     end
-    if #terms == 0 and style == "" then return nil, "文件里没有术语" end
+    if #terms == 0 and style == "" then
+        return nil, "文件里没有术语", "empty_terms"
+    end
     if style == "" then style = Glossary.DEFAULT_STYLE_GUIDE end
     return { terms = terms, style_guide = style }
 end
 
-function Glossary.loadDefault()
-    return Glossary.loadFile(Glossary.defaultPath())
+-- Missing per-language file falls back to the pre-3.4 shared default once, so
+-- an upgrade does not make the user's saved default disappear.  A corrupt
+-- per-language file is reported instead of silently replaced by the shared
+-- one.  legacy_default lets the menu say where the terms came from.
+function Glossary.loadDefault(target_lang)
+    local payload, err, code = Glossary.loadFile(Glossary.defaultPath(target_lang))
+    if not payload and language_key(target_lang) and code == "missing" then
+        local legacy = Glossary.loadFile(Glossary.defaultPath())
+        if legacy then
+            legacy.legacy_default = true
+            return legacy, nil, "legacy"
+        end
+    end
+    return payload, err, code
 end
 
-function Glossary.saveDefault(data)
-    return saveEncoded(Glossary.defaultPath(), data)
+function Glossary.saveDefault(data, target_lang)
+    return saveEncoded(Glossary.defaultPath(target_lang), data)
 end
 
 -- Books that carry a glossary, newest first, excluding exclude_dir (the book
